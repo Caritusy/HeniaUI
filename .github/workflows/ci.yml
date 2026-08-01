@@ -11,7 +11,7 @@ jobs:
       matrix:
         configuration: [Debug, Release]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure
         run: cmake -S . -B out/build -A x64 -DHENIAUI_BUILD_TESTS=ON -DHENIAUI_BUILD_SANDBOX=ON
       - name: Build
@@ -24,7 +24,7 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure
         run: cmake -S . -B out/build -DCMAKE_BUILD_TYPE=Release -DHENIAUI_BUILD_TESTS=ON -DHENIAUI_BUILD_SANDBOX=ON
       - name: Build
