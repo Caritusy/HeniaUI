@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B out/build -A x64 -DHENIAUI_BUILD_TESTS=ON -DHENIAUI_BUILD_SANDBOX=ON
+      - name: Build
+        run: cmake --build out/build --config ${{ matrix.configuration }} --parallel
+      - name: Test
+        run: ctest --test-dir out/build -C ${{ matrix.configuration }} --output-on-failure
+      - name: Sandbox
+        run: ./out/build/${{ matrix.configuration }}/HeniaUISandbox.exe
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B out/build -DCMAKE_BUILD_TYPE=Release -DHENIAUI_BUILD_TESTS=ON -DHENIAUI_BUILD_SANDBOX=ON
+      - name: Build
+        run: cmake --build out/build --parallel
+      - name: Test
+        run: ctest --test-dir out/build --output-on-failure
+      - name: Sandbox
+        run: ./out/build/HeniaUISandbox
