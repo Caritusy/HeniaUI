@@ -1,6 +1,10 @@
 #include "henia/ui/BatchCompiler.h"
 #include "henia/ui/Canvas.h"
 #include "henia/ui/Frame.h"
+#include "henia/ui/resource/TextureStore.h"
+#include "henia/ui/text/FontStore.h"
+#include "henia/ui/text/TextLayout.h"
+#include "henia/ui/text/Utf8.h"
 
 #include <array>
 #include <cstdlib>
@@ -128,6 +132,63 @@ void testNestedClipIntersection() {
         "nested clip was not intersected");
 }
 
+void testUtf8Validation() {
+    const std::string_view text = "A\xE4\xB8\xAD\xF0\x9F\x94\xA5";
+    const Utf8Codepoint ascii = decodeUtf8(text, 0);
+    const Utf8Codepoint cjk = decodeUtf8(text, 1);
+    const Utf8Codepoint emoji = decodeUtf8(text, 4);
+    require(ascii.valid && ascii.value == U'A' && ascii.bytes == 1, "ASCII decoding failed");
+    require(cjk.valid && cjk.value == U'\u4E2D' && cjk.bytes == 3, "CJK decoding failed");
+    require(emoji.valid && emoji.value == U'\U0001F525' && emoji.bytes == 4, "four-byte UTF-8 decoding failed");
+
+    const std::string_view overlong = "\xC0\xAF";
+    const Utf8Codepoint invalid = decodeUtf8(overlong, 0);
+    require(!invalid.valid && invalid.bytes == 1, "overlong UTF-8 was accepted");
+}
+
+void testTextRunsAreCachedAndBatched() {
+    TextureStore textures;
+    const std::array<std::byte, 16> pixels{};
+    const TextureHandle atlas = textures.create(TextureFormat::Alpha8, 4, 4, 4, pixels);
+    require(atlas.valid(), "test atlas creation failed");
+
+    FontStore fonts;
+    std::vector<GlyphMetrics> glyphs{
+        {U'?', {{0.0F, 0.0F}, {0.25F, 0.25F}}, {5.0F, 8.0F}, {0.0F, 7.0F}, 6.0F},
+        {U'A', {{0.25F, 0.0F}, {0.5F, 0.25F}}, {6.0F, 8.0F}, {0.0F, 7.0F}, 7.0F},
+        {U'V', {{0.5F, 0.0F}, {0.75F, 0.25F}}, {6.0F, 8.0F}, {0.0F, 7.0F}, 7.0F},
+    };
+    std::vector<KerningPair> kerning{{U'A', U'V', -1.0F}};
+    const FontHandle font = fonts.add({
+        .atlas = atlas,
+        .pixelSize = 10.0F,
+        .ascent = 8.0F,
+        .descent = 2.0F,
+        .lineGap = 1.0F,
+        .glyphs = std::move(glyphs),
+        .kerning = std::move(kerning),
+    });
+    require(font.valid(), "test font creation failed");
+
+    TextRunCache cache(fonts);
+    cache.reserve(8, 16);
+    TextPainter painter(cache);
+    const TextMetrics firstMetrics = painter.measure(font, 20.0F, "AVA");
+    const TextMetrics secondMetrics = painter.measure(font, 20.0F, "AVA");
+    require(firstMetrics.width == 40.0F && firstMetrics.height == 22.0F, "scaled text metrics are incorrect");
+    require(secondMetrics.width == firstMetrics.width, "cached metrics changed");
+    require(cache.misses() == 1 && cache.hits() == 1, "text run cache did not hit");
+
+    Frame frame;
+    frame.reserve(16, 4);
+    Canvas& canvas = frame.begin();
+    canvas.fillRect({{0.0F, 0.0F}, {100.0F, 40.0F}}, {}, 4.0F);
+    painter.draw(canvas, font, 20.0F, {4.0F, 4.0F}, {}, "AVA");
+    const RenderPacket& packet = frame.finish();
+    require(packet.instances().size() == 4, "text run did not emit three glyph instances");
+    require(packet.batches().size() == 1, "text and shape did not share one batch");
+}
+
 } // namespace
 
 int main() {
@@ -136,6 +197,8 @@ int main() {
     testTextureTableOverflowStartsOneNewBatch();
     testWarmFrameDoesNotGrow();
     testNestedClipIntersection();
+    testUtf8Validation();
+    testTextRunsAreCachedAndBatched();
     std::cout << "HeniaUI core tests passed\n";
     return EXIT_SUCCESS;
 }

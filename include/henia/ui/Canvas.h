@@ -29,6 +29,11 @@ public:
     void strokeRect(Rect rect, Color color, float rounding, float thickness) noexcept;
     void image(TextureHandle texture, Rect rect, Color tint = {}) noexcept;
     void glyphs(TextureHandle atlas, std::span<const GlyphQuad> glyphs, Color color) noexcept;
+    void glyphs(
+        TextureHandle atlas,
+        Vec2 origin,
+        std::span<const GlyphQuad> glyphs,
+        Color color) noexcept;
 
     void setBlendMode(BlendMode blendMode) noexcept;
     [[nodiscard]] BlendMode blendMode() const noexcept;

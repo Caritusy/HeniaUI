@@ -134,6 +134,14 @@ void Canvas::glyphs(
     TextureHandle atlas,
     std::span<const GlyphQuad> glyphQuads,
     Color color) noexcept {
+    glyphs(atlas, {}, glyphQuads, color);
+}
+
+void Canvas::glyphs(
+    TextureHandle atlas,
+    Vec2 origin,
+    std::span<const GlyphQuad> glyphQuads,
+    Color color) noexcept {
     if (!atlas.valid() || !visible(color)) {
         ++mRejectedCommands;
         return;
@@ -148,7 +156,10 @@ void Canvas::glyphs(
         DrawCommand command{};
         command.kind = PrimitiveKind::Glyph;
         command.texture = atlas;
-        command.bounds = glyph.bounds;
+        command.bounds = {
+            {glyph.bounds.min.x + origin.x, glyph.bounds.min.y + origin.y},
+            {glyph.bounds.max.x + origin.x, glyph.bounds.max.y + origin.y},
+        };
         command.uv = glyph.uv;
         command.color = color;
         append(command);

@@ -14,6 +14,10 @@ add_library(HeniaUI STATIC
     src/DisplayList.cpp
     src/Frame.cpp
     src/RenderPacket.cpp
+    src/resource/TextureStore.cpp
+    src/text/FontStore.cpp
+    src/text/TextLayout.cpp
+    src/text/Utf8.cpp
 )
 add_library(HeniaUI::Core ALIAS HeniaUI)
 
@@ -37,11 +41,99 @@ set_target_properties(HeniaUI PROPERTIES
     FOLDER "HeniaUI"
 )
 
+if(WIN32)
+    add_library(HeniaUIWin32 STATIC
+        src/platform/win32/Win32FontLoader.cpp
+    )
+    add_library(HeniaUI::Win32 ALIAS HeniaUIWin32)
+    target_compile_features(HeniaUIWin32 PUBLIC cxx_std_23)
+    target_include_directories(
+        HeniaUIWin32
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    )
+    target_link_libraries(HeniaUIWin32 PUBLIC HeniaUI::Core PRIVATE gdi32)
+    if(MSVC)
+        target_compile_options(HeniaUIWin32 PRIVATE /W4 /permissive- /utf-8 /GR-)
+    endif()
+    set_target_properties(HeniaUIWin32 PROPERTIES
+        CXX_EXTENSIONS OFF
+        EXPORT_NAME Win32
+        FOLDER "HeniaUI/Platform"
+    )
+
+    add_library(HeniaUIOpenGL STATIC
+        src/backend/opengl/OpenGlRenderer.cpp
+    )
+    add_library(HeniaUI::OpenGL ALIAS HeniaUIOpenGL)
+    target_compile_features(HeniaUIOpenGL PUBLIC cxx_std_23)
+    target_include_directories(
+        HeniaUIOpenGL
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    )
+    target_link_libraries(HeniaUIOpenGL PUBLIC HeniaUI::Core PRIVATE opengl32)
+    if(MSVC)
+        target_compile_options(HeniaUIOpenGL PRIVATE /W4 /permissive- /utf-8 /GR-)
+    endif()
+    set_target_properties(HeniaUIOpenGL PROPERTIES
+        CXX_EXTENSIONS OFF
+        EXPORT_NAME OpenGL
+        FOLDER "HeniaUI/Backends"
+    )
+
+    add_library(HeniaUID3D12 STATIC
+        src/backend/d3d12/D3D12Renderer.cpp
+    )
+    add_library(HeniaUI::D3D12 ALIAS HeniaUID3D12)
+    target_compile_features(HeniaUID3D12 PUBLIC cxx_std_23)
+    target_include_directories(
+        HeniaUID3D12
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    )
+    target_link_libraries(
+        HeniaUID3D12
+        PUBLIC HeniaUI::Core
+        PRIVATE d3d12 d3dcompiler dxgi
+    )
+    target_compile_definitions(HeniaUID3D12 PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+    if(MSVC)
+        target_compile_options(HeniaUID3D12 PRIVATE /W4 /permissive- /utf-8 /GR-)
+    endif()
+    set_target_properties(HeniaUID3D12 PROPERTIES
+        CXX_EXTENSIONS OFF
+        EXPORT_NAME D3D12
+        FOLDER "HeniaUI/Backends"
+    )
+endif()
+
 if(HENIAUI_BUILD_SANDBOX)
     add_executable(HeniaUISandbox sandbox/main.cpp)
     target_link_libraries(HeniaUISandbox PRIVATE HeniaUI::Core)
     target_compile_features(HeniaUISandbox PRIVATE cxx_std_23)
     set_target_properties(HeniaUISandbox PROPERTIES FOLDER "HeniaUI/Sandbox")
+
+    if(WIN32)
+        add_executable(HeniaUIVisualSandbox WIN32 sandbox/win32/VisualSandbox.cpp)
+        target_link_libraries(
+            HeniaUIVisualSandbox
+            PRIVATE
+                HeniaUI::Core
+                HeniaUI::OpenGL
+                HeniaUI::Win32
+                opengl32
+                user32
+        )
+        target_compile_features(HeniaUIVisualSandbox PRIVATE cxx_std_23)
+        if(MSVC)
+            target_compile_options(HeniaUIVisualSandbox PRIVATE /W4 /permissive- /utf-8 /GR-)
+        endif()
+        set_target_properties(HeniaUIVisualSandbox PROPERTIES FOLDER "HeniaUI/Sandbox")
+    endif()
 endif()
 
 if(HENIAUI_BUILD_TESTS)
@@ -51,6 +143,34 @@ if(HENIAUI_BUILD_TESTS)
     target_compile_features(HeniaUITests PRIVATE cxx_std_23)
     set_target_properties(HeniaUITests PROPERTIES FOLDER "HeniaUI/Tests")
     add_test(NAME HeniaUI.Core COMMAND HeniaUITests)
+
+    if(WIN32)
+        add_executable(HeniaUIWin32Tests tests/Win32Tests.cpp)
+        target_link_libraries(HeniaUIWin32Tests PRIVATE HeniaUI::Core HeniaUI::Win32)
+        target_compile_features(HeniaUIWin32Tests PRIVATE cxx_std_23)
+        if(MSVC)
+            target_compile_options(HeniaUIWin32Tests PRIVATE /W4 /permissive- /utf-8 /GR-)
+        endif()
+        set_target_properties(HeniaUIWin32Tests PROPERTIES FOLDER "HeniaUI/Tests")
+        add_test(NAME HeniaUI.Win32 COMMAND HeniaUIWin32Tests)
+
+        add_executable(HeniaUID3D12Tests tests/D3D12Tests.cpp)
+        target_link_libraries(
+            HeniaUID3D12Tests
+            PRIVATE
+                HeniaUI::Core
+                HeniaUI::D3D12
+                d3d12
+                dxgi
+        )
+        target_compile_features(HeniaUID3D12Tests PRIVATE cxx_std_23)
+        target_compile_definitions(HeniaUID3D12Tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        if(MSVC)
+            target_compile_options(HeniaUID3D12Tests PRIVATE /W4 /permissive- /utf-8 /GR-)
+        endif()
+        set_target_properties(HeniaUID3D12Tests PROPERTIES FOLDER "HeniaUI/Tests")
+        add_test(NAME HeniaUI.D3D12 COMMAND HeniaUID3D12Tests)
+    endif()
 endif()
 
 install(
@@ -61,6 +181,36 @@ install(
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
+if(TARGET HeniaUIWin32)
+    install(
+        TARGETS HeniaUIWin32
+        EXPORT HeniaUITargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+endif()
+if(TARGET HeniaUIOpenGL)
+    install(
+        TARGETS HeniaUIOpenGL
+        EXPORT HeniaUITargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+endif()
+if(TARGET HeniaUID3D12)
+    install(
+        TARGETS HeniaUID3D12
+        EXPORT HeniaUITargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+endif()
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(
     EXPORT HeniaUITargets

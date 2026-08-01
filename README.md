@@ -4,7 +4,7 @@ HeniaUI is a compact retained UI and rendering engine for native C++ application
 
 The project is intentionally independent from ImGui and from any host application's hook, SDK, runtime, or input implementation. A host can embed the library with `add_subdirectory`, consume an installed CMake package, or build the included standalone sandbox.
 
-> Status: early rendering-core development. The current public API records shapes, images, lines, and pre-shaped glyph quads, then compiles them into ordered GPU-ready batches. Native OpenGL and Direct3D 12 submission backends, text shaping, and retained widgets are on the roadmap.
+> Status: active engine development. The current public API records analytic shapes, images, lines, and cached UTF-8 text runs, compiles them into ordered GPU-ready batches, and submits them through native OpenGL 3.3 or Direct3D 12 renderers. Retained widgets and host adapters are the next milestone.
 
 ## Why another UI renderer?
 
@@ -51,11 +51,23 @@ ctest --preset dev
 
 The core library itself is platform-neutral and has no external dependencies. The preset is merely the repository's ready-to-use Windows configuration.
 
+Windows builds also produce `HeniaUIVisualSandbox.exe`. It owns a normal Win32/WGL window, builds a Segoe UI alpha atlas through the optional Win32 platform target, and renders the complete interface through `HeniaUI::OpenGL` without ImGui.
+
 For use as a subproject:
 
 ```cmake
 add_subdirectory(path/to/HeniaUI)
 target_link_libraries(MyApplication PRIVATE HeniaUI::Core)
+```
+
+Optional Windows targets are exported as:
+
+```cmake
+target_link_libraries(MyApplication PRIVATE
+    HeniaUI::Core
+    HeniaUI::Win32
+    HeniaUI::OpenGL
+    HeniaUI::D3D12)
 ```
 
 ## Rendering invariants
@@ -67,14 +79,16 @@ target_link_libraries(MyApplication PRIVATE HeniaUI::Core)
 - Capacity is retained between frames.
 - Invalid or invisible primitives do not reach the render packet.
 - RTTI is not required by the library.
+- OpenGL consumes an already-current context and restores the pipeline state it changes.
+- D3D12 records into a host-owned command list and never waits from the frame path.
+- D3D12 instance memory is split into fence-owned submission slots.
 
 ## Roadmap
 
-1. Native OpenGL renderer and visible Win32 sandbox.
-2. FreeType glyph atlas, UTF-8 layout, and cached text runs.
-3. Native Direct3D 12 renderer with fence-safe upload rings.
-4. Retained nodes, dirty layout/paint propagation, and input routing.
-5. Optional debugging inspectors kept outside production targets.
+1. Retained nodes, dirty layout/paint propagation, and input routing.
+2. Reusable SaaS-oriented controls and theme tokens.
+3. Host adapters for multi-context OpenGL and multi-surface Direct3D 12 applications.
+4. Optional debugging inspectors kept outside production targets.
 
 ## License
 
