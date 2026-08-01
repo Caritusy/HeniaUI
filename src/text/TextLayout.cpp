@@ -15,6 +15,20 @@ void TextRunCache::reserve(std::size_t entries, std::size_t glyphsPerEntry) {
     mGlyphReserve = glyphsPerEntry;
 }
 
+void TextRunCache::setMaximumEntries(std::size_t maximumEntries) noexcept {
+    mMaximumEntries = maximumEntries;
+    if (mMaximumEntries == 0) {
+        clear();
+        return;
+    }
+    while (mEntries.size() > mMaximumEntries) {
+        const std::size_t last = mEntries.size() - 1;
+        removeIndex(keyHash(mEntries[last].font, mEntries[last].size, mEntries[last].text), last);
+        mEntries.pop_back();
+    }
+    mEvictionCursor = mEntries.empty() ? 0 : mEvictionCursor % mEntries.size();
+}
+
 const TextRun* TextRunCache::layout(FontHandle font, float size, std::string_view text) {
     if (size <= 0.0F || text.empty()) {
         return nullptr;
@@ -34,6 +48,10 @@ const TextRun* TextRunCache::layout(FontHandle font, float size, std::string_vie
         return nullptr;
     }
 
+    if (mMaximumEntries == 0) {
+        return nullptr;
+    }
+
     Entry entry{};
     entry.font = font;
     entry.size = size;
@@ -44,14 +62,25 @@ const TextRun* TextRunCache::layout(FontHandle font, float size, std::string_vie
     }
 
     ++mMisses;
-    mEntries.push_back(std::move(entry));
-    mIndex.emplace(hash, mEntries.size() - 1);
-    return &mEntries.back().run;
+    if (mEntries.size() < mMaximumEntries) {
+        mEntries.push_back(std::move(entry));
+        mIndex.emplace(hash, mEntries.size() - 1);
+        return &mEntries.back().run;
+    }
+
+    const std::size_t index = mEvictionCursor;
+    Entry& replaced = mEntries[index];
+    removeIndex(keyHash(replaced.font, replaced.size, replaced.text), index);
+    replaced = std::move(entry);
+    mIndex.emplace(hash, index);
+    mEvictionCursor = (mEvictionCursor + 1) % mEntries.size();
+    return &replaced.run;
 }
 
 void TextRunCache::clear() noexcept {
     mEntries.clear();
     mIndex.clear();
+    mEvictionCursor = 0;
 }
 
 std::size_t TextRunCache::size() const noexcept { return mEntries.size(); }
@@ -59,6 +88,16 @@ std::size_t TextRunCache::size() const noexcept { return mEntries.size(); }
 std::uint64_t TextRunCache::hits() const noexcept { return mHits; }
 
 std::uint64_t TextRunCache::misses() const noexcept { return mMisses; }
+
+void TextRunCache::removeIndex(std::uint64_t hash, std::size_t entryIndex) noexcept {
+    const auto [begin, end] = mIndex.equal_range(hash);
+    for (auto iterator = begin; iterator != end; ++iterator) {
+        if (iterator->second == entryIndex) {
+            mIndex.erase(iterator);
+            return;
+        }
+    }
+}
 
 bool TextRunCache::keyMatches(
     const Entry& entry,

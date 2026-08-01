@@ -182,6 +182,15 @@ void testTextRunsAreCachedAndBatched() {
     require(secondMetrics.width == firstMetrics.width, "cached metrics changed");
     require(cache.misses() == 1 && cache.hits() == 1, "text run cache did not hit");
 
+    cache.setMaximumEntries(2);
+    static_cast<void>(painter.measure(font, 20.0F, "A"));
+    static_cast<void>(painter.measure(font, 20.0F, "V"));
+    static_cast<void>(painter.measure(font, 20.0F, "AV"));
+    require(cache.size() == 2, "dynamic text exceeded the configured cache bound");
+    const std::uint64_t missesBeforeRevisit = cache.misses();
+    static_cast<void>(painter.measure(font, 20.0F, "A"));
+    require(cache.misses() == missesBeforeRevisit + 1, "evicted text unexpectedly remained indexed");
+
     Frame frame;
     frame.reserve(16, 4);
     Canvas& canvas = frame.begin();

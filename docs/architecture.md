@@ -7,6 +7,7 @@ HeniaUI deliberately separates retained 2D interface work from general-purpose 3
 `UiDocument` owns a widget tree. Layout and paint dirtiness propagate to the root. A stable document returns the same immutable `RenderPacket`, so both CPU composition and backend instance upload are skipped. `Canvas` remains available as the low-level immediate recorder for custom widgets and generated diagrams.
 
 Text is decoded as strict UTF-8, shaped into cached text runs, and rendered from texture atlases. The Win32 font loader is optional and is not part of the platform-neutral core.
+The text-run cache has a configurable maximum entry count and reuses old slots, so rapidly changing telemetry strings cannot cause unbounded process-lifetime growth.
 
 ## 3D instance pipeline
 
