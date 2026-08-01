@@ -14,6 +14,7 @@ struct OpenGlRenderStatistics final {
     std::uint64_t frames = 0;
     std::uint64_t drawCalls = 0;
     std::uint64_t submittedInstances = 0;
+    std::uint64_t instanceUploads = 0;
     std::uint64_t textureUploads = 0;
     std::uint64_t rejectedFrames = 0;
 };

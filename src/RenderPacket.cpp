@@ -1,6 +1,16 @@
 #include "henia/ui/RenderPacket.h"
 
+#include <atomic>
+
 namespace henia::ui {
+namespace {
+
+std::atomic_uint64_t gNextPacketIdentity{1};
+
+} // namespace
+
+RenderPacket::RenderPacket() noexcept
+    : mIdentity(gNextPacketIdentity.fetch_add(1, std::memory_order_relaxed)) {}
 
 void RenderPacket::reserve(std::size_t instanceCapacity, std::size_t batchCapacity) {
     const std::size_t previousInstances = mInstances.capacity();
@@ -30,6 +40,10 @@ std::span<const DrawInstance> RenderPacket::instances() const noexcept { return 
 std::span<const DrawBatch> RenderPacket::batches() const noexcept { return mBatches; }
 
 const PacketStatistics& RenderPacket::statistics() const noexcept { return mStatistics; }
+
+std::uint64_t RenderPacket::identity() const noexcept { return mIdentity; }
+
+std::uint64_t RenderPacket::revision() const noexcept { return mRevision; }
 
 std::size_t RenderPacket::instanceCapacity() const noexcept { return mInstances.capacity(); }
 

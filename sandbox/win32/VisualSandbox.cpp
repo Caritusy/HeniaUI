@@ -1,7 +1,16 @@
 #include "henia/ui/Frame.h"
 #include "henia/ui/backend/opengl/OpenGlRenderer.h"
+#include "henia/gfx/Math.h"
+#include "henia/gfx/ShapeBatch3D.h"
+#include "henia/gfx/backend/opengl/OpenGlRenderDevice.h"
 #include "henia/ui/platform/win32/Win32FontLoader.h"
+#include "henia/ui/platform/win32/Win32InputAdapter.h"
 #include "henia/ui/text/TextLayout.h"
+#include "henia/ui/widget/UiDocument.h"
+#include "henia/ui/widget/controls/Button.h"
+#include "henia/ui/widget/controls/Label.h"
+#include "henia/ui/widget/controls/NumericInput.h"
+#include "henia/ui/widget/controls/Panel.h"
 
 #define NOMINMAX
 #include <Windows.h>
@@ -38,6 +47,10 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wordParameter
     }
     if (message == WM_KEYDOWN && wordParameter == VK_ESCAPE) {
         DestroyWindow(window);
+        return 0;
+    }
+    auto* input = reinterpret_cast<Win32InputAdapter*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (input != nullptr && input->handleMessage(window, message, wordParameter, longParameter)) {
         return 0;
     }
     return DefWindowProcW(window, message, wordParameter, longParameter);
@@ -156,7 +169,7 @@ struct NativeWindow final {
     }
 };
 
-void drawInterface(
+[[maybe_unused]] void drawInterface(
     Canvas& canvas,
     TextPainter& text,
     FontHandle font,
@@ -254,12 +267,104 @@ void drawInterface(
     canvas.polyline(samples, accent, 2.0F, false);
 }
 
+struct SandboxControls final {
+    void lineWidthChanged(double value) noexcept { lineWidth = value; }
+    void toggleAnimation() noexcept { animationPaused = !animationPaused; }
+
+    double lineWidth = 1.75;
+    bool animationPaused = false;
+};
+
+[[nodiscard]] std::vector<henia::gfx::BoxInstance> createBoxField(float lineWidth) {
+    using namespace henia::gfx;
+    constexpr int columns = 24;
+    constexpr int rows = 10;
+    constexpr int layers = 24;
+    constexpr float spacing = 1.35F;
+    std::vector<BoxInstance> boxes;
+    boxes.reserve(static_cast<std::size_t>(columns * rows * layers));
+    for (int z = 0; z < layers; ++z) {
+        for (int y = 0; y < rows; ++y) {
+            for (int x = 0; x < columns; ++x) {
+                const float left = (static_cast<float>(x) - static_cast<float>(columns - 1) * 0.5F) * spacing;
+                const float bottom = (static_cast<float>(y) - static_cast<float>(rows - 1) * 0.5F) * spacing;
+                const float front = (static_cast<float>(z) - static_cast<float>(layers - 1) * 0.5F) * spacing;
+                const std::size_t index = boxes.size();
+                boxes.push_back({
+                    .minimum = {left - 0.40F, bottom - 0.40F, front - 0.40F},
+                    .lineWidth = lineWidth,
+                    .maximum = {left + 0.40F, bottom + 0.40F, front + 0.40F},
+                    .hueOffset = static_cast<float>(index % 997U) / 997.0F,
+                    .color = {0.88F, 0.94F, 1.0F, 0.34F},
+                    .effects = BoxEffect::HueCycle,
+                });
+            }
+        }
+    }
+    return boxes;
+}
+
+[[nodiscard]] std::unique_ptr<Panel> createOverlay(
+    FontHandle font,
+    SandboxControls& controls) {
+    auto root = std::make_unique<Panel>(PanelStyle{
+        .padding = {28.0F, 28.0F, 28.0F, 28.0F},
+        .gap = 0.0F,
+        .direction = LayoutDirection::Column,
+        .stretchCrossAxis = false,
+    });
+    Panel& card = root->emplaceChild<Panel>(PanelStyle{
+        .background = {0.025F, 0.037F, 0.057F, 0.93F},
+        .border = {0.12F, 0.20F, 0.28F, 1.0F},
+        .borderWidth = 1.0F,
+        .radius = 14.0F,
+        .padding = {20.0F, 18.0F, 20.0F, 20.0F},
+        .gap = 11.0F,
+        .direction = LayoutDirection::Column,
+        .stretchCrossAxis = false,
+    });
+    card.setLayoutParameters({.width = 390.0F, .height = 292.0F});
+    card.emplaceChild<Label>(
+        "HeniaUI / GPU instance field",
+        LabelStyle{font, 22.0F, {0.90F, 0.95F, 0.98F, 1.0F}});
+    card.emplaceChild<Label>(
+        "5,760 boxes  /  1 draw call  /  zero CPU tessellation",
+        LabelStyle{font, 12.5F, {0.48F, 0.59F, 0.67F, 1.0F}});
+    card.emplaceChild<Label>(
+        "Camera and hue animate through frame constants.\nStatic instances stay resident on the GPU.",
+        LabelStyle{font, 13.0F, {0.64F, 0.73F, 0.79F, 1.0F}});
+    NumericInput& width = card.emplaceChild<NumericInput>(
+        controls.lineWidth,
+        NumericInputStyle{
+            .font = font,
+            .fontSize = 14.0F,
+            .controlWidth = 190.0F,
+            .controlHeight = 38.0F,
+            .stepButtonWidth = 40.0F,
+        });
+    width.setRange(0.5, 6.0);
+    width.setStep(0.25);
+    width.setPrecision(2);
+    width.setOnValueChanged(
+        Callback<double>::bind<SandboxControls, &SandboxControls::lineWidthChanged>(controls));
+    Button& toggle = card.emplaceChild<Button>(
+        "Pause / resume camera",
+        ButtonStyle{.font = font, .fontSize = 14.0F});
+    toggle.setLayoutParameters({.width = 190.0F, .height = 38.0F});
+    toggle.setOnClick(Callback<>::bind<SandboxControls, &SandboxControls::toggleAnimation>(controls));
+    return root;
+}
+
 [[nodiscard]] bool isHeadless() noexcept {
     return std::wstring_view(GetCommandLineW()).find(L"--headless") != std::wstring_view::npos;
 }
 
 [[nodiscard]] bool wantsSnapshot() noexcept {
     return std::wstring_view(GetCommandLineW()).find(L"--snapshot") != std::wstring_view::npos;
+}
+
+[[nodiscard]] bool wantsUiOnly() noexcept {
+    return std::wstring_view(GetCommandLineW()).find(L"--ui-only") != std::wstring_view::npos;
 }
 
 [[nodiscard]] bool saveSnapshot(std::uint32_t width, std::uint32_t height) {
@@ -316,6 +421,7 @@ void drawInterface(
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     const bool headless = isHeadless();
     const bool snapshot = wantsSnapshot();
+    const bool uiOnly = wantsUiOnly();
     NativeWindow native;
     if (!native.create(headless)) {
         MessageBoxW(nullptr, L"Unable to create the OpenGL sandbox window.", L"HeniaUI", MB_ICONERROR);
@@ -337,10 +443,36 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     TextRunCache textCache(fonts);
     textCache.reserve(128, 64);
     TextPainter text(textCache);
-    Frame frame;
-    frame.reserve(32768, 256);
+    SandboxControls controls;
+    UiDocument document(text);
+    document.reserve(4096, 128);
+    document.setRoot(createOverlay(font, controls));
+    Win32InputAdapter input(document);
+    SetWindowLongPtrW(native.window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&input));
 
     OpenGlRenderer renderer;
+    henia::gfx::ShapeBatch3D boxBuilder;
+    std::vector<henia::gfx::BoxInstance> boxes = createBoxField(static_cast<float>(controls.lineWidth));
+    boxBuilder.replaceBoxes(boxes);
+    boxBuilder.setDepthState({
+        .enabled = true,
+        .writeEnabled = true,
+        .compare = henia::gfx::CompareOp::LessEqual,
+    });
+    henia::gfx::InstanceBatch boxBatch = boxBuilder.snapshot();
+    henia::gfx::OpenGlRenderDevice gfxRenderer;
+    if (!gfxRenderer.initialize(16384)) {
+        const std::string_view error = gfxRenderer.lastError();
+        const int length = MultiByteToWideChar(CP_UTF8, 0, error.data(), static_cast<int>(error.size()), nullptr, 0);
+        std::wstring message(static_cast<std::size_t>(std::max(length, 0)), L'\0');
+        if (length > 0) {
+            MultiByteToWideChar(CP_UTF8, 0, error.data(), static_cast<int>(error.size()), message.data(), length);
+        }
+        MessageBoxW(native.window, message.c_str(), L"HeniaUI gfx initialization", MB_ICONERROR);
+        return 6;
+    }
+    // Initialize the compositing UI pipeline last so it owns the final context
+    // texture/vertex setup before the first host frame begins.
     if (!renderer.initialize(32768) || !renderer.synchronizeTextures(textures)) {
         const std::string_view error = renderer.lastError();
         const int length = MultiByteToWideChar(CP_UTF8, 0, error.data(), static_cast<int>(error.size()), nullptr, 0);
@@ -376,14 +508,71 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         const std::uint32_t height = static_cast<std::uint32_t>(std::max(client.bottom - client.top, 1L));
         const float time = std::chrono::duration<float>(std::chrono::steady_clock::now() - started).count();
 
+        const float requestedLineWidth = static_cast<float>(controls.lineWidth);
+        if (!boxes.empty() && boxes.front().lineWidth != requestedLineWidth) {
+            for (henia::gfx::BoxInstance& box : boxes) {
+                box.lineWidth = requestedLineWidth;
+            }
+            boxBuilder.replaceBoxes(boxes);
+            boxBatch = boxBuilder.snapshot();
+        }
+
         glViewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
         glClearColor(0.012F, 0.018F, 0.029F, 1.0F);
-        glClear(GL_COLOR_BUFFER_BIT);
+        glClearDepth(1.0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        Canvas& canvas = frame.begin();
-        drawInterface(canvas, text, font, static_cast<float>(width), static_cast<float>(height), time);
-        if (!renderer.render(frame.finish(), width, height)) {
+        const float sceneTime = controls.animationPaused ? 0.0F : time;
+        const float orbit = sceneTime * 0.18F;
+        const henia::gfx::Vec3 eye{
+            std::sin(orbit) * 48.0F,
+            23.0F + std::sin(orbit * 0.7F) * 4.0F,
+            std::cos(orbit) * 48.0F,
+        };
+        const henia::gfx::Mat4 viewMatrix = henia::gfx::lookAt(eye, {}, {0.0F, 1.0F, 0.0F});
+        const henia::gfx::Mat4 projection = henia::gfx::perspective(
+            1.05F,
+            static_cast<float>(width) / static_cast<float>(height),
+            0.1F,
+            160.0F);
+        const henia::gfx::ViewParameters view{
+            .viewProjection = henia::gfx::multiply(projection, viewMatrix),
+            .viewport = {static_cast<float>(width), static_cast<float>(height)},
+            .timeSeconds = sceneTime,
+            .clipDepthRange = henia::gfx::ClipDepthRange::ZeroToOne,
+        };
+        while (glGetError() != GL_NO_ERROR) {}
+        if (!uiOnly && !gfxRenderer.render(boxBatch, view, true)) {
+            const std::string_view error = gfxRenderer.lastError();
+            result = error.find("capture") != std::string_view::npos ? 20
+                : (error.find("upload") != std::string_view::npos ? 21
+                : (error.find("view") != std::string_view::npos ? 22
+                : (error.find("blend") != std::string_view::npos ? 26
+                : (error.find("pipeline") != std::string_view::npos ? 23
+                : (error.find("draw") != std::string_view::npos ? 24
+                : (error.find("restore") != std::string_view::npos ? 25 : 7))))));
+            break;
+        }
+        const GLenum gfxError = glGetError();
+        if (!uiOnly && gfxError != GL_NO_ERROR) {
+            result = gfxError == GL_INVALID_ENUM ? 10
+                : (gfxError == GL_INVALID_VALUE ? 11
+                : (gfxError == GL_INVALID_OPERATION ? 12
+                : (gfxError == GL_OUT_OF_MEMORY ? 13 : 14)));
+            break;
+        }
+
+        document.setViewport({static_cast<float>(width), static_cast<float>(height)});
+        if (!renderer.render(document.compose(), width, height)) {
             result = 4;
+            break;
+        }
+        const GLenum uiError = glGetError();
+        if (uiError != GL_NO_ERROR) {
+            result = uiError == GL_INVALID_ENUM ? 30
+                : (uiError == GL_INVALID_VALUE ? 31
+                : (uiError == GL_INVALID_OPERATION ? 32
+                : (uiError == GL_OUT_OF_MEMORY ? 33 : 34)));
             break;
         }
         if (snapshot && headlessFrames == 0 && !saveSnapshot(width, height)) {
@@ -397,6 +586,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
     }
 
+    SetWindowLongPtrW(native.window, GWLP_USERDATA, 0);
+    gfxRenderer.shutdown();
     renderer.shutdown();
+    if (result == 0 && headless) {
+        const henia::gfx::OpenGlGfxStatistics statistics = gfxRenderer.statistics();
+        if (!uiOnly && (statistics.fullInstanceUploads != 1 || statistics.partialInstanceUploads != 0
+            || statistics.drawCalls != static_cast<std::uint64_t>(headlessFrames))) {
+            return 8;
+        }
+    }
     return result;
 }

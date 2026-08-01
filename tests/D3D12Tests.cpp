@@ -247,7 +247,7 @@ int main() {
 
     const D3D12RenderStatistics statistics = renderer.statistics();
     if (statistics.drawCalls != 1 || statistics.submittedInstances != 2
-        || statistics.textureUploads != 1) {
+        || statistics.textureUploads != 1 || statistics.instanceUploads != 1) {
         fail("D3D12 renderer statistics are incorrect");
     }
 

@@ -107,6 +107,8 @@ void testWarmFrameDoesNotGrow() {
     };
 
     const PacketStatistics first = record();
+    const std::uint64_t firstRevision = frame.packet().revision();
+    require(frame.packet().identity() != 0, "compiled frame identity is invalid");
     const std::uint64_t displayGrowths = frame.displayList().capacityGrowths();
     const PacketStatistics second = record();
 
@@ -116,6 +118,7 @@ void testWarmFrameDoesNotGrow() {
         second.instanceCapacityGrowths == first.instanceCapacityGrowths,
         "instance storage grew after warm-up");
     require(second.batchCapacityGrowths == first.batchCapacityGrowths, "batch storage grew after warm-up");
+    require(frame.packet().revision() == firstRevision + 1, "compiled frame revision did not advance");
 }
 
 void testNestedClipIntersection() {

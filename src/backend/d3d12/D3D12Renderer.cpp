@@ -276,6 +276,8 @@ struct D3D12Renderer::Implementation final {
     struct Submission final {
         ComPtr<ID3D12Resource> instances;
         std::byte* mapped = nullptr;
+        std::uint64_t uploadedIdentity = 0;
+        std::uint64_t uploadedRevision = 0;
     };
 
     struct GpuTexture final {
@@ -698,7 +700,12 @@ bool D3D12Renderer::Implementation::record(
     }
 
     Submission& submission = submissions[submissionSlot];
-    std::memcpy(submission.mapped, packet.instances().data(), packet.instances().size_bytes());
+    if (submission.uploadedIdentity != packet.identity() || submission.uploadedRevision != packet.revision()) {
+        std::memcpy(submission.mapped, packet.instances().data(), packet.instances().size_bytes());
+        submission.uploadedIdentity = packet.identity();
+        submission.uploadedRevision = packet.revision();
+        ++statistics.instanceUploads;
+    }
 
     ID3D12DescriptorHeap* heaps[]{gpuBatchHeap.Get()};
     commandList.SetDescriptorHeaps(1, heaps);
@@ -776,6 +783,8 @@ void D3D12Renderer::Implementation::shutdown() noexcept {
             submission.instances->Unmap(0, nullptr);
         }
         submission.mapped = nullptr;
+        submission.uploadedIdentity = 0;
+        submission.uploadedRevision = 0;
         submission.instances.Reset();
     }
     submissions.clear();

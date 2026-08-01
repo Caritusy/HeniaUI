@@ -44,12 +44,20 @@ struct PacketStatistics final {
 
 class RenderPacket final {
 public:
+    RenderPacket() noexcept;
+    RenderPacket(const RenderPacket&) = delete;
+    RenderPacket& operator=(const RenderPacket&) = delete;
+    RenderPacket(RenderPacket&&) = delete;
+    RenderPacket& operator=(RenderPacket&&) = delete;
+
     void reserve(std::size_t instanceCapacity, std::size_t batchCapacity);
     void clear() noexcept;
 
     [[nodiscard]] std::span<const DrawInstance> instances() const noexcept;
     [[nodiscard]] std::span<const DrawBatch> batches() const noexcept;
     [[nodiscard]] const PacketStatistics& statistics() const noexcept;
+    [[nodiscard]] std::uint64_t identity() const noexcept;
+    [[nodiscard]] std::uint64_t revision() const noexcept;
     [[nodiscard]] std::size_t instanceCapacity() const noexcept;
     [[nodiscard]] std::size_t batchCapacity() const noexcept;
 
@@ -62,6 +70,8 @@ private:
     std::vector<DrawInstance> mInstances;
     std::vector<DrawBatch> mBatches;
     PacketStatistics mStatistics{};
+    std::uint64_t mIdentity = 0;
+    std::uint64_t mRevision = 0;
 };
 
 } // namespace henia::ui

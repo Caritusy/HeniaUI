@@ -50,6 +50,7 @@ void BatchCompiler::compile(const DisplayList& displayList, RenderPacket& output
     output.mStatistics.mergedCommands = output.mStatistics.instances > output.mStatistics.batches
         ? output.mStatistics.instances - output.mStatistics.batches
         : 0;
+    ++output.mRevision;
 }
 
 bool BatchCompiler::compatible(const DrawBatch& batch, const DrawCommand& command) noexcept {

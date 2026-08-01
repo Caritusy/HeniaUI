@@ -4,7 +4,7 @@ HeniaUI is a compact retained UI and rendering engine for native C++ application
 
 The project is intentionally independent from ImGui and from any host application's hook, SDK, runtime, or input implementation. A host can embed the library with `add_subdirectory`, consume an installed CMake package, or build the included standalone sandbox.
 
-> Status: active engine development. The current public API records analytic shapes, images, lines, and cached UTF-8 text runs, compiles them into ordered GPU-ready batches, and submits them through native OpenGL 3.3 or Direct3D 12 renderers. Retained widgets and host adapters are the next milestone.
+> Status: usable foundation. The public API includes retained widgets, UTF-8 text, native Win32 input/font adapters, native OpenGL 3.3 and Direct3D 12 UI renderers, plus a separate `henia::gfx` instance path for large 3D box fields.
 
 ## Why another UI renderer?
 
@@ -15,6 +15,7 @@ HeniaUI is designed to avoid several common scaling traps in game overlays and n
 - no GPU-buffer destruction or growth from inside a presentation callback;
 - no render-thread locks for routine UI updates;
 - no rebuilding of stable layout and paint data without a dirty reason;
+- no per-box CPU projection, antialias expansion, vertex generation, or index generation;
 - no assumption that one process has only one graphics context or swap chain.
 
 Shapes, images, and glyphs use one ordered UI pipeline. Each batch carries a small texture table, so alternating widget backgrounds and font glyphs can remain in one draw batch while preserving paint order. A batch boundary is introduced only for a clip, blend, pipeline, or texture-table capacity change.
@@ -53,6 +54,8 @@ The core library itself is platform-neutral and has no external dependencies. Th
 
 Windows builds also produce `HeniaUIVisualSandbox.exe`. It owns a normal Win32/WGL window, builds a Segoe UI alpha atlas through the optional Win32 platform target, and renders the complete interface through `HeniaUI::OpenGL` without ImGui.
 
+The visual sandbox also draws 5,760 animated 3D boxes through one instanced draw. Camera movement and hue animation update only frame constants; the immutable box snapshot remains resident until content changes.
+
 For use as a subproject:
 
 ```cmake
@@ -65,6 +68,7 @@ Optional Windows targets are exported as:
 ```cmake
 target_link_libraries(MyApplication PRIVATE
     HeniaUI::Core
+    HeniaUI::Gfx
     HeniaUI::Win32
     HeniaUI::OpenGL
     HeniaUI::D3D12)
@@ -82,13 +86,38 @@ target_link_libraries(MyApplication PRIVATE
 - OpenGL consumes an already-current context and restores the pipeline state it changes.
 - D3D12 records into a host-owned command list and never waits from the frame path.
 - D3D12 instance memory is split into fence-owned submission slots.
+- 3D box edges are shader-expanded triangle quads with fixed pixel width; no backend depends on line-width support.
+- Instance content, view/time constants, CPU upload, CPU submit, and optional host-reported GPU timing are tracked separately.
+- Missing host depth attachments produce an explicit depth fallback counter rather than pretending depth testing occurred.
 
-## Roadmap
+## Retained controls
 
-1. Retained nodes, dirty layout/paint propagation, and input routing.
-2. Reusable SaaS-oriented controls and theme tokens.
-3. Host adapters for multi-context OpenGL and multi-surface Direct3D 12 applications.
-4. Optional debugging inspectors kept outside production targets.
+`UiDocument` retains layout and paint output until a dirty reason occurs. `Panel`, `Label`, `Button`, and `NumericInput` use direct context/function-pointer callbacks and platform-neutral input events. The Win32 adapter translates an existing host `WndProc` message stream without subclassing or owning the window.
+
+The numeric control reserves fixed, separately centered decrement/value/increment regions, supports direct typing, wheel and key stepping, range clamping and precision, and does not depend on a debug UI library.
+
+## 3D instance path
+
+```cpp
+#include <henia/gfx/ShapeBatch3D.h>
+
+henia::gfx::ShapeBatch3D shapes;
+shapes.replaceBoxes(boxes);       // only when object content changes
+auto snapshot = shapes.snapshot();
+
+// Every regular frame changes only this structure.
+henia::gfx::ViewParameters view{
+    .viewProjection = cameraMatrix,
+    .viewport = {width, height},
+    .timeSeconds = time,
+};
+renderDevice.render(snapshot, view); // OpenGL
+// renderDevice.record(snapshot, view, commandList, fenceOwnedSlot); // D3D12
+```
+
+One box instance stores bounds, linear color, pixel line width, hue offset, and generic shader effects. A static unit-box edge topology is expanded in the vertex shader. Instance revisions and dirty ranges let a backend skip stable uploads or update only a changed range.
+
+See [docs/architecture.md](docs/architecture.md) for the ownership and threading contract.
 
 ## License
 

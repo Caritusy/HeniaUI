@@ -1,0 +1,67 @@
+#pragma once
+
+#include "henia/gfx/InstanceBatch.h"
+
+#include <d3d12.h>
+#include <dxgiformat.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string_view>
+
+namespace henia::gfx {
+
+struct D3D12GfxConfiguration final {
+    std::size_t boxCapacity = 65536;
+    std::uint32_t submissionCapacity = 8;
+    DXGI_FORMAT renderTargetFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    DXGI_FORMAT depthStencilFormat = DXGI_FORMAT_UNKNOWN;
+    std::uint32_t sampleCount = 1;
+};
+
+struct D3D12GfxStatistics final {
+    std::uint64_t recordedFrames = 0;
+    std::uint64_t drawCalls = 0;
+    std::uint64_t submittedInstances = 0;
+    std::uint64_t fullInstanceUploads = 0;
+    std::uint64_t partialInstanceUploads = 0;
+    std::uint64_t viewUpdates = 0;
+    std::uint64_t depthFallbacks = 0;
+    std::uint64_t rejectedFrames = 0;
+    RenderProfile profile{};
+};
+
+// The host owns command allocators, RT/DS attachments, transitions, queue
+// submission and fences. A slot is reusable only after its host fence completes.
+class D3D12RenderDevice final {
+public:
+    D3D12RenderDevice();
+    ~D3D12RenderDevice();
+
+    D3D12RenderDevice(const D3D12RenderDevice&) = delete;
+    D3D12RenderDevice& operator=(const D3D12RenderDevice&) = delete;
+    D3D12RenderDevice(D3D12RenderDevice&&) noexcept;
+    D3D12RenderDevice& operator=(D3D12RenderDevice&&) noexcept;
+
+    [[nodiscard]] bool initialize(ID3D12Device& device, D3D12GfxConfiguration configuration = {}) noexcept;
+    [[nodiscard]] bool record(
+        const InstanceBatch& batch,
+        const ViewParameters& view,
+        ID3D12GraphicsCommandList& commandList,
+        std::uint32_t submissionSlot) noexcept;
+    void reportGpuTime(std::uint64_t nanoseconds) noexcept;
+    void shutdown() noexcept;
+
+    [[nodiscard]] bool initialized() const noexcept;
+    [[nodiscard]] std::size_t boxCapacity() const noexcept;
+    [[nodiscard]] std::uint32_t submissionCapacity() const noexcept;
+    [[nodiscard]] D3D12GfxStatistics statistics() const noexcept;
+    [[nodiscard]] std::string_view lastError() const noexcept;
+
+private:
+    struct Implementation;
+    std::unique_ptr<Implementation> mImplementation;
+};
+
+} // namespace henia::gfx

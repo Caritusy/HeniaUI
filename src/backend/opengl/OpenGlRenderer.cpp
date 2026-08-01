@@ -358,6 +358,8 @@ struct OpenGlRenderer::Implementation final {
     GLint viewportLocation = -1;
     GLint texturesLocation = -1;
     std::size_t capacity = 0;
+    std::uint64_t uploadedIdentity = 0;
+    std::uint64_t uploadedRevision = 0;
     std::vector<GpuTexture> textures;
     OpenGlRenderStatistics statistics{};
     std::string error;
@@ -562,23 +564,28 @@ bool OpenGlRenderer::Implementation::render(
     gl.bindVertexArray(vertexArray);
     gl.bindBuffer(kArrayBuffer, instanceBuffer);
 
-    void* mapped = gl.mapBufferRange(
-        kArrayBuffer,
-        0,
-        static_cast<GlSize>(packet.instances().size_bytes()),
-        kMapWriteBit | kMapInvalidateBufferBit | kMapUnsynchronizedBit);
-    if (mapped == nullptr) {
-        restoreState(previous);
-        ++statistics.rejectedFrames;
-        error = "OpenGL instance upload mapping failed";
-        return false;
-    }
-    std::memcpy(mapped, packet.instances().data(), packet.instances().size_bytes());
-    if (gl.unmapBuffer(kArrayBuffer) != GL_TRUE) {
-        restoreState(previous);
-        ++statistics.rejectedFrames;
-        error = "OpenGL instance upload was corrupted";
-        return false;
+    if (uploadedIdentity != packet.identity() || uploadedRevision != packet.revision()) {
+        void* mapped = gl.mapBufferRange(
+            kArrayBuffer,
+            0,
+            static_cast<GlSize>(packet.instances().size_bytes()),
+            kMapWriteBit | kMapInvalidateBufferBit | kMapUnsynchronizedBit);
+        if (mapped == nullptr) {
+            restoreState(previous);
+            ++statistics.rejectedFrames;
+            error = "OpenGL instance upload mapping failed";
+            return false;
+        }
+        std::memcpy(mapped, packet.instances().data(), packet.instances().size_bytes());
+        if (gl.unmapBuffer(kArrayBuffer) != GL_TRUE) {
+            restoreState(previous);
+            ++statistics.rejectedFrames;
+            error = "OpenGL instance upload was corrupted";
+            return false;
+        }
+        uploadedIdentity = packet.identity();
+        uploadedRevision = packet.revision();
+        ++statistics.instanceUploads;
     }
 
     for (const DrawBatch& batch : packet.batches()) {
@@ -649,6 +656,8 @@ void OpenGlRenderer::Implementation::shutdown() noexcept {
     viewportLocation = -1;
     texturesLocation = -1;
     capacity = 0;
+    uploadedIdentity = 0;
+    uploadedRevision = 0;
     ready = false;
 }
 
