@@ -44,7 +44,7 @@ const TextRun* TextRunCache::layout(FontHandle font, float size, std::string_vie
     }
 
     const FontFace* face = mFonts->find(font);
-    if (face == nullptr) {
+    if (face == nullptr || face->pixelSize() <= 0.0F || !face->atlas().valid()) {
         return nullptr;
     }
 
@@ -52,17 +52,16 @@ const TextRun* TextRunCache::layout(FontHandle font, float size, std::string_vie
         return nullptr;
     }
 
-    Entry entry{};
-    entry.font = font;
-    entry.size = size;
-    entry.text.assign(text);
-    entry.run.glyphs.reserve(std::max(mGlyphReserve, text.size()));
-    if (!buildRun(*face, size, text, entry.run)) {
-        return nullptr;
-    }
-
     ++mMisses;
     if (mEntries.size() < mMaximumEntries) {
+        Entry entry{};
+        entry.font = font;
+        entry.size = size;
+        entry.text.assign(text);
+        entry.run.glyphs.reserve(std::max(mGlyphReserve, text.size()));
+        if (!buildRun(*face, size, text, entry.run)) {
+            return nullptr;
+        }
         mEntries.push_back(std::move(entry));
         mIndex.emplace(hash, mEntries.size() - 1);
         return &mEntries.back().run;
@@ -71,7 +70,16 @@ const TextRun* TextRunCache::layout(FontHandle font, float size, std::string_vie
     const std::size_t index = mEvictionCursor;
     Entry& replaced = mEntries[index];
     removeIndex(keyHash(replaced.font, replaced.size, replaced.text), index);
-    replaced = std::move(entry);
+    replaced.font = font;
+    replaced.size = size;
+    replaced.text.assign(text);
+    replaced.run.atlas = {};
+    replaced.run.glyphs.clear();
+    replaced.run.glyphs.reserve(std::max(mGlyphReserve, text.size()));
+    replaced.run.metrics = {};
+    if (!buildRun(*face, size, text, replaced.run)) {
+        return nullptr;
+    }
     mIndex.emplace(hash, index);
     mEvictionCursor = (mEvictionCursor + 1) % mEntries.size();
     return &replaced.run;
