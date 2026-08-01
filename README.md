@@ -54,6 +54,8 @@ The core library itself is platform-neutral and has no external dependencies. Th
 
 Windows builds also produce `HeniaUIVisualSandbox.exe`. It owns a normal Win32/WGL window, builds a Segoe UI alpha atlas through the optional Win32 platform target, and renders the complete interface through `HeniaUI::OpenGL` without ImGui.
 
+The interactive sandbox is hard-capped at 144 FPS even when a hybrid or virtual-display driver ignores the requested swap interval. `--help` exits without creating a GPU context; `--headless` runs exactly three validation frames, and `--snapshot` writes `HeniaUIVisualSandbox.bmp`.
+
 The visual sandbox also draws 5,760 animated 3D boxes through one instanced draw. Camera movement and hue animation update only frame constants; the immutable box snapshot remains resident until content changes.
 
 For use as a subproject:

@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -367,6 +368,10 @@ struct SandboxControls final {
     return std::wstring_view(GetCommandLineW()).find(L"--ui-only") != std::wstring_view::npos;
 }
 
+[[nodiscard]] bool wantsHelp() noexcept {
+    return std::wstring_view(GetCommandLineW()).find(L"--help") != std::wstring_view::npos;
+}
+
 [[nodiscard]] bool saveSnapshot(std::uint32_t width, std::uint32_t height) {
     constexpr GLenum kBgra = 0x80E1;
     std::vector<std::byte> pixels(static_cast<std::size_t>(width) * height * 4U);
@@ -419,6 +424,11 @@ struct SandboxControls final {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    // This is a GUI-subsystem executable, so a help probe must terminate
+    // without creating a window or silently starting the render loop.
+    if (wantsHelp()) {
+        return 0;
+    }
     const bool headless = isHeadless();
     const bool snapshot = wantsSnapshot();
     const bool uiOnly = wantsUiOnly();
@@ -490,6 +500,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     int headlessFrames = 0;
     int result = 0;
     while (running) {
+        const auto frameStarted = std::chrono::steady_clock::now();
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
             if (message.message == WM_QUIT) {
                 running = false;
@@ -580,6 +591,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             break;
         }
         SwapBuffers(native.deviceContext);
+
+        // VSync is advisory on hybrid and indirect/virtual display stacks.
+        // Keep the interactive sample bounded even when the driver ignores
+        // wglSwapIntervalEXT; profiling uses backend timestamps, not a runaway
+        // demonstration loop.
+        if (!headless) {
+            constexpr auto minimumFrameTime = std::chrono::microseconds(6945); // <= 144 FPS
+            std::this_thread::sleep_until(frameStarted + minimumFrameTime);
+        }
 
         if (headless && ++headlessFrames >= 3) {
             break;
