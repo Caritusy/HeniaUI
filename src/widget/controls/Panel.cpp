@@ -1,12 +1,78 @@
 #include "henia/ui/widget/controls/Panel.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 
 namespace henia::ui {
 namespace {
 
-[[nodiscard]] float horizontal(const Insets& insets) noexcept { return insets.left + insets.right; }
-[[nodiscard]] float vertical(const Insets& insets) noexcept { return insets.top + insets.bottom; }
+[[nodiscard]] float layoutValue(float value) noexcept {
+    return std::isfinite(value) ? std::max(value, 0.0F) : 0.0F;
+}
+
+[[nodiscard]] float boundedAdd(float left, float right) noexcept {
+    const double result = static_cast<double>(left) + right;
+    return static_cast<float>(std::min(
+        result, static_cast<double>(std::numeric_limits<float>::max())));
+}
+
+[[nodiscard]] float horizontal(const Insets& insets) noexcept {
+    return boundedAdd(layoutValue(insets.left), layoutValue(insets.right));
+}
+
+[[nodiscard]] float vertical(const Insets& insets) noexcept {
+    return boundedAdd(layoutValue(insets.top), layoutValue(insets.bottom));
+}
+
+[[nodiscard]] float mainSize(Vec2 size, LayoutDirection direction) noexcept {
+    return direction == LayoutDirection::Column ? size.y : size.x;
+}
+
+[[nodiscard]] float crossSize(Vec2 size, LayoutDirection direction) noexcept {
+    return direction == LayoutDirection::Column ? size.x : size.y;
+}
+
+[[nodiscard]] float mainMargin(const Insets& margin, LayoutDirection direction) noexcept {
+    return direction == LayoutDirection::Column ? vertical(margin) : horizontal(margin);
+}
+
+[[nodiscard]] float crossMargin(const Insets& margin, LayoutDirection direction) noexcept {
+    return direction == LayoutDirection::Column ? horizontal(margin) : vertical(margin);
+}
+
+[[nodiscard]] Constraints childConstraints(
+    LayoutDirection direction,
+    float maximumMain,
+    float maximumCross) noexcept {
+    return direction == LayoutDirection::Column
+        ? Constraints{{}, {maximumCross, maximumMain}}
+        : Constraints{{}, {maximumMain, maximumCross}};
+}
+
+[[nodiscard]] Constraints exactChildConstraints(
+    LayoutDirection direction,
+    float main,
+    float cross) noexcept {
+    const Vec2 size = direction == LayoutDirection::Column
+        ? Vec2{cross, main} : Vec2{main, cross};
+    return {size, size};
+}
+
+[[nodiscard]] std::size_t visibleChildCount(
+    std::span<const std::unique_ptr<Widget>> children) noexcept {
+    return static_cast<std::size_t>(std::count_if(
+        children.begin(), children.end(), [](const auto& child) { return child->visible(); }));
+}
+
+[[nodiscard]] float gapBudget(std::size_t childCount, float gap) noexcept {
+    if (childCount < 2) {
+        return 0.0F;
+    }
+    const double result = static_cast<double>(childCount - 1U) * layoutValue(gap);
+    return static_cast<float>(std::min(
+        result, static_cast<double>(std::numeric_limits<float>::max())));
+}
 
 } // namespace
 
@@ -39,105 +105,138 @@ void Panel::setStyle(PanelStyle styleValue) noexcept {
 const PanelStyle& Panel::style() const noexcept { return mStyle; }
 
 Vec2 Panel::onMeasure(TextPainter& text, Constraints constraints) {
-    Vec2 result{horizontal(mStyle.padding), vertical(mStyle.padding)};
-    float main = 0.0F;
-    float cross = 0.0F;
-    std::size_t visibleChildren = 0;
-    const Constraints childConstraints{
-        {},
-        {
-            std::max(0.0F, constraints.maximum.x - horizontal(mStyle.padding)),
-            std::max(0.0F, constraints.maximum.y - vertical(mStyle.padding)),
-        },
+    const float horizontalPadding = horizontal(mStyle.padding);
+    const float verticalPadding = vertical(mStyle.padding);
+    const Vec2 contentMaximum{
+        std::max(constraints.maximum.x - horizontalPadding, 0.0F),
+        std::max(constraints.maximum.y - verticalPadding, 0.0F),
     };
+    const float availableMain = mainSize(contentMaximum, mStyle.direction);
+    const float availableCross = crossSize(contentMaximum, mStyle.direction);
+    const std::size_t visibleChildren = visibleChildCount(mChildren);
+    float main = gapBudget(visibleChildren, mStyle.gap);
+    float cross = 0.0F;
+    float remainingMain = std::max(availableMain - main, 0.0F);
     for (const std::unique_ptr<Widget>& child : mChildren) {
         if (!child->visible()) {
             continue;
         }
-        const Vec2 size = child->measure(text, childConstraints);
         const LayoutParameters& layout = child->layoutParameters();
-        if (mStyle.direction == LayoutDirection::Column) {
-            main += size.y + layout.margin.top + layout.margin.bottom;
-            cross = std::max(cross, size.x + layout.margin.left + layout.margin.right);
-        } else {
-            main += size.x + layout.margin.left + layout.margin.right;
-            cross = std::max(cross, size.y + layout.margin.top + layout.margin.bottom);
-        }
-        ++visibleChildren;
-    }
-    if (visibleChildren > 1) {
-        main += static_cast<float>(visibleChildren - 1) * mStyle.gap;
+        const float childMainMargin = mainMargin(layout.margin, mStyle.direction);
+        const float childCrossMargin = crossMargin(layout.margin, mStyle.direction);
+        const Vec2 size = child->measure(text, childConstraints(
+            mStyle.direction,
+            std::max(remainingMain - childMainMargin, 0.0F),
+            std::max(availableCross - childCrossMargin, 0.0F)));
+        const float consumed = boundedAdd(mainSize(size, mStyle.direction), childMainMargin);
+        main = boundedAdd(main, consumed);
+        remainingMain = std::max(remainingMain - consumed, 0.0F);
+        cross = std::max(
+            cross,
+            boundedAdd(crossSize(size, mStyle.direction), childCrossMargin));
     }
     if (mStyle.direction == LayoutDirection::Column) {
-        result.x += cross;
-        result.y += main;
-    } else {
-        result.x += main;
-        result.y += cross;
+        return {boundedAdd(horizontalPadding, cross), boundedAdd(verticalPadding, main)};
     }
-    return result;
+    return {boundedAdd(horizontalPadding, main), boundedAdd(verticalPadding, cross)};
 }
 
 void Panel::onArrange(TextPainter& text, Rect arrangedFrame) {
-    const Rect content{
-        {arrangedFrame.min.x + mStyle.padding.left, arrangedFrame.min.y + mStyle.padding.top},
-        {arrangedFrame.max.x - mStyle.padding.right, arrangedFrame.max.y - mStyle.padding.bottom},
+    const float frameWidth = std::max(arrangedFrame.width(), 0.0F);
+    const float frameHeight = std::max(arrangedFrame.height(), 0.0F);
+    const float leftPadding = std::min(layoutValue(mStyle.padding.left), frameWidth);
+    const float topPadding = std::min(layoutValue(mStyle.padding.top), frameHeight);
+    const float rightPadding = std::min(
+        layoutValue(mStyle.padding.right), frameWidth - leftPadding);
+    const float bottomPadding = std::min(
+        layoutValue(mStyle.padding.bottom), frameHeight - topPadding);
+    const Vec2 contentSize{
+        frameWidth - leftPadding - rightPadding,
+        frameHeight - topPadding - bottomPadding,
     };
-    const Vec2 contentSize{std::max(content.width(), 0.0F), std::max(content.height(), 0.0F)};
-    const Constraints childConstraints{{}, contentSize};
-
-    float occupied = 0.0F;
+    const Rect content{
+        {arrangedFrame.min.x + leftPadding, arrangedFrame.min.y + topPadding},
+        {arrangedFrame.min.x + leftPadding + contentSize.x,
+         arrangedFrame.min.y + topPadding + contentSize.y},
+    };
+    const float availableMain = mainSize(contentSize, mStyle.direction);
+    const float availableCross = crossSize(contentSize, mStyle.direction);
+    const std::size_t visibleChildren = visibleChildCount(mChildren);
+    const float gap = layoutValue(mStyle.gap);
+    const float gaps = gapBudget(visibleChildren, gap);
+    float occupied = gaps;
+    float remainingMain = std::max(availableMain - gaps, 0.0F);
     float totalGrow = 0.0F;
-    std::size_t visibleChildren = 0;
     for (const std::unique_ptr<Widget>& child : mChildren) {
         if (!child->visible()) {
             continue;
         }
-        const Vec2 measured = child->measure(text, childConstraints);
         const LayoutParameters& layout = child->layoutParameters();
-        occupied += mStyle.direction == LayoutDirection::Column
-            ? measured.y + layout.margin.top + layout.margin.bottom
-            : measured.x + layout.margin.left + layout.margin.right;
-        totalGrow += std::max(layout.flexGrow, 0.0F);
-        ++visibleChildren;
+        const float childMainMargin = mainMargin(layout.margin, mStyle.direction);
+        const float childCrossMargin = crossMargin(layout.margin, mStyle.direction);
+        const Vec2 measured = child->measure(text, childConstraints(
+            mStyle.direction,
+            std::max(remainingMain - childMainMargin, 0.0F),
+            std::max(availableCross - childCrossMargin, 0.0F)));
+        const float consumed = boundedAdd(mainSize(measured, mStyle.direction), childMainMargin);
+        occupied = boundedAdd(occupied, consumed);
+        remainingMain = std::max(remainingMain - consumed, 0.0F);
+        totalGrow = boundedAdd(totalGrow, layoutValue(layout.flexGrow));
     }
-    if (visibleChildren > 1) {
-        occupied += static_cast<float>(visibleChildren - 1) * mStyle.gap;
-    }
-    const float availableMain = mStyle.direction == LayoutDirection::Column ? contentSize.y : contentSize.x;
     const float flexible = std::max(availableMain - occupied, 0.0F);
     float cursor = mStyle.direction == LayoutDirection::Column ? content.min.y : content.min.x;
+    const float contentMainEnd = mStyle.direction == LayoutDirection::Column
+        ? content.max.y : content.max.x;
+    remainingMain = std::max(availableMain - gaps, 0.0F);
 
     for (const std::unique_ptr<Widget>& child : mChildren) {
         if (!child->visible()) {
             continue;
         }
-        const Vec2 measured = child->measure(text, childConstraints);
         const LayoutParameters& layout = child->layoutParameters();
+        const float beforeMain = mStyle.direction == LayoutDirection::Column
+            ? layoutValue(layout.margin.top) : layoutValue(layout.margin.left);
+        const float afterMain = mStyle.direction == LayoutDirection::Column
+            ? layoutValue(layout.margin.bottom) : layoutValue(layout.margin.right);
+        const float beforeCross = mStyle.direction == LayoutDirection::Column
+            ? layoutValue(layout.margin.left) : layoutValue(layout.margin.top);
+        const float childMainMargin = boundedAdd(beforeMain, afterMain);
+        const float childCrossMargin = crossMargin(layout.margin, mStyle.direction);
+        const float maximumBaseMain = std::max(remainingMain - childMainMargin, 0.0F);
+        const float maximumCross = std::max(availableCross - childCrossMargin, 0.0F);
+        const Vec2 measured = child->measure(text, childConstraints(
+            mStyle.direction, maximumBaseMain, maximumCross));
+        const float baseMain = mainSize(measured, mStyle.direction);
+        remainingMain = std::max(
+            remainingMain - boundedAdd(baseMain, childMainMargin), 0.0F);
         const float growth = totalGrow > 0.0F
-            ? flexible * std::max(layout.flexGrow, 0.0F) / totalGrow
+            ? static_cast<float>(static_cast<double>(flexible)
+                * layoutValue(layout.flexGrow) / totalGrow)
             : 0.0F;
+        const bool explicitCross = mStyle.direction == LayoutDirection::Column
+            ? layout.width >= 0.0F : layout.height >= 0.0F;
+        const float finalMain = baseMain + growth;
+        const float finalCross = mStyle.stretchCrossAxis && !explicitCross
+            ? maximumCross
+            : std::min(crossSize(measured, mStyle.direction), maximumCross);
+        const Vec2 finalSize = child->measure(text, exactChildConstraints(
+            mStyle.direction, finalMain, finalCross));
+        cursor = std::min(cursor + beforeMain, contentMainEnd);
         Rect childFrame{};
         if (mStyle.direction == LayoutDirection::Column) {
-            cursor += layout.margin.top;
-            const float width = mStyle.stretchCrossAxis
-                ? std::max(contentSize.x - layout.margin.left - layout.margin.right, 0.0F)
-                : measured.x;
             childFrame = {
-                {content.min.x + layout.margin.left, cursor},
-                {content.min.x + layout.margin.left + width, cursor + measured.y + growth},
+                {content.min.x + beforeCross, cursor},
+                {content.min.x + beforeCross + finalSize.x,
+                 std::min(cursor + finalSize.y, content.max.y)},
             };
-            cursor = childFrame.max.y + layout.margin.bottom + mStyle.gap;
+            cursor = std::min(childFrame.max.y + afterMain + gap, content.max.y);
         } else {
-            cursor += layout.margin.left;
-            const float height = mStyle.stretchCrossAxis
-                ? std::max(contentSize.y - layout.margin.top - layout.margin.bottom, 0.0F)
-                : measured.y;
             childFrame = {
-                {cursor, content.min.y + layout.margin.top},
-                {cursor + measured.x + growth, content.min.y + layout.margin.top + height},
+                {cursor, content.min.y + beforeCross},
+                {std::min(cursor + finalSize.x, content.max.x),
+                 content.min.y + beforeCross + finalSize.y},
             };
-            cursor = childFrame.max.x + layout.margin.right + mStyle.gap;
+            cursor = std::min(childFrame.max.x + afterMain + gap, content.max.x);
         }
         child->arrange(text, childFrame);
     }

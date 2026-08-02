@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -133,6 +134,142 @@ void click(UiDocument& document, Vec2 position) {
     });
 }
 
+class LayoutProbe final : public Widget {
+public:
+    explicit LayoutProbe(Vec2 preferred) noexcept : mPreferred(preferred) {}
+
+    void setPreferred(Vec2 preferred) noexcept {
+        mPreferred = preferred;
+        markLayoutDirty();
+    }
+
+    Constraints lastConstraints{};
+    std::uint64_t measureCalls = 0;
+    std::uint64_t arrangeCalls = 0;
+
+protected:
+    [[nodiscard]] Vec2 onMeasure(TextPainter&, Constraints constraints) override {
+        lastConstraints = constraints;
+        ++measureCalls;
+        return mPreferred;
+    }
+
+    void onArrange(TextPainter&, Rect) override { ++arrangeCalls; }
+
+private:
+    Vec2 mPreferred{};
+};
+
+void verifyConstraintSensitiveLayout(TextPainter& painter) {
+    LayoutProbe cacheProbe({100.0F, 100.0F});
+    Vec2 measured = cacheProbe.measure(painter, {{}, {100.0F, 80.0F}});
+    cacheProbe.arrange(painter, {{0.0F, 0.0F}, measured});
+    static_cast<void>(cacheProbe.measure(painter, {{}, {100.0F, 80.0F}}));
+    if (cacheProbe.measureCalls != 1) {
+        fail("Measurement cache did not reuse an identical normalized constraint key");
+    }
+    measured = cacheProbe.measure(painter, {{}, {40.0F, 30.0F}});
+    if (!(measured == Vec2{40.0F, 30.0F}) || cacheProbe.measureCalls != 2) {
+        fail("Changed constraints reused a stale widget measurement");
+    }
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float negativeInfinity = -std::numeric_limits<float>::infinity();
+    measured = cacheProbe.measure(painter, {{50.0F, nan}, {10.0F, negativeInfinity}});
+    if (!(measured == Vec2{50.0F, 0.0F})
+        || !(cacheProbe.lastConstraints == Constraints{{50.0F, 0.0F}, {50.0F, 0.0F}})) {
+        fail("Invalid constraints were not normalized before clamping and measurement");
+    }
+
+    UiDocument siblingDocument(painter);
+    siblingDocument.reserve(16, 4);
+    siblingDocument.setViewport({100.0F, 40.0F});
+    auto siblingRoot = std::make_unique<Panel>(PanelStyle{
+        .padding = {5.0F, 5.0F, 5.0F, 5.0F},
+        .gap = 4.0F,
+        .direction = LayoutDirection::Row,
+        .stretchCrossAxis = true,
+    });
+    LayoutProbe& leading = siblingRoot->emplaceChild<LayoutProbe>(Vec2{60.0F, 12.0F});
+    leading.setLayoutParameters({
+        .height = 10.0F,
+        .margin = {.right = 3.0F},
+    });
+    LayoutProbe& trailing = siblingRoot->emplaceChild<LayoutProbe>(Vec2{1000.0F, 12.0F});
+    trailing.setLayoutParameters({.margin = {.left = 2.0F}});
+    siblingDocument.setRoot(std::move(siblingRoot));
+    static_cast<void>(siblingDocument.compose());
+    if (!(leading.frame() == Rect{{5.0F, 5.0F}, {65.0F, 15.0F}})
+        || !(trailing.frame() == Rect{{74.0F, 5.0F}, {95.0F, 35.0F}})) {
+        fail("Margins, remaining-space measurement, or explicit cross-size precedence is incorrect");
+    }
+
+    leading.setPreferred({30.0F, 12.0F});
+    static_cast<void>(siblingDocument.compose());
+    if (!(leading.frame() == Rect{{5.0F, 5.0F}, {35.0F, 15.0F}})
+        || !(trailing.frame() == Rect{{44.0F, 5.0F}, {95.0F, 35.0F}})) {
+        fail("A sibling size change did not remeasure the constrained remainder");
+    }
+
+    siblingDocument.setViewport({70.0F, 40.0F});
+    static_cast<void>(siblingDocument.compose());
+    if (!(trailing.frame() == Rect{{44.0F, 5.0F}, {65.0F, 35.0F}})) {
+        fail("Shrinking the viewport left a stale child measurement");
+    }
+    siblingDocument.setViewport({120.0F, 40.0F});
+    static_cast<void>(siblingDocument.compose());
+    if (!(trailing.frame() == Rect{{44.0F, 5.0F}, {115.0F, 35.0F}})) {
+        fail("Growing the viewport left a stale child measurement");
+    }
+    leading.setPreferred({80.0F, 12.0F});
+    static_cast<void>(siblingDocument.compose());
+    if (!(trailing.frame() == Rect{{94.0F, 5.0F}, {115.0F, 35.0F}})) {
+        fail("Growing one sibling did not shrink the constrained remainder");
+    }
+
+    UiDocument fixedCrossDocument(painter);
+    fixedCrossDocument.reserve(8, 2);
+    fixedCrossDocument.setViewport({40.0F, 60.0F});
+    auto fixedCrossRoot = std::make_unique<Panel>(PanelStyle{
+        .padding = {5.0F, 5.0F, 5.0F, 5.0F},
+        .direction = LayoutDirection::Column,
+        .stretchCrossAxis = true,
+    });
+    LayoutProbe& fixedWidth = fixedCrossRoot->emplaceChild<LayoutProbe>(Vec2{20.0F, 20.0F});
+    fixedWidth.setLayoutParameters({.width = 12.0F});
+    LayoutProbe& stretchedWidth = fixedCrossRoot->emplaceChild<LayoutProbe>(Vec2{10.0F, 20.0F});
+    fixedCrossDocument.setRoot(std::move(fixedCrossRoot));
+    static_cast<void>(fixedCrossDocument.compose());
+    if (fixedWidth.frame().width() != 12.0F || stretchedWidth.frame().width() != 30.0F) {
+        fail("Explicit width did not take precedence over column cross-axis stretching");
+    }
+
+    UiDocument nestedDocument(painter);
+    nestedDocument.reserve(16, 4);
+    nestedDocument.setViewport({120.0F, 80.0F});
+    auto outer = std::make_unique<Panel>(PanelStyle{
+        .padding = {5.0F, 5.0F, 5.0F, 5.0F},
+        .direction = LayoutDirection::Column,
+    });
+    Panel& inner = outer->emplaceChild<Panel>(PanelStyle{
+        .gap = 4.0F,
+        .direction = LayoutDirection::Row,
+    });
+    inner.setLayoutParameters({.flexGrow = 1.0F});
+    LayoutProbe& one = inner.emplaceChild<LayoutProbe>(Vec2{20.0F, 10.0F});
+    one.setLayoutParameters({.flexGrow = 1.0F});
+    LayoutProbe& two = inner.emplaceChild<LayoutProbe>(Vec2{20.0F, 10.0F});
+    two.setLayoutParameters({.flexGrow = 2.0F});
+    nestedDocument.setRoot(std::move(outer));
+    static_cast<void>(nestedDocument.compose());
+    if (!(inner.frame() == Rect{{5.0F, 5.0F}, {115.0F, 75.0F}})
+        || !(one.frame() == Rect{{5.0F, 5.0F}, {47.0F, 75.0F}})
+        || !(two.frame() == Rect{{51.0F, 5.0F}, {115.0F, 75.0F}})
+        || !(one.lastConstraints == Constraints{{42.0F, 70.0F}, {42.0F, 70.0F}})
+        || !(two.lastConstraints == Constraints{{64.0F, 70.0F}, {64.0F, 70.0F}})) {
+        fail("Nested flex allocation was not remeasured under its final arranged size");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -146,6 +283,7 @@ int main() {
     TextRunCache cache(fonts);
     cache.reserve(32, 64);
     TextPainter painter(cache);
+    verifyConstraintSensitiveLayout(painter);
     UiDocument document(painter);
     document.reserve(512, 32);
     document.setViewport({320.0F, 200.0F});
