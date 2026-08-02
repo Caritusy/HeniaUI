@@ -1,5 +1,6 @@
 #include "henia/ui/backend/d3d12/D3D12Renderer.h"
 
+#include "D3D12TextureUploadTransaction.h"
 #include "../FixedError.h"
 
 #include <d3dcompiler.h>
@@ -255,22 +256,6 @@ float4 pixelMain(PixelInput input) : SV_Target {
     return description;
 }
 
-[[nodiscard]] bool waitForQueue(ID3D12Device& device, ID3D12CommandQueue& queue) noexcept {
-    ComPtr<ID3D12Fence> fence;
-    if (FAILED(device.CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) {
-        return false;
-    }
-    HANDLE eventHandle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (eventHandle == nullptr) {
-        return false;
-    }
-    const bool signaled = SUCCEEDED(queue.Signal(fence.Get(), 1));
-    const bool armed = signaled && SUCCEEDED(fence->SetEventOnCompletion(1, eventHandle));
-    const bool waited = armed && WaitForSingleObject(eventHandle, 10000) == WAIT_OBJECT_0;
-    CloseHandle(eventHandle);
-    return waited;
-}
-
 } // namespace
 
 struct D3D12Renderer::Implementation final {
@@ -279,6 +264,7 @@ struct D3D12Renderer::Implementation final {
         std::byte* mapped = nullptr;
         std::uint64_t uploadedIdentity = 0;
         std::uint64_t uploadedRevision = 0;
+        std::vector<ComPtr<ID3D12Resource>> retainedTextures;
     };
 
     struct GpuTexture final {
@@ -286,7 +272,24 @@ struct D3D12Renderer::Implementation final {
         std::uint64_t revision = 0;
     };
 
+    struct StagedTexture final {
+        ComPtr<ID3D12Resource> resource;
+        ComPtr<ID3D12Resource> upload;
+        D3D12_SHADER_RESOURCE_VIEW_DESC shaderView{};
+        std::uint32_t value = 0;
+        std::uint64_t revision = 0;
+    };
+
+    struct TextureUploadBatch final {
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> commandList;
+        detail::D3D12TextureUploadTransaction transaction;
+        std::vector<StagedTexture> staged;
+    };
+
     ComPtr<ID3D12Device> device;
+    ComPtr<ID3D12CommandQueue> textureUploadQueue;
+    ComPtr<ID3D12Fence> textureUploadFence;
     ComPtr<ID3D12RootSignature> rootSignature;
     ComPtr<ID3D12PipelineState> alphaPipeline;
     ComPtr<ID3D12PipelineState> additivePipeline;
@@ -294,13 +297,15 @@ struct D3D12Renderer::Implementation final {
     ComPtr<ID3D12DescriptorHeap> gpuBatchHeap;
     std::vector<Submission> submissions;
     std::vector<GpuTexture> textures;
+    std::vector<std::uint64_t> scheduledTextureRevisions;
+    std::vector<TextureUploadBatch> textureUploadBatches;
     std::vector<std::uint32_t> dirtyTextures;
-    std::vector<ComPtr<ID3D12Resource>> textureUploads;
     D3D12RendererConfiguration configuration{};
     DXGI_FORMAT renderTargetFormat = DXGI_FORMAT_UNKNOWN;
     std::uint32_t descriptorStride = 0;
     D3D12RenderStatistics statistics{};
     henia::detail::FixedError error;
+    std::uint64_t nextTextureUploadFenceValue = 1;
     bool ready = false;
 
     [[nodiscard]] bool initialize(
@@ -311,9 +316,12 @@ struct D3D12Renderer::Implementation final {
     [[nodiscard]] bool createPipelines() noexcept;
     [[nodiscard]] bool createDescriptorHeaps() noexcept;
     [[nodiscard]] bool createSubmissionBuffers() noexcept;
+    [[nodiscard]] bool createTextureUploadBatches() noexcept;
     [[nodiscard]] bool synchronizeTextures(
         const TextureStore& store,
         ID3D12CommandQueue& queue);
+    [[nodiscard]] bool pollTextureUploads() noexcept;
+    void rollbackTextureUpload(TextureUploadBatch& batch) noexcept;
     [[nodiscard]] bool record(
         const RenderPacket& packet,
         ID3D12GraphicsCommandList& commandList,
@@ -337,6 +345,7 @@ bool D3D12Renderer::Implementation::initialize(
         * requested.batchCapacity * DrawBatch::kTextureCapacity;
     if (requested.instanceCapacity == 0 || requested.submissionCapacity == 0
         || requested.batchCapacity == 0 || requested.textureCapacity == 0
+        || requested.textureUploadBatchCapacity == 0
         || gpuDescriptors > std::numeric_limits<std::uint32_t>::max()
         || format == DXGI_FORMAT_UNKNOWN) {
         error = "Invalid D3D12 renderer configuration";
@@ -348,13 +357,22 @@ bool D3D12Renderer::Implementation::initialize(
     renderTargetFormat = format;
     submissions.resize(configuration.submissionCapacity);
     textures.resize(configuration.textureCapacity);
+    scheduledTextureRevisions.resize(configuration.textureCapacity);
+    textureUploadBatches.resize(configuration.textureUploadBatchCapacity);
     dirtyTextures.reserve(configuration.textureCapacity);
-    textureUploads.reserve(configuration.textureCapacity);
+    for (Submission& submission : submissions) {
+        submission.retainedTextures.resize(configuration.textureCapacity);
+    }
+    for (TextureUploadBatch& batch : textureUploadBatches) {
+        batch.staged.reserve(configuration.textureCapacity);
+    }
     if (!createRootSignature() || !createPipelines() || !createDescriptorHeaps()
-        || !createSubmissionBuffers()) {
+        || !createSubmissionBuffers() || !createTextureUploadBatches()) {
         shutdown();
         return false;
     }
+    statistics = {};
+    nextTextureUploadFenceValue = 1;
     ready = true;
     error.clear();
     return true;
@@ -529,18 +547,50 @@ bool D3D12Renderer::Implementation::createSubmissionBuffers() noexcept {
     return true;
 }
 
+bool D3D12Renderer::Implementation::createTextureUploadBatches() noexcept {
+    if (FAILED(device->CreateFence(
+            0,
+            D3D12_FENCE_FLAG_NONE,
+            IID_PPV_ARGS(&textureUploadFence)))) {
+        error = "D3D12 texture upload fence creation failed";
+        return false;
+    }
+    for (TextureUploadBatch& batch : textureUploadBatches) {
+        if (FAILED(device->CreateCommandAllocator(
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                IID_PPV_ARGS(&batch.allocator)))
+            || FAILED(device->CreateCommandList(
+                0,
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                batch.allocator.Get(),
+                nullptr,
+                IID_PPV_ARGS(&batch.commandList)))
+            || FAILED(batch.commandList->Close())) {
+            error = "D3D12 texture upload command objects could not be created";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool D3D12Renderer::Implementation::synchronizeTextures(
     const TextureStore& store,
     ID3D12CommandQueue& queue) {
-    if (!ready || store.size() > configuration.textureCapacity) {
+    if (!ready) {
+        error = "D3D12 renderer is not initialized";
+        return false;
+    }
+    if (!pollTextureUploads()) {
+        return false;
+    }
+    if (store.size() > configuration.textureCapacity) {
         error = "D3D12 texture store exceeds configured capacity";
         return false;
     }
     dirtyTextures.clear();
-    textureUploads.clear();
     for (std::uint32_t value = 1; value <= store.size(); ++value) {
         const TextureView view = store.view(TextureHandle{value});
-        if (view.handle.valid() && textures[value - 1U].revision != view.revision) {
+        if (view.handle.valid() && scheduledTextureRevisions[value - 1U] != view.revision) {
             dirtyTextures.push_back(value);
         }
     }
@@ -549,18 +599,35 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
         return true;
     }
 
-    ComPtr<ID3D12CommandAllocator> allocator;
-    ComPtr<ID3D12GraphicsCommandList> commandList;
-    if (FAILED(device->CreateCommandAllocator(
-            D3D12_COMMAND_LIST_TYPE_DIRECT,
-            IID_PPV_ARGS(&allocator)))
-        || FAILED(device->CreateCommandList(
-            0,
-            D3D12_COMMAND_LIST_TYPE_DIRECT,
-            allocator.Get(),
-            nullptr,
-            IID_PPV_ARGS(&commandList)))) {
-        error = "D3D12 texture upload command objects could not be created";
+    if (queue.GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+        error = "D3D12 texture synchronization requires a direct command queue";
+        return false;
+    }
+    if (textureUploadQueue == nullptr) {
+        textureUploadQueue = &queue;
+    } else if (textureUploadQueue.Get() != &queue) {
+        error = "D3D12 texture synchronization must use one direct command queue";
+        return false;
+    }
+
+    TextureUploadBatch* uploadBatch = nullptr;
+    for (TextureUploadBatch& batch : textureUploadBatches) {
+        if (batch.transaction.begin()) {
+            uploadBatch = &batch;
+            break;
+        }
+    }
+    if (uploadBatch == nullptr) {
+        error = "D3D12 texture upload batches are all in flight";
+        return false;
+    }
+    TextureUploadBatch& batch = *uploadBatch;
+    batch.staged.clear();
+    if (FAILED(batch.allocator->Reset())
+        || FAILED(batch.commandList->Reset(batch.allocator.Get(), nullptr))) {
+        batch.transaction.abandon();
+        ++statistics.failedTextureUploadBatches;
+        error = "D3D12 texture upload command objects could not be reset";
         return false;
     }
 
@@ -568,15 +635,16 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
         const TextureView view = store.view(TextureHandle{value});
         const D3D12_RESOURCE_DESC textureDesc = textureDescription(view);
         const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
-        ComPtr<ID3D12Resource> texture;
+        StagedTexture staged{};
         if (FAILED(device->CreateCommittedResource(
                 &defaultHeap,
                 D3D12_HEAP_FLAG_NONE,
                 &textureDesc,
                 D3D12_RESOURCE_STATE_COPY_DEST,
                 nullptr,
-                IID_PPV_ARGS(&texture)))) {
+                IID_PPV_ARGS(&staged.resource)))) {
             error = "D3D12 texture resource creation failed";
+            rollbackTextureUpload(batch);
             return false;
         }
 
@@ -596,22 +664,24 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
 
         const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
         const D3D12_RESOURCE_DESC uploadDesc = bufferDescription(uploadBytes);
-        ComPtr<ID3D12Resource> upload;
         if (FAILED(device->CreateCommittedResource(
                 &uploadHeap,
                 D3D12_HEAP_FLAG_NONE,
                 &uploadDesc,
                 D3D12_RESOURCE_STATE_GENERIC_READ,
                 nullptr,
-                IID_PPV_ARGS(&upload)))) {
+                IID_PPV_ARGS(&staged.upload)))) {
             error = "D3D12 texture upload buffer creation failed";
+            rollbackTextureUpload(batch);
             return false;
         }
 
         std::byte* mapped = nullptr;
         const D3D12_RANGE noRead{0, 0};
-        if (FAILED(upload->Map(0, &noRead, reinterpret_cast<void**>(&mapped))) || mapped == nullptr) {
+        if (FAILED(staged.upload->Map(0, &noRead, reinterpret_cast<void**>(&mapped)))
+            || mapped == nullptr) {
             error = "D3D12 texture upload mapping failed";
+            rollbackTextureUpload(batch);
             return false;
         }
         for (UINT row = 0; row < rowCount; ++row) {
@@ -621,51 +691,111 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
                 static_cast<std::size_t>(rowBytes));
         }
         const D3D12_RANGE written{0, static_cast<SIZE_T>(uploadBytes)};
-        upload->Unmap(0, &written);
+        staged.upload->Unmap(0, &written);
 
         D3D12_TEXTURE_COPY_LOCATION destination{};
-        destination.pResource = texture.Get();
+        destination.pResource = staged.resource.Get();
         destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         destination.SubresourceIndex = 0;
         D3D12_TEXTURE_COPY_LOCATION source{};
-        source.pResource = upload.Get();
+        source.pResource = staged.upload.Get();
         source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         source.PlacedFootprint = footprint;
-        commandList->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        batch.commandList->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
 
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = texture.Get();
+        barrier.Transition.pResource = staged.resource.Get();
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        commandList->ResourceBarrier(1, &barrier);
+        batch.commandList->ResourceBarrier(1, &barrier);
 
-        D3D12_SHADER_RESOURCE_VIEW_DESC shaderView{};
-        shaderView.Format = textureDesc.Format;
-        shaderView.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        shaderView.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        shaderView.Texture2D.MipLevels = 1;
-        device->CreateShaderResourceView(texture.Get(), &shaderView, cpuDescriptor(value));
-
-        textures[value - 1U].resource = std::move(texture);
-        textures[value - 1U].revision = view.revision;
-        textureUploads.push_back(std::move(upload));
+        staged.shaderView.Format = textureDesc.Format;
+        staged.shaderView.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        staged.shaderView.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        staged.shaderView.Texture2D.MipLevels = 1;
+        staged.value = value;
+        staged.revision = view.revision;
+        batch.staged.push_back(std::move(staged));
     }
 
-    if (FAILED(commandList->Close())) {
+    if (FAILED(batch.commandList->Close())) {
+        batch.transaction.abandon();
+        ++statistics.failedTextureUploadBatches;
         error = "D3D12 texture upload command list could not be closed";
         return false;
     }
-    ID3D12CommandList* commandLists[]{commandList.Get()};
+    ID3D12CommandList* commandLists[]{batch.commandList.Get()};
     queue.ExecuteCommandLists(1, commandLists);
-    if (!waitForQueue(*device.Get(), queue)) {
-        error = "D3D12 texture upload queue did not become idle";
+    const std::uint64_t fenceValue = nextTextureUploadFenceValue;
+    if (FAILED(queue.Signal(textureUploadFence.Get(), fenceValue))) {
+        batch.transaction.abandon();
+        ++statistics.failedTextureUploadBatches;
+        error = "D3D12 texture upload fence signal failed; submitted resources were retained";
+        return false;
+    }
+    static_cast<void>(batch.transaction.submit(fenceValue));
+    ++nextTextureUploadFenceValue;
+    ++statistics.textureUploadBatches;
+    for (const StagedTexture& staged : batch.staged) {
+        scheduledTextureRevisions[staged.value - 1U] = staged.revision;
+    }
+
+    error.clear();
+    return true;
+}
+
+void D3D12Renderer::Implementation::rollbackTextureUpload(TextureUploadBatch& batch) noexcept {
+    // Reset is legal only after Close. If Close itself fails, retain the batch
+    // until shutdown because the command-list state can no longer be trusted.
+    if (SUCCEEDED(batch.commandList->Close())) {
+        batch.staged.clear();
+        batch.transaction.rollback();
+    } else {
+        batch.transaction.abandon();
+    }
+    ++statistics.failedTextureUploadBatches;
+}
+
+bool D3D12Renderer::Implementation::pollTextureUploads() noexcept {
+    if (!ready && textureUploadFence == nullptr) {
+        error = "D3D12 renderer is not initialized";
+        return false;
+    }
+    const std::uint64_t completedFence = textureUploadFence->GetCompletedValue();
+    if (completedFence == std::numeric_limits<std::uint64_t>::max()) {
+        error = "D3D12 texture upload fence reported device removal";
         return false;
     }
 
-    statistics.textureUploads += dirtyTextures.size();
-    textureUploads.clear();
+    while (true) {
+        TextureUploadBatch* completedBatch = nullptr;
+        for (TextureUploadBatch& batch : textureUploadBatches) {
+            if (batch.transaction.completed(completedFence)
+                && (completedBatch == nullptr
+                    || batch.transaction.fenceValue()
+                        < completedBatch->transaction.fenceValue())) {
+                completedBatch = &batch;
+            }
+        }
+        if (completedBatch == nullptr) {
+            break;
+        }
+
+        for (StagedTexture& staged : completedBatch->staged) {
+            device->CreateShaderResourceView(
+                staged.resource.Get(),
+                &staged.shaderView,
+                cpuDescriptor(staged.value));
+            GpuTexture& texture = textures[staged.value - 1U];
+            texture.resource = std::move(staged.resource);
+            texture.revision = staged.revision;
+        }
+        statistics.textureUploads += completedBatch->staged.size();
+        completedBatch->staged.clear();
+        static_cast<void>(completedBatch->transaction.release(completedFence));
+    }
     error.clear();
     return true;
 }
@@ -683,7 +813,15 @@ bool D3D12Renderer::Implementation::record(
         error = "D3D12 render packet exceeds a configured frame capacity";
         return false;
     }
+    if (!pollTextureUploads()) {
+        ++statistics.rejectedFrames;
+        return false;
+    }
+    Submission& submission = submissions[submissionSlot];
     if (packet.instances().empty() || packet.batches().empty()) {
+        for (ComPtr<ID3D12Resource>& retained : submission.retainedTextures) {
+            retained.Reset();
+        }
         ++statistics.recordedFrames;
         error.clear();
         return true;
@@ -700,7 +838,18 @@ bool D3D12Renderer::Implementation::record(
         }
     }
 
-    Submission& submission = submissions[submissionSlot];
+    // Reaching record means the host has declared this slot's preceding fence
+    // complete. Release its old texture generation and retain every generation
+    // whose descriptor is copied for the new submission.
+    for (ComPtr<ID3D12Resource>& retained : submission.retainedTextures) {
+        retained.Reset();
+    }
+    for (const DrawBatch& batch : packet.batches()) {
+        for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
+            const std::uint32_t index = batch.textures[slot].value() - 1U;
+            submission.retainedTextures[index] = textures[index].resource;
+        }
+    }
     if (submission.uploadedIdentity != packet.identity() || submission.uploadedRevision != packet.revision()) {
         std::memcpy(submission.mapped, packet.instances().data(), packet.instances().size_bytes());
         submission.uploadedIdentity = packet.identity();
@@ -786,12 +935,16 @@ void D3D12Renderer::Implementation::shutdown() noexcept {
         submission.mapped = nullptr;
         submission.uploadedIdentity = 0;
         submission.uploadedRevision = 0;
+        submission.retainedTextures.clear();
         submission.instances.Reset();
     }
     submissions.clear();
     textures.clear();
+    scheduledTextureRevisions.clear();
     dirtyTextures.clear();
-    textureUploads.clear();
+    textureUploadBatches.clear();
+    textureUploadFence.Reset();
+    textureUploadQueue.Reset();
     gpuBatchHeap.Reset();
     cpuTextureHeap.Reset();
     additivePipeline.Reset();
@@ -801,6 +954,7 @@ void D3D12Renderer::Implementation::shutdown() noexcept {
     configuration = {};
     renderTargetFormat = DXGI_FORMAT_UNKNOWN;
     descriptorStride = 0;
+    nextTextureUploadFenceValue = 1;
     ready = false;
 }
 
@@ -850,6 +1004,10 @@ bool D3D12Renderer::synchronizeTextures(
     }
 }
 
+bool D3D12Renderer::pollTextureUploads() noexcept {
+    return mImplementation->pollTextureUploads();
+}
+
 bool D3D12Renderer::record(
     const RenderPacket& packet,
     ID3D12GraphicsCommandList& commandList,
@@ -874,6 +1032,16 @@ std::size_t D3D12Renderer::instanceCapacity() const noexcept {
 
 std::uint32_t D3D12Renderer::submissionCapacity() const noexcept {
     return mImplementation->configuration.submissionCapacity;
+}
+
+std::uint32_t D3D12Renderer::pendingTextureUploadBatches() const noexcept {
+    std::uint32_t pending = 0;
+    for (const Implementation::TextureUploadBatch& batch : mImplementation->textureUploadBatches) {
+        if (batch.transaction.state() == detail::D3D12TextureUploadState::Pending) {
+            ++pending;
+        }
+    }
+    return pending;
 }
 
 D3D12RenderStatistics D3D12Renderer::statistics() const noexcept {
