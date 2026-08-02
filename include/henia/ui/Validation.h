@@ -75,17 +75,43 @@ namespace henia::ui {
     if (const std::string_view issue = validateColor(command.color); !issue.empty()) return issue;
     if (!std::isfinite(command.radius) || command.radius < 0.0F) return "radius";
     if (!std::isfinite(command.thickness) || command.thickness < 0.0F) return "thickness";
+    if (static_cast<std::uint8_t>(command.lineCap) > static_cast<std::uint8_t>(LineCap::Round)) {
+        return "line.cap";
+    }
+    if (static_cast<std::uint8_t>(command.lineJoin) > static_cast<std::uint8_t>(LineJoin::Round)) {
+        return "line.join";
+    }
+    if ((command.lineFlags & ~(kLineHasPrevious | kLineHasNext)) != 0) return "line.flags";
     if (command.clip.enabled) {
         if (const std::string_view issue = validateRect(command.clip.area, "clip.area"); !issue.empty()) {
             return issue;
         }
     }
     if (command.kind == PrimitiveKind::Line) {
+        const auto validSegment = [](Vec2 start, Vec2 finish) noexcept {
+            const double deltaX = static_cast<double>(finish.x) - start.x;
+            const double deltaY = static_cast<double>(finish.y) - start.y;
+            const double length = std::hypot(deltaX, deltaY);
+            return start != finish && std::isfinite(length)
+                && length <= static_cast<double>(std::numeric_limits<float>::max());
+        };
         if (!std::isfinite(command.pointA.x)) return "pointA.x";
         if (!std::isfinite(command.pointA.y)) return "pointA.y";
         if (!std::isfinite(command.pointB.x)) return "pointB.x";
         if (!std::isfinite(command.pointB.y)) return "pointB.y";
-        if (command.pointA == command.pointB || command.thickness <= 0.0F) return "line.geometry";
+        if (!validSegment(command.pointA, command.pointB) || command.thickness <= 0.0F) {
+            return "line.geometry";
+        }
+        if ((command.lineFlags & kLineHasPrevious) != 0) {
+            if (!std::isfinite(command.uv.min.x)) return "line.previous.x";
+            if (!std::isfinite(command.uv.min.y)) return "line.previous.y";
+            if (!validSegment(command.uv.min, command.pointA)) return "line.previous";
+        }
+        if ((command.lineFlags & kLineHasNext) != 0) {
+            if (!std::isfinite(command.uv.max.x)) return "line.next.x";
+            if (!std::isfinite(command.uv.max.y)) return "line.next.y";
+            if (!validSegment(command.pointB, command.uv.max)) return "line.next";
+        }
     }
     if (command.kind == PrimitiveKind::Image || command.kind == PrimitiveKind::Glyph) {
         if (!command.texture.valid()) return "texture";

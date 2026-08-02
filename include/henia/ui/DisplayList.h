@@ -22,6 +22,21 @@ enum class PrimitiveKind : std::uint8_t {
     Glyph,
 };
 
+enum class LineCap : std::uint8_t {
+    Butt,
+    Square,
+    Round,
+};
+
+enum class LineJoin : std::uint8_t {
+    Bevel,
+    Round,
+};
+
+inline constexpr std::uint8_t kLineHasPrevious = 1U << 0U;
+inline constexpr std::uint8_t kLineHasNext = 1U << 1U;
+inline constexpr float kAnalyticAaFringe = 2.0F;
+
 struct DrawCommand final {
     PrimitiveKind kind = PrimitiveKind::SolidRect;
     BlendMode blend     = BlendMode::PremultipliedAlpha;
@@ -34,6 +49,9 @@ struct DrawCommand final {
     Color color{};
     float radius    = 0.0F;
     float thickness = 0.0F;
+    LineCap lineCap = LineCap::Round;
+    LineJoin lineJoin = LineJoin::Round;
+    std::uint8_t lineFlags = 0;
 };
 
 // A stable, independently revisioned slice of retained paint output. Segment

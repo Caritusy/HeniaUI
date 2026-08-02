@@ -64,7 +64,7 @@ void testMixedUiUsesOneBatch() {
 
     const RenderPacket packet = frame.finish();
     require(packet.statistics().sourceCommands == 1027, "unexpected source command count");
-    require(packet.instances().size() == 1027, "unexpected instance count");
+    require(packet.instances().size() == 1034, "unexpected tight-geometry instance count");
     require(packet.batches().size() == 1, "shape and glyph work did not merge into one UI batch");
     require(packet.batches().front().textureCount == 1, "font atlas was not assigned to the batch texture table");
 }
@@ -149,6 +149,74 @@ void testNestedClipIntersection() {
         "nested clip was not intersected");
 }
 
+void testTightAnalyticGeometryAndLineStyles() {
+    static_assert(sizeof(DrawInstance) == 80, "line styles must stay inside instance padding");
+
+    Frame frame;
+    frame.reserve(5, 12, 4, CapacityPolicy::Fixed);
+    frame.setFragmentAreaTracking(true);
+    Canvas& canvas = frame.begin();
+    canvas.fillRect({{10.0F, 20.0F}, {110.0F, 70.0F}}, {}, 8.0F);
+    canvas.strokeRect({{0.0F, 0.0F}, {1000.0F, 500.0F}}, {}, 12.0F, 2.0F);
+    canvas.line(
+        {0.0F, 0.0F},
+        {1920.0F, 1080.0F},
+        {},
+        1.0F,
+        LineCap::Butt);
+    const std::array polylinePoints{
+        Vec2{20.0F, 100.0F},
+        Vec2{50.0F, 70.0F},
+        Vec2{80.0F, 100.0F},
+    };
+    canvas.polyline(
+        polylinePoints,
+        {0.2F, 0.4F, 0.8F, 0.5F},
+        6.0F,
+        false,
+        LineCap::Square,
+        LineJoin::Bevel);
+
+    const std::span<const DrawCommand> commands = frame.displayList().commands();
+    require(commands.size() == 5, "polyline did not retain one compact command per segment");
+    require(commands[3].lineCap == LineCap::Square
+            && commands[3].lineJoin == LineJoin::Bevel
+            && commands[3].lineFlags == kLineHasNext
+            && commands[3].uv.max == polylinePoints[2]
+            && commands[4].lineFlags == kLineHasPrevious
+            && commands[4].uv.min == polylinePoints[0],
+        "polyline cap/join adjacency metadata is incorrect");
+    require(commands[3].bounds.min.x < 15.0F && commands[3].bounds.max.y > 107.0F,
+        "rotated square-cap bounds do not contain the generated geometry");
+
+    const RenderPacket packet = frame.finish();
+    require(packet.statistics().sourceCommands == 5 && packet.instances().size() == 12,
+        "tight stroke compilation produced an unexpected instance topology");
+    require(packet.instances()[0].bounds == Rect{{10.0F, 20.0F}, {110.0F, 70.0F}},
+        "filled rectangle did not preserve logical bounds for shader-side AA expansion");
+
+    double strokeArea = 0.0;
+    for (std::size_t index = 1; index <= 8; ++index) {
+        const Rect bounds = packet.instances()[index].bounds;
+        strokeArea += static_cast<double>(bounds.width()) * bounds.height();
+        require(packet.instances()[index].pointA == Vec2{0.0F, 0.0F}
+                && packet.instances()[index].pointB == Vec2{1000.0F, 500.0F},
+            "stroke region lost its original logical rectangle");
+    }
+    const double fullStrokeRectangle = 1004.0 * 504.0;
+    require(strokeArea < fullStrokeRectangle * 0.1,
+        "rectangle stroke geometry still shades its full interior");
+
+    Frame lineFrame;
+    lineFrame.reserve(1, 1, 1, CapacityPolicy::Fixed);
+    lineFrame.setFragmentAreaTracking(true);
+    lineFrame.begin().line({0.0F, 0.0F}, {1920.0F, 1080.0F}, {}, 1.0F, LineCap::Butt);
+    const RenderPacket linePacket = lineFrame.finish();
+    const std::uint64_t oldAxisAlignedArea = 1925U * 1085U;
+    require(linePacket.statistics().estimatedFragmentArea < oldAxisAlignedArea / 100U,
+        "viewport diagonal line did not compile to a narrow oriented geometry bound");
+}
+
 void testFixedCapacityOverflowIsRejected() {
     Frame frame;
     frame.reserve(1, 1, CapacityPolicy::Fixed);
@@ -186,11 +254,16 @@ void testInvalidGeometryAndCheckedArithmetic() {
     const float infinity = std::numeric_limits<float>::infinity();
     canvas.fillRect({{0.0F, 0.0F}, {nan, 1.0F}}, {});
     canvas.line({0.0F, 0.0F}, {1.0F, infinity}, {}, 1.0F);
+    canvas.line(
+        {-std::numeric_limits<float>::max(), 0.0F},
+        {std::numeric_limits<float>::max(), 0.0F},
+        {},
+        1.0F);
     canvas.strokeRect({{0.0F, 0.0F}, {4.0F, 4.0F}}, {}, nan, 1.0F);
     require(!canvas.pushClip({{5.0F, 0.0F}, {4.0F, 1.0F}}),
         "inverted clip rectangle was accepted");
-    require(displayList.commands().empty() && canvas.rejectedCommands() == 4
-            && canvas.invalidInputCommands() == 4 && canvas.capacityRejectedCommands() == 0,
+    require(displayList.commands().empty() && canvas.rejectedCommands() == 5
+            && canvas.invalidInputCommands() == 5 && canvas.capacityRejectedCommands() == 0,
         "non-finite/inverted Canvas inputs were not rejected and classified");
     require(canvas.lastError() == "clip.area",
         "Canvas diagnostics did not identify the rejected field");
@@ -450,6 +523,7 @@ int main() {
     testTextureTableOverflowStartsOneNewBatch();
     testWarmFrameDoesNotGrow();
     testNestedClipIntersection();
+    testTightAnalyticGeometryAndLineStyles();
     testFixedCapacityOverflowIsRejected();
     testInvalidGeometryAndCheckedArithmetic();
     testPacketSnapshotsRemainImmutable();

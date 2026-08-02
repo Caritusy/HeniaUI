@@ -35,6 +35,12 @@ public:
         std::size_t batchCapacity,
         CapacityPolicy capacityPolicy = CapacityPolicy::Grow,
         std::size_t snapshotSlots = RenderPacketBuilder::kDefaultSnapshotSlots);
+    void reserve(
+        std::size_t commandCapacity,
+        std::size_t instanceCapacity,
+        std::size_t batchCapacity,
+        CapacityPolicy capacityPolicy = CapacityPolicy::Grow,
+        std::size_t snapshotSlots = RenderPacketBuilder::kDefaultSnapshotSlots);
     void setRoot(std::unique_ptr<Widget> root);
     // Structural changes requested from an input/focus callback are applied in
     // request order after the outer callback returns. A false result means the
@@ -46,6 +52,8 @@ public:
     [[nodiscard]] Vec2 viewport() const noexcept;
     void setTheme(Theme theme) noexcept;
     [[nodiscard]] const Theme& theme() const noexcept;
+    void setFragmentAreaTracking(bool enabled) noexcept;
+    [[nodiscard]] bool fragmentAreaTracking() const noexcept;
 
     // Stable documents return a handle to the same immutable snapshot storage.
     [[nodiscard]] RenderPacket compose();

@@ -219,6 +219,7 @@ struct ScenarioResult final {
     std::uint64_t submittedInstances = 0;
     std::uint64_t uploadBytes = 0;
     std::uint64_t coldUploadBytes = 0;
+    std::uint64_t estimatedFragmentArea = 0;
     std::uint64_t cpuResidentBytes = 0;
     std::uint64_t gpuBufferBytes = 0;
     std::uint64_t textureBytes = 0;
@@ -461,6 +462,51 @@ template <typename Operation>
     result.submittedInstances = packet.instances().size();
     result.uploadBytes = packet.instances().size() * sizeof(DrawInstance);
     result.coldUploadBytes = result.uploadBytes;
+    result.cpuResidentBytes = frame.displayList().capacity() * sizeof(DrawCommand)
+        + packet.instanceCapacity() * sizeof(DrawInstance)
+        + packet.batchCapacity() * sizeof(DrawBatch);
+    result.gpuBufferBytes = packet.instanceCapacity() * sizeof(DrawInstance);
+    return result;
+}
+
+[[nodiscard]] ScenarioResult benchmarkAnalyticFragmentBounds(const Options& options) {
+    using namespace henia::ui;
+    Frame frame;
+    frame.reserve(2, 9, 4, CapacityPolicy::Fixed);
+    frame.setFragmentAreaTracking(true);
+    RenderPacket packet;
+    ScenarioResult result = measureScenario(
+        "analytic_2d_fragment_bounds",
+        options,
+        [&](std::size_t iteration) {
+            const auto paintStarted = Clock::now();
+            Canvas& canvas = frame.begin();
+            canvas.line(
+                {0.0F, 0.0F},
+                {1920.0F, 1080.0F},
+                {0.2F, 0.65F, 0.95F, 1.0F},
+                1.0F,
+                LineCap::Butt);
+            canvas.strokeRect(
+                {{100.0F, 100.0F}, {1820.0F, 980.0F}},
+                {0.95F, 0.65F, 0.2F, 1.0F},
+                16.0F,
+                2.0F);
+            const std::uint64_t paint = nanosecondsSince(paintStarted);
+            const auto packetStarted = Clock::now();
+            packet = frame.finish();
+            const std::uint64_t compile = nanosecondsSince(packetStarted);
+            return IterationPhases{
+                .paintBuildNanoseconds = paint,
+                .packetCompileNanoseconds = compile,
+                .checksum = packet.statistics().estimatedFragmentArea ^ iteration,
+            };
+        });
+    result.drawCalls = packet.batches().size();
+    result.submittedInstances = packet.instances().size();
+    result.uploadBytes = packet.instances().size() * sizeof(DrawInstance);
+    result.coldUploadBytes = result.uploadBytes;
+    result.estimatedFragmentArea = packet.statistics().estimatedFragmentArea;
     result.cpuResidentBytes = frame.displayList().capacity() * sizeof(DrawCommand)
         + packet.instanceCapacity() * sizeof(DrawInstance)
         + packet.batchCapacity() * sizeof(DrawBatch);
@@ -729,14 +775,15 @@ template <typename Operation>
 [[nodiscard]] bool verify(std::span<const ScenarioResult> results) {
     const ScenarioResult* tessellation = findScenario(results, "imdrawlist_cpu_tessellation");
     const ScenarioResult* primitives = findScenario(results, "henia_many_primitives");
+    const ScenarioResult* analytic = findScenario(results, "analytic_2d_fragment_bounds");
     const ScenarioResult* retained = findScenario(results, "retained_static_ui");
     const ScenarioResult* fullDynamic = findScenario(results, "full_repaint_dynamic_ui");
     const ScenarioResult* dynamic = findScenario(results, "retained_dynamic_dirty_ui");
     const ScenarioResult* text = findScenario(results, "text_heavy_ui");
     const ScenarioResult* full3d = findScenario(results, "large_3d_full_build");
     const ScenarioResult* dirty3d = findScenario(results, "large_3d_dirty_update");
-    bool valid = tessellation != nullptr && primitives != nullptr && retained != nullptr
-        && fullDynamic != nullptr && dynamic != nullptr && text != nullptr
+    bool valid = tessellation != nullptr && primitives != nullptr && analytic != nullptr
+        && retained != nullptr && fullDynamic != nullptr && dynamic != nullptr && text != nullptr
         && full3d != nullptr && dirty3d != nullptr;
     if (!valid) {
         std::cerr << "Benchmark verification: a required scenario is missing\n";
@@ -745,6 +792,9 @@ template <typename Operation>
     valid = primitives->submittedInstances == kPrimitiveCount
         && primitives->drawCalls == 1
         && tessellation->uploadBytes > primitives->uploadBytes * 4U
+        && analytic->submittedInstances == 9
+        && analytic->estimatedFragmentArea > 0
+        && analytic->estimatedFragmentArea < (1925U * 1085U + 1724U * 884U) / 8U
         && retained->allocationsMedian == 0
         && retained->uploadBytes == 0
         && retained->cacheHits >= retained->iterations
@@ -823,6 +873,8 @@ void writeJson(
                << "        \"submitted_instances\": " << result.submittedInstances << ",\n"
                << "        \"upload_bytes\": " << result.uploadBytes << ",\n"
                << "        \"cold_upload_bytes\": " << result.coldUploadBytes << ",\n"
+               << "        \"estimated_fragment_area_px\": "
+               << result.estimatedFragmentArea << ",\n"
                << "        \"timestamp_available\": "
                << (result.gpuTimestampAvailable ? "true" : "false") << ",\n"
                << "        \"timestamp_ns\": " << result.gpuNanoseconds << "\n"
@@ -914,9 +966,10 @@ int main(int argc, char** argv) {
     }
     try {
         std::vector<ScenarioResult> results;
-        results.reserve(8);
+        results.reserve(9);
         results.push_back(benchmarkTessellation(options));
         results.push_back(benchmarkManyPrimitives(options));
+        results.push_back(benchmarkAnalyticFragmentBounds(options));
         results.push_back(benchmarkStaticRetained(options));
         results.push_back(benchmarkDynamicFullRepaint(options));
         results.push_back(benchmarkDynamicDirty(options));

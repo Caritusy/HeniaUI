@@ -3,6 +3,7 @@
 #include "henia/ui/DisplayList.h"
 #include "henia/ui/RenderPacket.h"
 
+#include <array>
 #include <span>
 #include <vector>
 
@@ -10,6 +11,8 @@ namespace henia::ui {
 
 class BatchCompiler final {
 public:
+    void setFragmentAreaTracking(bool enabled) noexcept;
+    [[nodiscard]] bool fragmentAreaTracking() const noexcept;
     [[nodiscard]] bool compile(
         const DisplayList& displayList,
         RenderPacketBuilder& output) const noexcept;
@@ -45,7 +48,11 @@ private:
         PreparedSegment& output) const noexcept;
     [[nodiscard]] static bool append(
         const PreparedCommand& command,
-        RenderPacketBuilder& output) noexcept;
+        RenderPacketBuilder& output,
+        bool trackFragmentArea) noexcept;
+    [[nodiscard]] static std::size_t prepareCommand(
+        const DrawCommand& command,
+        std::span<PreparedCommand, 8> output) noexcept;
     [[nodiscard]] static bool compatible(const DrawBatch& batch, const DrawCommand& command) noexcept;
     [[nodiscard]] static bool compatible(
         const DrawBatch& batch,
@@ -57,8 +64,11 @@ private:
     [[nodiscard]] static DrawInstance makeInstance(
         const DrawCommand& command,
         std::uint32_t textureSlot) noexcept;
+    [[nodiscard]] static std::uint64_t estimateFragmentArea(
+        const DrawInstance& instance) noexcept;
 
     mutable std::vector<PreparedSegment> mPreparedSegments;
+    bool mTrackFragmentArea = false;
 };
 
 } // namespace henia::ui

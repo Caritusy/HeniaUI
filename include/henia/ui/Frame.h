@@ -18,7 +18,17 @@ public:
         std::size_t batchCapacity,
         CapacityPolicy capacityPolicy = CapacityPolicy::Grow,
         std::size_t snapshotSlots = RenderPacketBuilder::kDefaultSnapshotSlots);
+    void reserve(
+        std::size_t commandCapacity,
+        std::size_t instanceCapacity,
+        std::size_t batchCapacity,
+        CapacityPolicy capacityPolicy = CapacityPolicy::Grow,
+        std::size_t snapshotSlots = RenderPacketBuilder::kDefaultSnapshotSlots);
     [[nodiscard]] Canvas& begin() noexcept;
+    // Optional because computing a conservative area for every instance has a
+    // measurable producer cost. Enable around profiling/benchmark captures.
+    void setFragmentAreaTracking(bool enabled) noexcept;
+    [[nodiscard]] bool fragmentAreaTracking() const noexcept;
     // Returns a cheap immutable handle. Keep the handle alive for as long as any
     // spans obtained from it are consumed.
     [[nodiscard]] RenderPacket finish();

@@ -10,6 +10,7 @@ versioned JSON document suitable for CI comparison.
 |---|---|
 | `imdrawlist_cpu_tessellation` | ImDrawList-style CPU expansion of 4,096 rounded rectangles into 32-edge fans, vertices, and indices. This is an explicit model, not a linked copy of Dear ImGui. |
 | `henia_many_primitives` | The same 4,096 rounded rectangles recorded as Henia draw instances and packet-compiled. |
+| `analytic_2d_fragment_bounds` | A 1 px viewport diagonal plus a large rounded rectangle stroke, tracking the conservative fragment-area bound of their generated quads. |
 | `retained_static_ui` | A 128-label retained widget tree returning its unchanged immutable packet. |
 | `full_repaint_dynamic_ui` | One animated label color followed by the previous full-tree paint and packet-compilation path. |
 | `retained_dynamic_dirty_ui` | The same animation through `UiDocument`; stable sibling ranges and compiled segments are reused. |
@@ -31,7 +32,9 @@ allocators.
 
 GPU-work fields are deterministic submission facts: draw calls, submitted
 instances, steady-state upload bytes, cold upload bytes, configured GPU-buffer
-bytes, and texture bytes. The portable harness does not create a graphics
+bytes, texture bytes, and the conservative pre-clip pixel area of generated
+quads. The area is a deterministic fragment-work upper bound, not a hardware
+occlusion query. The portable harness does not create a graphics
 device, so `timestamp_available` is false and `timestamp_ns` is zero. A host
 benchmark with timestamp queries can populate the same fields from
 `RenderProfile::gpuNanoseconds`; HeniaUI never substitutes CPU time for a GPU
@@ -69,7 +72,9 @@ frequency: the retained path allocates/uploads nothing on stable frames, all
 4,096 primitives remain one draw, text-cache misses stay zero after prewarm,
 instance upload bytes remain materially below tessellated bytes, one dirty UI
 leaf rebuilds one retained segment and is faster than the paired full repaint,
-and a one-box 3D update advertises one instance rather than a full GPU upload.
+the diagonal/stroke scene stays below one eighth of its former axis-aligned/full-
+interior fragment bound, and a one-box 3D update advertises one instance rather
+than a full GPU upload.
 
 To compare two runs captured on the same machine:
 
@@ -117,3 +122,10 @@ CI uses same-runner relative comparison and deterministic work/memory fields.
 For the paired 128-label animation, retained subtree composition reduced median
 CPU time by 89.4% while preserving the exact submitted instance workload and
 performing zero steady-state allocations.
+
+The #17 tight-geometry capture uses a 1,920 x 1,080 diagonal and a 1,720 x 880
+rounded stroke. Their former axis-aligned/full-interior quads bounded 3,612,641
+fragment pixels. The oriented line plus eight non-overlapping stroke regions
+bound 42,763 pixels, a 98.8% reduction, while remaining one draw batch. The
+Release capture compiled the two commands to nine 80-byte instances in 0.6 us
+median with zero steady-state allocations.

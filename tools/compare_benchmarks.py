@@ -88,6 +88,15 @@ def main() -> int:
                     f"({before_value} -> {after_value})"
                 )
 
+        if "estimated_fragment_area_px" in before["gpu"]:
+            before_area = int(before["gpu"]["estimated_fragment_area_px"])
+            after_area = int(after["gpu"].get("estimated_fragment_area_px", 0))
+            if after_area > before_area:
+                failures.append(
+                    f"{name}: gpu.estimated_fragment_area_px increased "
+                    f"({before_area} -> {after_area})"
+                )
+
         for field in ("cpu_resident_bytes", "gpu_buffer_bytes", "texture_bytes"):
             before_value = int(before["memory"][field])
             after_value = int(after["memory"][field])

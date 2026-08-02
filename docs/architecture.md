@@ -45,6 +45,33 @@ overflow publishes no partial packet and is reported in `PacketStatistics`.
 Grow mode may expand retained vectors, but allocation failure is converted into
 the same rejection path rather than escaping a `noexcept` boundary.
 
+### Analytic 2D geometry
+
+Analytic shape instances keep logical SDF bounds separate from raster geometry.
+Filled and stroked rectangles expand their GPU geometry by a controlled two-pixel
+fringe, so the outside half of the antialias transition is not clipped while
+the fragment shader continues to evaluate the caller's original rectangle.
+`StrokeRect` compiles to up to eight non-overlapping edge/corner regions instead
+of shading its full interior. Fixed-capacity callers can use the `Frame::reserve`
+and `UiDocument::reserve` overloads with separate command and expanded-instance
+budgets.
+
+Lines are expanded by the vertex shader into oriented pixel-space quads. Their
+width therefore stays in framebuffer pixels at every angle and viewport size;
+the host applies any desired logical-coordinate/DPI transform before recording.
+Open paths expose butt, square, and round caps. Polylines expose bevel and round
+joins. Adjacent segments carry their neighbor endpoints and partition coverage
+by signed distance, while the incoming segment owns the bevel triangle. This
+keeps translucent joins from blending twice without a stencil pass or an
+offscreen mask.
+
+When `Frame::setFragmentAreaTracking(true)` is enabled,
+`PacketStatistics::estimatedFragmentArea` sums a conservative pre-clip area of
+the generated quads. Tracking is opt-in because its producer-side arithmetic is
+measurable. It makes fragment-work regressions observable alongside draw/instance
+counts; it is deliberately not presented as a hardware occlusion or timestamp
+query.
+
 Text is decoded as strict UTF-8, shaped into cached text runs, and rendered from texture atlases. The Win32 font loader is optional and is not part of the platform-neutral core.
 The text-run cache has a configurable maximum entry count and reuses old slots, so rapidly changing telemetry strings cannot cause unbounded process-lifetime growth.
 

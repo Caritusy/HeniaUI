@@ -3,17 +3,53 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace henia::ui {
 namespace {
 
 [[nodiscard]] bool visible(Color color) noexcept { return color.alpha > 0.0F; }
 
-[[nodiscard]] Rect lineBounds(Vec2 from, Vec2 to, float thickness) noexcept {
-    const float half = thickness * 0.5F;
+[[nodiscard]] bool validLineSegment(Vec2 from, Vec2 to) noexcept {
+    const double deltaX = static_cast<double>(to.x) - from.x;
+    const double deltaY = static_cast<double>(to.y) - from.y;
+    const double length = std::hypot(deltaX, deltaY);
+    return from != to && std::isfinite(length)
+        && length <= static_cast<double>(std::numeric_limits<float>::max());
+}
+
+[[nodiscard]] Rect lineBounds(
+    Vec2 from,
+    Vec2 to,
+    float thickness,
+    LineCap cap,
+    std::uint8_t flags) noexcept {
+    const double deltaX = static_cast<double>(to.x) - from.x;
+    const double deltaY = static_cast<double>(to.y) - from.y;
+    const double length = std::hypot(deltaX, deltaY);
+    const float directionX = static_cast<float>(deltaX / length);
+    const float directionY = static_cast<float>(deltaY / length);
+    const float halfWidth = thickness * 0.5F;
+    const float startExtension = (((flags & kLineHasPrevious) != 0 || cap != LineCap::Butt)
+        ? halfWidth : 0.0F) + kAnalyticAaFringe;
+    const float endExtension = (((flags & kLineHasNext) != 0 || cap != LineCap::Butt)
+        ? halfWidth : 0.0F) + kAnalyticAaFringe;
+    const Vec2 startCenter{
+        from.x - directionX * startExtension,
+        from.y - directionY * startExtension,
+    };
+    const Vec2 endCenter{
+        to.x + directionX * endExtension,
+        to.y + directionY * endExtension,
+    };
+    const float across = halfWidth + kAnalyticAaFringe;
+    const float extentX = std::abs(directionY) * across;
+    const float extentY = std::abs(directionX) * across;
     return {
-        {std::min(from.x, to.x) - half, std::min(from.y, to.y) - half},
-        {std::max(from.x, to.x) + half, std::max(from.y, to.y) + half},
+        {std::min(startCenter.x, endCenter.x) - extentX,
+         std::min(startCenter.y, endCenter.y) - extentY},
+        {std::max(startCenter.x, endCenter.x) + extentX,
+         std::max(startCenter.y, endCenter.y) + extentY},
     };
 }
 
@@ -69,7 +105,12 @@ bool Canvas::popClip() noexcept {
     return true;
 }
 
-void Canvas::line(Vec2 from, Vec2 to, Color color, float thickness) noexcept {
+void Canvas::line(
+    Vec2 from,
+    Vec2 to,
+    Color color,
+    float thickness,
+    LineCap cap) noexcept {
     if (!std::isfinite(from.x)) return rejectInvalid("from.x");
     if (!std::isfinite(from.y)) return rejectInvalid("from.y");
     if (!std::isfinite(to.x)) return rejectInvalid("to.x");
@@ -77,15 +118,35 @@ void Canvas::line(Vec2 from, Vec2 to, Color color, float thickness) noexcept {
     if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
     if (!std::isfinite(thickness) || thickness <= 0.0F) return rejectInvalid("thickness");
     if (!visible(color)) return rejectInvalid("color.alpha");
-    if (from == to) return rejectInvalid("line.endpoints");
+    if (!validLineSegment(from, to)) return rejectInvalid("line.endpoints");
+    if (static_cast<std::uint8_t>(cap) > static_cast<std::uint8_t>(LineCap::Round)) {
+        return rejectInvalid("line.cap");
+    }
 
+    appendLine(from, to, {}, {}, color, thickness, cap, LineJoin::Round, 0);
+}
+
+void Canvas::appendLine(
+    Vec2 from,
+    Vec2 to,
+    Vec2 previous,
+    Vec2 next,
+    Color color,
+    float thickness,
+    LineCap cap,
+    LineJoin join,
+    std::uint8_t flags) noexcept {
     DrawCommand command{};
     command.kind = PrimitiveKind::Line;
-    command.bounds = lineBounds(from, to, thickness);
+    command.bounds = lineBounds(from, to, thickness, cap, flags);
+    command.uv = {{previous.x, previous.y}, {next.x, next.y}};
     command.pointA = from;
     command.pointB = to;
     command.color = color;
     command.thickness = thickness;
+    command.lineCap = cap;
+    command.lineJoin = join;
+    command.lineFlags = flags;
     append(command);
 }
 
@@ -93,21 +154,61 @@ void Canvas::polyline(
     std::span<const Vec2> points,
     Color color,
     float thickness,
-    bool closed) noexcept {
+    bool closed,
+    LineCap cap,
+    LineJoin join) noexcept {
     if (points.size() < 2) return rejectInvalid("points.size");
     if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
     if (!std::isfinite(thickness) || thickness <= 0.0F) return rejectInvalid("thickness");
     if (!visible(color)) return rejectInvalid("color.alpha");
+    if (static_cast<std::uint8_t>(cap) > static_cast<std::uint8_t>(LineCap::Round)) {
+        return rejectInvalid("line.cap");
+    }
+    if (static_cast<std::uint8_t>(join) > static_cast<std::uint8_t>(LineJoin::Round)) {
+        return rejectInvalid("line.join");
+    }
     for (const Vec2 point : points) {
         if (!std::isfinite(point.x)) return rejectInvalid("points.x");
         if (!std::isfinite(point.y)) return rejectInvalid("points.y");
     }
 
-    for (std::size_t index = 1; index < points.size(); ++index) {
-        line(points[index - 1], points[index], color, thickness);
+    std::size_t pointCount = points.size();
+    if (closed && pointCount > 2 && points.front() == points.back()) {
+        --pointCount;
     }
-    if (closed && points.front() != points.back()) {
-        line(points.back(), points.front(), color, thickness);
+    if ((closed && pointCount < 3) || pointCount < 2) {
+        return rejectInvalid("points.size");
+    }
+    const std::size_t segmentCount = closed ? pointCount : pointCount - 1U;
+    for (std::size_t index = 0; index < segmentCount; ++index) {
+        if (!validLineSegment(points[index], points[(index + 1U) % pointCount])) {
+            return rejectInvalid("line.endpoints");
+        }
+    }
+
+    for (std::size_t index = 0; index < segmentCount; ++index) {
+        const std::size_t finish = (index + 1U) % pointCount;
+        std::uint8_t flags = 0;
+        Vec2 previous{};
+        Vec2 next{};
+        if (closed || index != 0) {
+            flags |= kLineHasPrevious;
+            previous = points[(index + pointCount - 1U) % pointCount];
+        }
+        if (closed || finish + 1U < pointCount) {
+            flags |= kLineHasNext;
+            next = points[(finish + 1U) % pointCount];
+        }
+        appendLine(
+            points[index],
+            points[finish],
+            previous,
+            next,
+            color,
+            thickness,
+            cap,
+            join,
+            flags);
     }
 }
 
