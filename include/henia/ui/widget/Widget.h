@@ -15,6 +15,8 @@
 
 namespace henia::ui {
 
+class UiDocument;
+
 struct Insets final {
     float left = 0.0F;
     float top = 0.0F;
@@ -76,8 +78,10 @@ public:
     [[nodiscard]] std::uint64_t paintRevision() const noexcept;
 
     void setLayoutParameters(LayoutParameters parameters) noexcept;
-    void setVisible(bool visible) noexcept;
-    void setEnabled(bool enabled) noexcept;
+    // Hiding/disabling an attached subtree can synchronously deliver one
+    // FocusLost callback, so these operations intentionally may propagate.
+    void setVisible(bool visible);
+    void setEnabled(bool enabled);
     Widget& addChild(std::unique_ptr<Widget> child);
 
     template <typename Type, typename... Arguments>
@@ -95,6 +99,10 @@ public:
     void arrange(TextPainter& text, Rect frame);
     void paint(Canvas& canvas, TextPainter& text, const Theme& theme);
     [[nodiscard]] Widget* hitTest(Vec2 point) noexcept;
+    // Passive containers/labels return false for both. Interactive custom
+    // widgets opt in explicitly instead of stealing hover, capture, or focus.
+    [[nodiscard]] virtual bool acceptsPointerInput() const noexcept;
+    [[nodiscard]] virtual bool acceptsKeyboardFocus() const noexcept;
     [[nodiscard]] virtual bool handleInput(const InputEvent& event);
 
     void markLayoutDirty() noexcept;
@@ -118,6 +126,7 @@ private:
     };
 
     [[nodiscard]] std::unique_ptr<Widget> detachChild(std::uint64_t identity) noexcept;
+    void setDocumentRecursive(UiDocument* document) noexcept;
     void setHovered(bool hovered) noexcept;
     void setPressed(bool pressed) noexcept;
     void setFocused(bool focused) noexcept;
@@ -128,6 +137,7 @@ private:
     WidgetKind mKind = WidgetKind::Generic;
     std::uint64_t mIdentity = 0;
     Widget* mParent = nullptr;
+    UiDocument* mDocument = nullptr;
     Rect mFrame{};
     LayoutParameters mLayout{};
     Vec2 mMeasured{};

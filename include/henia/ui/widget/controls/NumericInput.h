@@ -39,6 +39,8 @@ public:
     [[nodiscard]] double step() const noexcept;
     void setPrecision(std::size_t precision) noexcept;
     void setOnValueChanged(Callback<double> callback) noexcept;
+    [[nodiscard]] bool acceptsPointerInput() const noexcept override;
+    [[nodiscard]] bool acceptsKeyboardFocus() const noexcept override;
     [[nodiscard]] bool handleInput(const InputEvent& event) override;
 
 protected:

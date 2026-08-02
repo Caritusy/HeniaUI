@@ -1,4 +1,5 @@
 #include "henia/ui/widget/Widget.h"
+#include "henia/ui/widget/UiDocument.h"
 
 #include <algorithm>
 #include <atomic>
@@ -104,26 +105,39 @@ void Widget::setLayoutParameters(LayoutParameters parameters) noexcept {
     markLayoutDirty();
 }
 
-void Widget::setVisible(bool visibleValue) noexcept {
+void Widget::setVisible(bool visibleValue) {
     if (mVisible == visibleValue) {
         return;
     }
     mVisible = visibleValue;
     markPaintTopologyDirty();
     markLayoutDirty();
+    if (!mVisible) {
+        if (mDocument != nullptr) {
+            mDocument->widgetBecameNonInteractive(*this);
+        } else {
+            mHovered = false;
+            mPressed = false;
+            mFocused = false;
+        }
+    }
 }
 
-void Widget::setEnabled(bool enabledValue) noexcept {
+void Widget::setEnabled(bool enabledValue) {
     if (mEnabled == enabledValue) {
         return;
     }
     mEnabled = enabledValue;
-    if (!mEnabled) {
-        mHovered = false;
-        mPressed = false;
-        mFocused = false;
-    }
     markPaintDirty();
+    if (!mEnabled) {
+        if (mDocument != nullptr) {
+            mDocument->widgetBecameNonInteractive(*this);
+        } else {
+            mHovered = false;
+            mPressed = false;
+            mFocused = false;
+        }
+    }
 }
 
 Widget& Widget::addChild(std::unique_ptr<Widget> child) {
@@ -133,6 +147,7 @@ Widget& Widget::addChild(std::unique_ptr<Widget> child) {
     Widget* pointer = child.get();
     mChildren.push_back(std::move(child));
     pointer->mParent = this;
+    pointer->setDocumentRecursive(mDocument);
     markPaintTopologyDirty();
     markLayoutDirty();
     return *pointer;
@@ -227,8 +242,12 @@ Widget* Widget::hitTest(Vec2 point) noexcept {
             return hit;
         }
     }
-    return this;
+    return acceptsPointerInput() ? this : nullptr;
 }
+
+bool Widget::acceptsPointerInput() const noexcept { return false; }
+
+bool Widget::acceptsKeyboardFocus() const noexcept { return false; }
 
 bool Widget::handleInput(const InputEvent&) { return false; }
 
@@ -284,9 +303,17 @@ std::unique_ptr<Widget> Widget::detachChild(std::uint64_t identityValue) noexcep
     std::unique_ptr<Widget> child = std::move(*iterator);
     mChildren.erase(iterator);
     child->mParent = nullptr;
+    child->setDocumentRecursive(nullptr);
     markPaintTopologyDirty();
     markLayoutDirty();
     return child;
+}
+
+void Widget::setDocumentRecursive(UiDocument* document) noexcept {
+    mDocument = document;
+    for (const std::unique_ptr<Widget>& child : mChildren) {
+        child->setDocumentRecursive(document);
+    }
 }
 
 void Widget::setHovered(bool hoveredValue) noexcept {

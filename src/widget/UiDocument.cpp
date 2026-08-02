@@ -251,10 +251,17 @@ bool UiDocument::dispatchEvent(const InputEvent& event) {
     switch (event.kind) {
         case InputEventKind::PointerMove: {
             updateHover(event.position);
-            Widget* target = resolve(mCapturedIdentity != 0 ? mCapturedIdentity : mHoveredIdentity);
-            return target != nullptr && target->handleInput(event);
+            Widget* target = resolve(
+                mPointerSequenceActive ? mCapturedIdentity : mHoveredIdentity);
+            return target != nullptr && interactive(*target)
+                && target->acceptsPointerInput() && target->handleInput(event);
         }
         case InputEventKind::PointerDown: {
+            if (Widget* captured = resolve(mCapturedIdentity)) {
+                captured->setPressed(false);
+            }
+            mCapturedIdentity = 0;
+            mPointerSequenceActive = true;
             updateHover(event.position);
             Widget* target = mRoot->hitTest(event.position);
             if (target == nullptr) {
@@ -262,22 +269,37 @@ bool UiDocument::dispatchEvent(const InputEvent& event) {
                 return false;
             }
             const std::uint64_t targetIdentity = target->identity();
+            const bool handled = target->handleInput(event);
+            target = resolve(targetIdentity);
+            if (!handled || target == nullptr || !interactive(*target)
+                || !target->acceptsPointerInput()) {
+                if (!handled && event.button == PointerButton::Primary) {
+                    setFocus(0);
+                }
+                return handled;
+            }
+            setFocus(target->acceptsKeyboardFocus() ? targetIdentity : 0);
+            target = resolve(targetIdentity);
+            if (target == nullptr || !interactive(*target) || !target->acceptsPointerInput()) {
+                return true;
+            }
             mCapturedIdentity = targetIdentity;
             target->setPressed(true);
-            setFocus(targetIdentity);
-            target = resolve(targetIdentity);
-            return target != nullptr && interactive(*target) && target->handleInput(event);
+            return true;
         }
         case InputEventKind::PointerUp: {
+            const bool capturedSequence = mPointerSequenceActive;
             Widget* target = resolve(mCapturedIdentity);
-            if (target == nullptr) {
+            if (target == nullptr && !capturedSequence) {
                 target = mRoot->hitTest(event.position);
             }
-            const bool handled = target != nullptr && target->handleInput(event);
+            const bool handled = target != nullptr && interactive(*target)
+                && target->acceptsPointerInput() && target->handleInput(event);
             if (Widget* captured = resolve(mCapturedIdentity)) {
                 captured->setPressed(false);
             }
             mCapturedIdentity = 0;
+            mPointerSequenceActive = false;
             updateHover(event.position);
             return handled;
         }
@@ -285,12 +307,14 @@ bool UiDocument::dispatchEvent(const InputEvent& event) {
         case InputEventKind::KeyUp:
         case InputEventKind::TextInput: {
             Widget* focused = resolve(mFocusedIdentity);
-            return focused != nullptr && focused->handleInput(event);
+            return focused != nullptr && interactive(*focused)
+                && focused->acceptsKeyboardFocus() && focused->handleInput(event);
         }
         case InputEventKind::PointerScroll: {
             updateHover(event.position);
             Widget* hovered = resolve(mHoveredIdentity);
-            return hovered != nullptr && hovered->handleInput(event);
+            return hovered != nullptr && interactive(*hovered)
+                && hovered->acceptsPointerInput() && hovered->handleInput(event);
         }
         case InputEventKind::FocusLost:
             clearInteraction();
@@ -313,7 +337,7 @@ void UiDocument::clearInteraction() {
     } catch (...) {
         mClearingInteraction = false;
         mPendingMutations.clear();
-        sanitizeInteraction();
+        resetInteractionWithoutCallbacks();
         throw;
     }
 }
@@ -325,6 +349,7 @@ void UiDocument::clearInteractionImpl() {
     mHoveredIdentity = 0;
     mCapturedIdentity = 0;
     mFocusedIdentity = 0;
+    mPointerSequenceActive = false;
 
     if (hovered != nullptr) {
         hovered->setHovered(false);
@@ -357,7 +382,7 @@ void UiDocument::drainMutations() {
     } catch (...) {
         mPendingMutations.clear();
         mApplyingMutations = false;
-        sanitizeInteraction();
+        resetInteractionWithoutCallbacks();
         throw;
     }
 }
@@ -366,9 +391,13 @@ void UiDocument::applyMutation(PendingMutation mutation) {
     switch (mutation.kind) {
         case MutationKind::SetRoot:
             clearInteraction();
+            if (mRoot != nullptr) {
+                mRoot->setDocumentRecursive(nullptr);
+            }
             mRoot = std::move(mutation.root);
             if (mRoot != nullptr) {
                 mRoot->mParent = nullptr;
+                mRoot->setDocumentRecursive(this);
                 mRoot->markLayoutDirty();
             }
             return;
@@ -379,6 +408,7 @@ void UiDocument::applyMutation(PendingMutation mutation) {
             }
             clearInteractionForSubtree(*widget);
             if (widget == mRoot.get()) {
+                widget->setDocumentRecursive(nullptr);
                 mRoot.reset();
                 return;
             }
@@ -458,6 +488,30 @@ bool UiDocument::interactive(const Widget& widget) noexcept {
     return true;
 }
 
+void UiDocument::widgetBecameNonInteractive(Widget& subtree) {
+    if (subtree.mDocument != this || mClearingInteraction) {
+        return;
+    }
+    mClearingInteraction = true;
+    try {
+        clearInteractionForSubtree(subtree);
+        // A FocusLost callback can hide or disable another interactive subtree
+        // while direct invalidation is guarded. Revalidate before leaving that
+        // boundary so nested invalidations cannot leave stale identities and
+        // callback-requested structural mutations remain deferred.
+        sanitizeInteraction();
+        mClearingInteraction = false;
+        if (!mustDeferMutation()) {
+            drainMutations();
+        }
+    } catch (...) {
+        mClearingInteraction = false;
+        mPendingMutations.clear();
+        resetInteractionWithoutCallbacks();
+        throw;
+    }
+}
+
 void UiDocument::clearInteractionForSubtree(Widget& subtree) {
     const bool clearHovered = subtreeContains(subtree, mHoveredIdentity);
     const bool clearCaptured = subtreeContains(subtree, mCapturedIdentity);
@@ -494,6 +548,7 @@ void UiDocument::resetInteractionWithoutCallbacks() noexcept {
     mHoveredIdentity = 0;
     mCapturedIdentity = 0;
     mFocusedIdentity = 0;
+    mPointerSequenceActive = false;
     if (hovered != nullptr) {
         hovered->setHovered(false);
     }
@@ -505,9 +560,9 @@ void UiDocument::resetInteractionWithoutCallbacks() noexcept {
     }
 }
 
-void UiDocument::sanitizeInteraction() noexcept {
+void UiDocument::sanitizeInteraction() {
     Widget* hovered = resolve(mHoveredIdentity);
-    if (hovered == nullptr || !interactive(*hovered)) {
+    if (hovered == nullptr || !interactive(*hovered) || !hovered->acceptsPointerInput()) {
         if (hovered != nullptr) {
             hovered->setHovered(false);
         }
@@ -515,7 +570,7 @@ void UiDocument::sanitizeInteraction() noexcept {
     }
 
     Widget* captured = resolve(mCapturedIdentity);
-    if (captured == nullptr || !interactive(*captured)) {
+    if (captured == nullptr || !interactive(*captured) || !captured->acceptsPointerInput()) {
         if (captured != nullptr) {
             captured->setPressed(false);
         }
@@ -523,11 +578,10 @@ void UiDocument::sanitizeInteraction() noexcept {
     }
 
     Widget* focused = resolve(mFocusedIdentity);
-    if (focused == nullptr || !interactive(*focused)) {
-        if (focused != nullptr) {
-            focused->setFocused(false);
-        }
+    if (focused == nullptr) {
         mFocusedIdentity = 0;
+    } else if (!interactive(*focused) || !focused->acceptsKeyboardFocus()) {
+        setFocus(0);
     }
 }
 
@@ -558,7 +612,7 @@ void UiDocument::setFocus(std::uint64_t identity) {
     }
 
     Widget* next = resolve(identity);
-    if (next != nullptr && interactive(*next)) {
+    if (next != nullptr && interactive(*next) && next->acceptsKeyboardFocus()) {
         mFocusedIdentity = identity;
         next->setFocused(true);
     }
