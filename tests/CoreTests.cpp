@@ -1,6 +1,7 @@
 #include "henia/ui/BatchCompiler.h"
 #include "henia/ui/Canvas.h"
 #include "henia/ui/Frame.h"
+#include "henia/ui/backend/opengl/OpenGlRenderer.h"
 #include "henia/ui/resource/TextureStore.h"
 #include "henia/ui/text/FontStore.h"
 #include "henia/ui/text/TextLayout.h"
@@ -10,11 +11,15 @@
 #include <cstdlib>
 #include <iostream>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace {
 
 using namespace henia::ui;
+
+static_assert(!std::is_move_constructible_v<OpenGlRenderer>);
+static_assert(!std::is_move_assignable_v<OpenGlRenderer>);
 
 [[noreturn]] void fail(std::string_view message) {
     std::cerr << "FAILED: " << message << '\n';

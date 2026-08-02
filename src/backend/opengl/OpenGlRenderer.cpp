@@ -731,10 +731,6 @@ OpenGlRenderer::OpenGlRenderer() : mImplementation(std::make_unique<Implementati
 
 OpenGlRenderer::~OpenGlRenderer() { mImplementation->shutdown(); }
 
-OpenGlRenderer::OpenGlRenderer(OpenGlRenderer&&) noexcept = default;
-
-OpenGlRenderer& OpenGlRenderer::operator=(OpenGlRenderer&&) noexcept = default;
-
 bool OpenGlRenderer::initialize(std::size_t instanceCapacity) noexcept {
     return mImplementation->initialize(instanceCapacity);
 }
