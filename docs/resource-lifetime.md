@@ -21,7 +21,10 @@ generation before making the slot reusable. A packet, text cache entry, or host
 object that still contains the old handle therefore remains a valid immutable
 snapshot, but the store and synchronized renderers reject it as stale. `size()`
 counts live entries; `slotCount()` is the bounded high-water mark used to size
-renderer bookkeeping.
+renderer bookkeeping. Handles remain four-byte values with 16-bit slot and
+generation fields (up to 65,535 live entries per store). A slot that reaches the
+maximum generation is retired instead of wrapping, so an old handle can never
+become valid again.
 
 Every renderer instance observes store destruction or slot reuse independently
 on its next `synchronizeTextures()` call. OpenGL retires its old object in that

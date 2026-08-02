@@ -76,7 +76,7 @@ public:
 private:
     struct Entry final {
         std::optional<FontFace> face;
-        std::uint32_t generation = 1;
+        std::uint16_t generation = 1;
         std::uint32_t nextFree = std::numeric_limits<std::uint32_t>::max();
     };
 

@@ -102,7 +102,7 @@ bool TextureStore::destroy(TextureHandle handle) noexcept {
     entry->dirtyRegion = {};
     entry->fullUpdate = true;
     --mActiveEntries;
-    if (entry->generation != std::numeric_limits<std::uint32_t>::max()) {
+    if (entry->generation != TextureHandle::kMaxGeneration) {
         ++entry->generation;
         entry->nextFree = mFreeHead;
         mFreeHead = static_cast<std::uint32_t>(slot);
@@ -309,7 +309,7 @@ TextureHandle TextureStore::allocate(Entry entry) {
         ++mActiveEntries;
         return TextureHandle{slot + 1U, reused.generation};
     }
-    if (mEntries.size() >= std::numeric_limits<std::uint32_t>::max()) return {};
+    if (mEntries.size() >= TextureHandle::kMaxValue) return {};
     entry.generation = 1;
     entry.nextFree = kInvalidSlot;
     mEntries.push_back(std::move(entry));

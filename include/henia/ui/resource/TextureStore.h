@@ -112,7 +112,7 @@ private:
         std::uint32_t height = 0;
         std::uint32_t rowPitch = 0;
         std::uint64_t revision = 1;
-        std::uint32_t generation = 1;
+        std::uint16_t generation = 1;
         TextureBackingPolicy backingPolicy = TextureBackingPolicy::Retained;
         TextureRegenerator regenerator;
         TextureRegion dirtyRegion{};

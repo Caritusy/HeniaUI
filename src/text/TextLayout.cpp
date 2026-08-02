@@ -125,9 +125,9 @@ std::uint64_t TextRunCache::keyHash(
         hash ^= value;
         hash *= prime;
     };
-    const std::uint64_t fontValue = font.packed();
+    const std::uint32_t fontValue = font.packed();
     const std::uint32_t sizeBits = std::bit_cast<std::uint32_t>(size);
-    for (unsigned int shift = 0; shift < 64; shift += 8) {
+    for (unsigned int shift = 0; shift < 32; shift += 8) {
         mix(static_cast<std::uint8_t>(fontValue >> shift));
     }
     for (unsigned int shift = 0; shift < 32; shift += 8) {

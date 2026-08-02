@@ -81,7 +81,7 @@ FontHandle FontStore::add(FontDefinition definition) {
         ++mActiveFonts;
         return FontHandle{slot + 1U, entry.generation};
     }
-    if (mFonts.size() >= std::numeric_limits<std::uint32_t>::max()) return {};
+    if (mFonts.size() >= FontHandle::kMaxValue) return {};
     Entry entry{};
     entry.face.emplace(std::move(definition));
     mFonts.push_back(std::move(entry));
@@ -95,7 +95,7 @@ bool FontStore::destroy(FontHandle handle) noexcept {
     entry->face.reset();
     --mActiveFonts;
     constexpr std::uint32_t invalidSlot = std::numeric_limits<std::uint32_t>::max();
-    if (entry->generation != std::numeric_limits<std::uint32_t>::max()) {
+    if (entry->generation != FontHandle::kMaxGeneration) {
         ++entry->generation;
         entry->nextFree = mFreeHead;
         mFreeHead = static_cast<std::uint32_t>(handle.value() - 1U);
