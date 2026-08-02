@@ -2,10 +2,34 @@
 
 #include <windowsx.h>
 
+#include <utility>
+
 namespace henia::ui {
 namespace {
 
 constexpr char32_t kReplacementCharacter = U'\uFFFD';
+
+template <typename Callback>
+class ScopeExit final {
+public:
+    explicit ScopeExit(Callback callback) noexcept
+        : mCallback(std::move(callback)) {}
+
+    ~ScopeExit() {
+        if (mActive) {
+            mCallback();
+        }
+    }
+
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+
+    void dismiss() noexcept { mActive = false; }
+
+private:
+    Callback mCallback;
+    bool mActive = true;
+};
 
 [[nodiscard]] PointerButton pointerButton(UINT message) noexcept {
     switch (message) {
@@ -46,15 +70,13 @@ bool Win32InputAdapter::handleMessage(
         case WM_MBUTTONDOWN: {
             const PressedButtonMask mask = buttonMask(message);
             mPressedButtons = static_cast<PressedButtonMask>(mPressedButtons | mask);
-            bool handled = false;
-            try {
-                handled = mDocument->dispatch(makePointerEvent(
-                    InputEventKind::PointerDown, window, message, wParam, lParam));
-            } catch (...) {
+            ScopeExit failureCleanup([this]() noexcept {
                 mPressedButtons = 0;
                 releaseNativeCapture();
-                throw;
-            }
+            });
+            const bool handled = mDocument->dispatch(makePointerEvent(
+                InputEventKind::PointerDown, window, message, wParam, lParam));
+            failureCleanup.dismiss();
             if (handled && !acquireNativeCapture(window)) {
                 mPressedButtons = 0;
                 static_cast<void>(mDocument->dispatch({.kind = InputEventKind::PointerCancel}));
@@ -68,19 +90,18 @@ bool Win32InputAdapter::handleMessage(
             if ((mPressedButtons & mask) == 0) {
                 return false;
             }
-            bool handled = false;
-            try {
-                handled = mDocument->dispatch(makePointerEvent(
-                    InputEventKind::PointerUp, window, message, wParam, lParam));
-            } catch (...) {
-                mPressedButtons = 0;
-                releaseNativeCapture();
-                throw;
-            }
-            mPressedButtons = static_cast<PressedButtonMask>(mPressedButtons & ~mask);
-            if (mPressedButtons == 0) {
-                releaseNativeCapture();
-            }
+            bool dispatchCompleted = false;
+            ScopeExit finishDispatch([this, mask, &dispatchCompleted]() noexcept {
+                mPressedButtons = dispatchCompleted
+                    ? static_cast<PressedButtonMask>(mPressedButtons & ~mask)
+                    : 0;
+                if (mPressedButtons == 0) {
+                    releaseNativeCapture();
+                }
+            });
+            const bool handled = mDocument->dispatch(makePointerEvent(
+                InputEventKind::PointerUp, window, message, wParam, lParam));
+            dispatchCompleted = true;
             return handled;
         }
         case WM_MOUSEWHEEL:

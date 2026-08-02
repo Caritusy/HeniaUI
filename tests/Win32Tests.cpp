@@ -20,10 +20,6 @@ using namespace henia::ui;
     std::exit(EXIT_FAILURE);
 }
 
-void stage(const char* name) {
-    std::cerr << "Win32 test stage: " << name << std::endl;
-}
-
 class InputProbe final : public Widget {
 public:
     [[nodiscard]] bool acceptsPointerInput() const noexcept override { return true; }
@@ -111,7 +107,6 @@ void focusProbe(Win32InputAdapter& adapter, HWND window) {
 }
 
 void verifyWin32InputAdapter(TextPainter& painter) {
-    stage("document setup");
     UiDocument document(painter);
     document.reserve(64, 8);
     document.setViewport({200.0F, 100.0F});
@@ -125,7 +120,6 @@ void verifyWin32InputAdapter(TextPainter& painter) {
     NativeTestWindow native;
     const HWND window = native.get();
 
-    stage("multiple-button capture");
     pointerDown(adapter, window, WM_LBUTTONDOWN, MK_LBUTTON);
     if (GetCapture() != window || !probe.pressed() || !probe.focused()) {
         fail("Handled pointer down did not acquire native capture");
@@ -140,7 +134,6 @@ void verifyWin32InputAdapter(TextPainter& painter) {
         fail("Final button release did not release capture while preserving focus");
     }
 
-    stage("external capture loss");
     pointerDown(adapter, window, WM_LBUTTONDOWN, MK_LBUTTON);
     HWND other = CreateWindowExW(
         0, L"STATIC", L"", WS_POPUP, 0, 0, 1, 1,
@@ -164,14 +157,12 @@ void verifyWin32InputAdapter(TextPainter& painter) {
         fail("A release after capture loss was forwarded as a valid pointer up");
     }
 
-    stage("cancel mode");
     pointerDown(adapter, window, WM_LBUTTONDOWN, MK_LBUTTON);
     if (adapter.handleMessage(window, WM_CANCELMODE, 0, 0)
         || GetCapture() != nullptr || probe.pressed() || !probe.focused()) {
         fail("WM_CANCELMODE was consumed or left pointer capture active");
     }
 
-    stage("callback exception");
     pointerDown(adapter, window, WM_LBUTTONDOWN, MK_LBUTTON);
     probe.throwOnPointerUp = true;
     try {
@@ -185,7 +176,6 @@ void verifyWin32InputAdapter(TextPainter& painter) {
         fail("A pointer callback exception left native or document capture active");
     }
 
-    stage("UTF-16 surrogate handling");
     focusProbe(adapter, window);
     probe.text.clear();
     if (!adapter.handleMessage(window, WM_CHAR, 0xD83D, 0)
@@ -194,7 +184,6 @@ void verifyWin32InputAdapter(TextPainter& painter) {
         fail("A valid UTF-16 surrogate pair was not combined");
     }
     probe.text.clear();
-    stage("WM_UNICHAR validation");
     if (!adapter.handleMessage(window, WM_CHAR, 0xDC00, 0)
         || probe.text != std::vector<char32_t>{U'\uFFFD'}) {
         fail("An isolated low surrogate was not replaced");
@@ -217,7 +206,6 @@ void verifyWin32InputAdapter(TextPainter& painter) {
         fail("WM_UNICHAR scalar validation is incorrect");
     }
 
-    stage("focus loss");
     static_cast<void>(adapter.handleMessage(window, WM_CHAR, 0xD83D, 0));
     pointerDown(adapter, window, WM_LBUTTONDOWN, MK_LBUTTON);
     const int focusLostBefore = probe.focusLostCalls;
@@ -233,7 +221,6 @@ void verifyWin32InputAdapter(TextPainter& painter) {
         fail("Focus loss did not discard a pending UTF-16 high surrogate");
     }
 
-    stage("window destruction");
     pointerDown(adapter, window, WM_LBUTTONDOWN, MK_LBUTTON);
     const int destroyFocusLostBefore = probe.focusLostCalls;
     if (adapter.handleMessage(window, WM_DESTROY, 0, 0)
@@ -243,7 +230,6 @@ void verifyWin32InputAdapter(TextPainter& painter) {
         || probe.focusLostCalls != destroyFocusLostBefore + 1) {
         fail("Window destruction did not cancel capture and focus exactly once");
     }
-    stage("input adapter complete");
 }
 
 } // namespace
@@ -251,7 +237,6 @@ void verifyWin32InputAdapter(TextPainter& painter) {
 int main() {
     using namespace henia::ui;
 
-    stage("font setup");
     TextureStore textures;
     FontStore fonts;
     constexpr std::array ranges{UnicodeRange{U' ', U'~'}};
@@ -291,7 +276,6 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    stage("font complete");
     verifyWin32InputAdapter(painter);
 
     std::cout << "HeniaUI Win32 font and input tests passed\n";
