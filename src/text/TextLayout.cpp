@@ -51,8 +51,6 @@ void mixHash(std::uint64_t& hash, std::uint64_t value) noexcept {
 
 } // namespace
 
-TextShapingBackend::~TextShapingBackend() = default;
-
 TextLayoutCache::TextLayoutCache(
     const FontStore& fonts,
     const TextShapingBackend* shaping) noexcept

@@ -11,7 +11,7 @@ namespace henia::ui {
 
 class TextClipboard {
 public:
-    virtual ~TextClipboard();
+    virtual ~TextClipboard() = default;
     [[nodiscard]] virtual bool writeText(std::string_view text) = 0;
     [[nodiscard]] virtual std::optional<std::string> readText() = 0;
 };

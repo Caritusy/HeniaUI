@@ -36,7 +36,7 @@ struct TextShapingRequest final {
 // (for example HarfBuzz) may return visual-order glyphs and cluster byte ranges.
 class TextShapingBackend {
 public:
-    virtual ~TextShapingBackend();
+    virtual ~TextShapingBackend() = default;
     [[nodiscard]] virtual bool shape(
         const TextShapingRequest& request,
         std::vector<TextShapingGlyph>& output) const = 0;

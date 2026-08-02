@@ -7,8 +7,6 @@
 
 namespace henia::ui {
 
-TextClipboard::~TextClipboard() = default;
-
 bool MemoryTextClipboard::writeText(std::string_view text) {
     mText.assign(text);
     return true;
