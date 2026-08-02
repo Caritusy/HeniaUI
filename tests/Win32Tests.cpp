@@ -50,30 +50,12 @@ public:
     bool throwOnPointerUp = false;
 };
 
-LRESULT CALLBACK inputWindowProcedure(
-    HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    auto* adapter = reinterpret_cast<Win32InputAdapter*>(
-        GetWindowLongPtrW(window, GWLP_USERDATA));
-    if (adapter != nullptr && adapter->handleMessage(window, message, wParam, lParam)) {
-        return 0;
-    }
-    return DefWindowProcW(window, message, wParam, lParam);
-}
-
 class NativeTestWindow final {
 public:
-    explicit NativeTestWindow(Win32InputAdapter& adapter) {
-        WNDCLASSW windowClass{};
-        windowClass.lpfnWndProc = inputWindowProcedure;
-        windowClass.hInstance = GetModuleHandleW(nullptr);
-        windowClass.lpszClassName = L"HeniaUIInputAdapterTests";
-        const ATOM atom = RegisterClassW(&windowClass);
-        if (atom == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
-            fail("Unable to register the Win32 input test window class");
-        }
+    NativeTestWindow() {
         mWindow = CreateWindowExW(
             0,
-            windowClass.lpszClassName,
+            L"STATIC",
             L"",
             WS_POPUP,
             0,
@@ -82,13 +64,11 @@ public:
             100,
             nullptr,
             nullptr,
-            windowClass.hInstance,
+            GetModuleHandleW(nullptr),
             nullptr);
         if (mWindow == nullptr) {
             fail("Unable to create the Win32 input test window");
         }
-        SetWindowLongPtrW(
-            mWindow, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&adapter));
     }
 
     ~NativeTestWindow() {
@@ -98,7 +78,6 @@ public:
             }
             DestroyWindow(mWindow);
         }
-        UnregisterClassW(L"HeniaUIInputAdapterTests", GetModuleHandleW(nullptr));
     }
 
     NativeTestWindow(const NativeTestWindow&) = delete;
@@ -138,7 +117,7 @@ void verifyWin32InputAdapter(TextPainter& painter) {
     static_cast<void>(document.compose());
 
     Win32InputAdapter adapter(document);
-    NativeTestWindow native(adapter);
+    NativeTestWindow native;
     const HWND window = native.get();
 
     pointerDown(adapter, window, WM_LBUTTONDOWN, MK_LBUTTON);
@@ -163,7 +142,12 @@ void verifyWin32InputAdapter(TextPainter& painter) {
         fail("Unable to create the alternate capture window");
     }
     static_cast<void>(SetCapture(other));
-    if (GetCapture() != other || probe.pressed() || !probe.focused()
+    const bool captureChangedConsumed = adapter.handleMessage(
+        window,
+        WM_CAPTURECHANGED,
+        0,
+        reinterpret_cast<LPARAM>(other));
+    if (captureChangedConsumed || GetCapture() != other || probe.pressed() || !probe.focused()
         || probe.focusLostCalls != 0) {
         fail("WM_CAPTURECHANGED did not cancel pointer interaction cleanly");
     }
