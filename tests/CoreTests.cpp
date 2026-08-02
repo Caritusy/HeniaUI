@@ -515,6 +515,138 @@ void testTextRunsAreCachedAndBatched() {
     require(packet.batches().size() == 1, "text and shape did not share one batch");
 }
 
+void testResourceLifetimeAndTextureBackingPolicies() {
+    TextureStore textures;
+    std::array<std::byte, 64> rgba{};
+    for (std::size_t index = 0; index < rgba.size(); ++index) {
+        rgba[index] = static_cast<std::byte>(index);
+    }
+
+    TextureHandle stale;
+    for (std::uint32_t iteration = 0; iteration < 4096; ++iteration) {
+        const TextureHandle handle = textures.create(TextureFormat::Rgba8, 4, 4, 16, rgba);
+        require(handle.valid(), "bounded texture creation failed");
+        if (iteration == 0) stale = handle;
+        if (iteration != 0) {
+            require(handle.value() == stale.value(), "texture slot was not reused");
+            require(handle.generation() != stale.generation(), "texture generation did not advance");
+        }
+        require(textures.destroy(handle), "texture destruction failed");
+        require(!textures.view(handle).handle.valid(), "destroyed texture handle remained valid");
+    }
+    require(textures.size() == 0 && textures.slotCount() == 1,
+        "texture create/destroy cycles grew the slot table");
+    require(textures.statistics().cpuBackingBytes == 0,
+        "destroyed texture retained CPU pixel storage");
+
+    const TextureHandle atlas = textures.create(TextureFormat::Rgba8, 4, 4, 16, rgba);
+    const std::array<std::byte, 24> patch{
+        std::byte{0xA0}, std::byte{0xA1}, std::byte{0xA2}, std::byte{0xA3},
+        std::byte{0xB0}, std::byte{0xB1}, std::byte{0xB2}, std::byte{0xB3},
+        std::byte{0xEE}, std::byte{0xEE}, std::byte{0xEE}, std::byte{0xEE},
+        std::byte{0xC0}, std::byte{0xC1}, std::byte{0xC2}, std::byte{0xC3},
+        std::byte{0xD0}, std::byte{0xD1}, std::byte{0xD2}, std::byte{0xD3},
+        std::byte{0xEE}, std::byte{0xEE}, std::byte{0xEE}, std::byte{0xEE},
+    };
+    const TextureRegion region{1, 1, 2, 2};
+    require(textures.updateRegion(atlas, region, 12, patch), "texture region update failed");
+    const TextureView updated = textures.view(atlas);
+    require(updated.revision == 2 && !updated.fullUpdate && updated.dirtyRegion == region,
+        "texture region metadata was not retained");
+    require(updated.rollbackPixels.size() == 16,
+        "texture region rollback data was not tightly retained");
+    for (std::uint32_t row = 0; row < 4; ++row) {
+        for (std::uint32_t column = 0; column < 4; ++column) {
+            for (std::uint32_t component = 0; component < 4; ++component) {
+                const std::size_t offset = row * 16U + column * 4U + component;
+                const bool inside = row >= 1 && row < 3 && column >= 1 && column < 3;
+                const std::byte expected = inside
+                    ? patch[(row - 1U) * 12U + (column - 1U) * 4U + component]
+                    : rgba[offset];
+                require(updated.pixels[offset] == expected,
+                    "texture region update modified bytes outside the requested rectangle");
+            }
+        }
+    }
+
+    const TextureHandle discardable = textures.create(
+        TextureFormat::Rgba8,
+        4,
+        4,
+        16,
+        rgba,
+        {.backingPolicy = TextureBackingPolicy::DiscardAfterUpload});
+    require(textures.discardCpuBacking(discardable)
+            && !textures.view(discardable).backingAvailable,
+        "discard-after-upload texture retained CPU backing");
+    require(!textures.ensureCpuBacking(discardable),
+        "discard-after-upload texture unexpectedly regenerated backing");
+    require(textures.restoreCpuBacking(discardable, 16, rgba)
+            && textures.view(discardable).backingAvailable,
+        "explicit texture backing restoration failed");
+
+    std::uint32_t regenerationCalls = 0;
+    const TextureHandle regenerable = textures.create(
+        TextureFormat::Rgba8,
+        4,
+        4,
+        16,
+        rgba,
+        {
+            .backingPolicy = TextureBackingPolicy::Regenerable,
+            .regenerator = [&]() {
+                ++regenerationCalls;
+                return std::vector<std::byte>(rgba.begin(), rgba.end());
+            },
+        });
+    require(textures.discardCpuBacking(regenerable)
+            && textures.ensureCpuBacking(regenerable)
+            && regenerationCalls == 1,
+        "regenerable texture did not restore its CPU backing");
+    require(textures.statistics().backingRestorations == 1,
+        "texture backing restoration statistics are incorrect");
+
+    const TextureHandle external = textures.createExternal(TextureFormat::Rgba8, 4, 4);
+    const TextureView externalView = textures.view(external);
+    require(externalView.handle == external
+            && externalView.backingPolicy == TextureBackingPolicy::ExternalGpu
+            && !externalView.backingAvailable
+            && !textures.update(external, 16, rgba),
+        "external GPU texture accepted CPU ownership operations");
+
+    FontStore fonts;
+    const auto definition = [&]() {
+        return FontDefinition{
+            .atlas = atlas,
+            .pixelSize = 10.0F,
+            .ascent = 8.0F,
+            .descent = 2.0F,
+            .glyphs = {{U'A', {}, {5.0F, 8.0F}, {}, 6.0F}},
+        };
+    };
+    const FontHandle firstFont = fonts.add(definition());
+    TextRunCache cache(fonts);
+    require(cache.layout(firstFont, 10.0F, "A") != nullptr,
+        "font cache fixture could not be populated");
+    require(fonts.destroy(firstFont), "font destruction failed");
+    const FontHandle replacementFont = fonts.add(definition());
+    require(replacementFont.value() == firstFont.value()
+            && replacementFont.generation() != firstFont.generation()
+            && fonts.find(firstFont) == nullptr
+            && cache.layout(firstFont, 10.0F, "A") == nullptr
+            && cache.layout(replacementFont, 10.0F, "A") != nullptr,
+        "font slot reuse did not reject a stale cached generation");
+    require(fonts.destroy(replacementFont), "replacement font destruction failed");
+    for (std::uint32_t iteration = 0; iteration < 4096; ++iteration) {
+        const FontHandle handle = fonts.add(definition());
+        require(handle.valid() && handle.value() == firstFont.value(),
+            "font slot was not reused");
+        require(fonts.destroy(handle), "font destruction cycle failed");
+    }
+    require(fonts.size() == 0 && fonts.slotCount() == 1,
+        "font create/destroy cycles grew the slot table");
+}
+
 } // namespace
 
 int main() {
@@ -531,6 +663,7 @@ int main() {
     testPacketSnapshotsSupportConcurrentConsumption();
     testUtf8Validation();
     testTextRunsAreCachedAndBatched();
+    testResourceLifetimeAndTextureBackingPolicies();
     std::cout << "HeniaUI core tests passed\n";
     return EXIT_SUCCESS;
 }

@@ -545,6 +545,96 @@ int main() {
         fail("OpenGL independent-context renderer shutdown failed");
     }
 
+    TextureStore lifetimeTextures;
+    const std::array<std::byte, 4> lifetimePixels{
+        std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
+    const TextureHandle lifetimeOld = lifetimeTextures.create(
+        TextureFormat::Rgba8, 1, 1, 4, lifetimePixels);
+    Frame lifetimeOldFrame;
+    lifetimeOldFrame.begin().image(
+        lifetimeOld, {{0.0F, 0.0F}, {8.0F, 8.0F}});
+    const RenderPacket lifetimeOldPacket = lifetimeOldFrame.finish();
+    OpenGlRenderer lifetimeRenderer;
+    if (!lifetimeRenderer.initialize(4, 2, 2)
+        || !lifetimeRenderer.synchronizeTextures(lifetimeTextures)
+        || !lifetimeRenderer.render(lifetimeOldPacket, 8, 8)
+        || !lifetimeTextures.destroy(lifetimeOld)) {
+        fail("OpenGL resource lifetime fixture failed");
+    }
+    const TextureHandle lifetimeReplacement = lifetimeTextures.create(
+        TextureFormat::Rgba8, 1, 1, 4, lifetimePixels);
+    if (lifetimeReplacement.value() != lifetimeOld.value()
+        || lifetimeReplacement.generation() == lifetimeOld.generation()
+        || !lifetimeRenderer.synchronizeTextures(lifetimeTextures)
+        || lifetimeRenderer.render(lifetimeOldPacket, 8, 8)) {
+        fail("OpenGL renderer accepted a stale packet after texture-slot reuse");
+    }
+    Frame lifetimeReplacementFrame;
+    lifetimeReplacementFrame.begin().image(
+        lifetimeReplacement, {{0.0F, 0.0F}, {8.0F, 8.0F}});
+    if (!lifetimeRenderer.render(lifetimeReplacementFrame.finish(), 8, 8)) {
+        fail("OpenGL renderer rejected the replacement texture generation");
+    }
+
+    GLuint borrowedTexture = 0;
+    glGenTextures(1, &borrowedTexture);
+    glBindTexture(GL_TEXTURE_2D, borrowedTexture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGBA8,
+        1,
+        1,
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        lifetimePixels.data());
+    const TextureHandle borrowedHandle = lifetimeTextures.createExternal(
+        TextureFormat::Rgba8, 1, 1);
+    Frame borrowedFrame;
+    borrowedFrame.begin().image(borrowedHandle, {{0.0F, 0.0F}, {8.0F, 8.0F}});
+    if (!lifetimeRenderer.bindExternalTexture(
+            lifetimeTextures,
+            borrowedHandle,
+            borrowedTexture,
+            OpenGlExternalTextureOwnership::Borrowed)) {
+        std::cerr << lifetimeRenderer.lastError() << '\n';
+        fail("OpenGL borrowed external texture binding failed");
+    }
+    glFinish();
+    if (!lifetimeRenderer.render(borrowedFrame.finish(), 8, 8)
+        || lifetimeRenderer.statistics().externalTextures != 1) {
+        fail("OpenGL borrowed external texture was not renderable");
+    }
+    if (!lifetimeRenderer.shutdown() || glIsTexture(borrowedTexture) != GL_TRUE) {
+        fail("OpenGL borrowed external texture ownership was not preserved");
+    }
+    glDeleteTextures(1, &borrowedTexture);
+
+    TextureStore recoveryTextures;
+    const TextureHandle recoveryHandle = recoveryTextures.create(
+        TextureFormat::Rgba8,
+        1,
+        1,
+        4,
+        lifetimePixels,
+        {.backingPolicy = TextureBackingPolicy::DiscardAfterUpload});
+    if (!lifetimeRenderer.initialize(4, 1, 1)
+        || !lifetimeRenderer.synchronizeTextures(recoveryTextures)
+        || !recoveryTextures.discardCpuBacking(recoveryHandle)
+        || !lifetimeRenderer.shutdown()
+        || !lifetimeRenderer.initialize(4, 1, 1)
+        || lifetimeRenderer.synchronizeTextures(recoveryTextures)
+        || lifetimeRenderer.lastError()
+            != "OpenGL texture CPU backing is unavailable; restore it before synchronization"
+        || !recoveryTextures.restoreCpuBacking(recoveryHandle, 4, lifetimePixels)
+        || !lifetimeRenderer.synchronizeTextures(recoveryTextures)
+        || !lifetimeRenderer.shutdown()) {
+        fail("OpenGL discarded CPU backing was not explicit and recoverable after recreation");
+    }
+
     glViewport(0, 0, henia::test::kVisualWidth, henia::test::kVisualHeight);
     glDisable(GL_SCISSOR_TEST);
     glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
@@ -566,10 +656,10 @@ int main() {
     glPixelStorei(GL_UNPACK_ALIGNMENT, 8);
     glPixelStorei(kUnpackRowLength, 17);
     const TextureView atlasView = textures.view(TextureHandle{1});
-    const std::vector<std::byte> atlasPixels(atlasView.pixels.begin(), atlasView.pixels.end());
-    if (!textures.update(atlasView.handle, atlasView.rowPitch, atlasPixels)
+    const std::array<std::byte, 1> atlasPatch{atlasView.pixels[5]};
+    if (!textures.updateRegion(atlasView.handle, {1, 1, 1, 1}, 1, atlasPatch)
         || !renderer.synchronizeTextures(textures)) {
-        fail("OpenGL texture synchronization failed with a host unpack buffer");
+        fail("OpenGL partial texture synchronization failed with a host unpack buffer");
     }
     GLint restoredUnpackBuffer = 0;
     GLint restoredUnpackAlignment = 0;
@@ -698,6 +788,8 @@ int main() {
     const OpenGlRenderStatistics statistics = renderer.statistics();
     if (statistics.frames != 98 || statistics.instanceUploads != 65
         || statistics.textureUploads != 3
+        || statistics.fullTextureUploads != 2 || statistics.partialTextureUploads != 1
+        || statistics.uploadedTextureBytes != 33 || statistics.gpuTextureBytes != 16
         || statistics.uploadFenceFailures != 0 || statistics.rejectedFrames != 2
         || statistics.invalidInputFrames != 1 || statistics.capacityRejectedFrames != 0
         || statistics.wrongContextCalls != 3 || statistics.ignoredHostErrors == 0

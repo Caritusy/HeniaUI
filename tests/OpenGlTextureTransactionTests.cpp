@@ -31,9 +31,10 @@ void verifyUploadFailureRollsBackAndRetries() {
     henia::detail::FixedError diagnostic;
 
     OpenGlTextureTransaction failed(textures);
-    if (!failed.stage(0, 4, create, [](std::uint32_t) { return true; }, destroy)
+    if (!failed.stage(0, 1, 4, create, [](std::uint32_t) { return true; }, destroy)
         || failed.stage(
             1,
+            2,
             6,
             create,
             [&](std::uint32_t) noexcept {
@@ -58,8 +59,8 @@ void verifyUploadFailureRollsBackAndRetries() {
     }
 
     OpenGlTextureTransaction retry(textures);
-    if (!retry.stage(0, 4, create, [](std::uint32_t) { return true; }, destroy)
-        || !retry.stage(1, 6, create, [](std::uint32_t) { return true; }, destroy)
+    if (!retry.stage(0, 1, 4, create, [](std::uint32_t) { return true; }, destroy)
+        || !retry.stage(1, 2, 6, create, [](std::uint32_t) { return true; }, destroy)
         || retry.commit(destroy) != 2) {
         fail("OpenGL texture synchronization could not retry after rollback");
     }
@@ -79,6 +80,7 @@ void verifyCreationFailurePreservesValidTexture() {
     OpenGlTextureTransaction transaction(textures);
     if (transaction.stage(
             0,
+            1,
             10,
             []() noexcept { return 0U; },
             [](std::uint32_t) noexcept { return true; },

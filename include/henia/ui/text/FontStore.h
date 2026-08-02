@@ -5,6 +5,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -47,6 +49,7 @@ public:
     [[nodiscard]] float lineHeight() const noexcept;
     [[nodiscard]] const GlyphMetrics* glyph(char32_t codepoint) const noexcept;
     [[nodiscard]] float kerning(char32_t left, char32_t right) const noexcept;
+    [[nodiscard]] std::size_t storageBytes() const noexcept;
 
 private:
     [[nodiscard]] static std::uint64_t kerningKey(char32_t left, char32_t right) noexcept;
@@ -63,11 +66,26 @@ private:
 class FontStore final {
 public:
     [[nodiscard]] FontHandle add(FontDefinition definition);
+    [[nodiscard]] bool destroy(FontHandle handle) noexcept;
     [[nodiscard]] const FontFace* find(FontHandle handle) const noexcept;
+    [[nodiscard]] FontHandle handleAt(std::size_t slotIndex) const noexcept;
     [[nodiscard]] std::size_t size() const noexcept;
+    [[nodiscard]] std::size_t slotCount() const noexcept;
+    [[nodiscard]] std::size_t storageBytes() const noexcept;
 
 private:
-    std::vector<FontFace> mFonts;
+    struct Entry final {
+        std::optional<FontFace> face;
+        std::uint32_t generation = 1;
+        std::uint32_t nextFree = std::numeric_limits<std::uint32_t>::max();
+    };
+
+    [[nodiscard]] Entry* findEntry(FontHandle handle) noexcept;
+    [[nodiscard]] const Entry* findEntry(FontHandle handle) const noexcept;
+
+    std::vector<Entry> mFonts;
+    std::uint32_t mFreeHead = std::numeric_limits<std::uint32_t>::max();
+    std::size_t mActiveFonts = 0;
 };
 
 } // namespace henia::ui

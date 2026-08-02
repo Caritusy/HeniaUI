@@ -1,15 +1,59 @@
 # Renderer ownership and recreation
 
-HeniaUI renderers own only the GPU objects they create. They do not own native
-windows, OpenGL contexts, D3D12 devices, queues, swap chains, attachments,
-command allocators, or host fences. Renderer instances have no shared mutable
-graphics globals: multiple instances are valid when each call satisfies that
-instance's context/device contract.
+HeniaUI renderers own the GPU objects they create and OpenGL texture names the
+host explicitly transfers. D3D12 external textures are retained by COM; borrowed
+OpenGL names are never deleted. Renderers do not own native windows, OpenGL
+contexts, D3D12 devices, queues, swap chains, attachments, command allocators,
+or host fences. Renderer instances have no shared mutable graphics globals:
+multiple instances are valid when each call satisfies that instance's
+context/device contract.
 
 Calling `initialize()` again is idempotent only for the same owner and the exact
 same configuration. A different context, device, capacity, target format, or
 sample count is rejected while the existing resources remain usable. Perform an
 orderly `shutdown()` before initializing with a changed configuration.
+
+## CPU resource handles and backing
+
+`TextureHandle` and `FontHandle` contain a one-based slot plus a generation.
+Destroying a store entry releases its owned CPU storage and advances the slot's
+generation before making the slot reusable. A packet, text cache entry, or host
+object that still contains the old handle therefore remains a valid immutable
+snapshot, but the store and synchronized renderers reject it as stale. `size()`
+counts live entries; `slotCount()` is the bounded high-water mark used to size
+renderer bookkeeping.
+
+Every renderer instance observes store destruction or slot reuse independently
+on its next `synchronizeTextures()` call. OpenGL retires its old object in that
+call. D3D12 removes the old object from new descriptor tables while submission
+slots keep COM references until their host-proved fences complete. A host must
+synchronize every live renderer that consumes a store before treating a
+destruction or update as globally visible.
+
+`TextureCreateOptions::backingPolicy` defines CPU ownership:
+
+- `Retained` keeps pixels until update or destruction.
+- `DiscardAfterUpload` permits explicit `discardCpuBacking()` after every
+  consuming renderer has synchronized. A recreated renderer reports the
+  missing backing until `restoreCpuBacking()` supplies the same logical
+  revision again.
+- `Regenerable` also permits discard and lets `ensureCpuBacking()` invoke the
+  registered callback after context/device recreation.
+- `ExternalGpu` is created with `createExternal()` and has no CPU pixels.
+  Bind a matching native object separately on each renderer.
+
+Use `updateRegion()` for a rectangular edit. The store copies only the supplied
+rows and retains the previous tight rectangle for transactional OpenGL
+rollback. A renderer exactly one revision behind can issue a subresource
+upload; multiple edits accumulated before it synchronizes fall back to a full
+upload from the current CPU image. `restoreCpuBacking()` does not create a new
+revision; use `update()` when the logical texture content changes.
+
+`TextureStore::statistics()` reports live/reusable slots, retained CPU bytes,
+discarded backings, external entries, and regeneration outcomes. Renderer
+statistics report current logical GPU bytes, external bindings, full/partial
+upload counts and bytes, and retired objects. `FontStore::storageBytes()`
+reports its CPU allocation footprint.
 
 ## OpenGL context lifetime
 
@@ -78,6 +122,19 @@ remain retained in an internal batch until its internal fence completes.
 recording, complete every render-slot fence, make the texture-upload queue idle,
 and poll completed uploads. Destroy renderers before releasing their device.
 
+A one-revision region edit uses in-place `CopyTextureRegion` only when no
+submission slot retains the current resource. Recording that handle is rejected
+until the upload fence completes. If an in-flight submission still owns the
+resource, synchronization creates and fully populates a replacement instead;
+the old COM resource remains alive with the submission. Completed staged work
+commits only when its packed handle and revision are still current, so a
+destroyed/reused slot cannot resurrect an old generation.
+
+`bindExternalTexture()` retains a host-provided `ID3D12Resource` and validates
+its device, dimensions, format, and sample layout. The host owns transitions and
+must keep it in `D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE` whenever HeniaUI
+records it.
+
 ## Resize, format change, and device reset
 
 - OpenGL renderers do not retain a drawable or framebuffer. A resize on the same
@@ -97,3 +154,9 @@ and poll completed uploads. Destroy renderers before releasing their device.
 
 The API never assumes that a resource name from one context or a device child
 from one D3D12 device is valid in another renderer instance.
+
+OpenGL `bindExternalTexture()` accepts either borrowed or transferred ownership.
+Shutdown and replacement never delete a borrowed name; a transferred name is
+deleted with renderer-owned textures. The object must be a live `GL_TEXTURE_2D`
+in the renderer's exact owner context, with storage matching the external store
+entry.

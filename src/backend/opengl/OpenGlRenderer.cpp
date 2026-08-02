@@ -586,6 +586,7 @@ struct OpenGlRenderer::Implementation final {
     std::vector<UploadSlot> uploadSlots;
     henia::detail::OpenGlUploadRing uploadRing;
     std::vector<detail::OpenGlTextureState> textures;
+    std::vector<std::uint32_t> partialTextureUpdates;
     OpenGlRenderStatistics statistics{};
     henia::detail::FixedError error;
     HGLRC ownerContext = nullptr;
@@ -596,7 +597,12 @@ struct OpenGlRenderer::Implementation final {
         std::size_t requestedCapacity,
         std::size_t requestedTextureCapacity,
         std::size_t requestedUploadSlots);
-    [[nodiscard]] bool synchronizeTextures(const TextureStore& store) noexcept;
+    [[nodiscard]] bool synchronizeTextures(TextureStore& store) noexcept;
+    [[nodiscard]] bool bindExternalTexture(
+        const TextureStore& store,
+        TextureHandle handle,
+        std::uint32_t textureObject,
+        OpenGlExternalTextureOwnership ownership) noexcept;
     [[nodiscard]] bool render(
         const RenderPacket& packet,
         std::uint32_t width,
@@ -645,6 +651,7 @@ bool OpenGlRenderer::Implementation::initialize(
     }
     ownerContext = currentContext;
     textures.resize(requestedTextureCapacity);
+    partialTextureUpdates.reserve(requestedTextureCapacity);
     uploadSlots.resize(requestedUploadSlots);
     uploadRing.reset(requestedUploadSlots);
     if (!loadFunctions(gl)) {
@@ -790,7 +797,7 @@ bool OpenGlRenderer::Implementation::initialize(
     return true;
 }
 
-bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& store) noexcept {
+bool OpenGlRenderer::Implementation::synchronizeTextures(TextureStore& store) noexcept {
     if (!ready) {
         error = "OpenGL renderer is not initialized";
         return false;
@@ -798,14 +805,20 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& sto
     if (!validateOwnerContext("synchronizeTextures")) {
         return false;
     }
-    if (store.size() > textures.size()) {
+    if (store.slotCount() > textures.size()) {
         error = "OpenGL texture store exceeds configured capacity";
         return false;
     }
 
     bool requiresSynchronization = false;
-    for (std::uint32_t value = 1; value <= store.size(); ++value) {
-        const TextureView view = store.view(TextureHandle{value});
+    for (std::size_t index = 0; index < textures.size(); ++index) {
+        const TextureHandle handle = store.handleAt(index);
+        detail::OpenGlTextureState& texture = textures[index];
+        if (!handle.valid()) {
+            requiresSynchronization = requiresSynchronization || texture.object != 0;
+            continue;
+        }
+        TextureView view = store.view(handle);
         const std::uint32_t pixelBytes = view.format == TextureFormat::Alpha8 ? 1U : 4U;
         std::size_t minimumPitch = 0;
         std::size_t requiredBytes = 0;
@@ -825,15 +838,38 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& sto
             || !checkedMultiply(
                 static_cast<std::size_t>(view.rowPitch),
                 static_cast<std::size_t>(view.height),
-                requiredBytes)
-            || requiredBytes != view.pixels.size() || view.pixels.data() == nullptr) {
+                requiredBytes)) {
             ++statistics.textureSynchronizationFailures;
-            assignGlFailure(error, "OpenGL texture metadata is invalid", GL_INVALID_VALUE, "texture", value);
+            assignGlFailure(
+                error,
+                "OpenGL texture metadata is invalid",
+                GL_INVALID_VALUE,
+                "texture",
+                handle.packed());
             return false;
         }
-        const detail::OpenGlTextureState& texture = textures[value - 1U];
+        if (view.backingPolicy == TextureBackingPolicy::ExternalGpu) {
+            requiresSynchronization = requiresSynchronization
+                || (texture.object != 0 && texture.handle != handle.packed());
+            continue;
+        }
+        if (texture.object != 0 && texture.handle == handle.packed()
+            && texture.revision == view.revision) {
+            continue;
+        }
+        if (!view.backingAvailable) {
+            static_cast<void>(store.ensureCpuBacking(handle));
+            view = store.view(handle);
+        }
+        if (!view.backingAvailable || requiredBytes != view.pixels.size()
+            || view.pixels.data() == nullptr) {
+            ++statistics.textureSynchronizationFailures;
+            error = "OpenGL texture CPU backing is unavailable; restore it before synchronization";
+            return false;
+        }
         requiresSynchronization = requiresSynchronization
-            || texture.object == 0 || texture.revision != view.revision;
+            || texture.object == 0 || texture.handle != handle.packed()
+            || texture.revision != view.revision;
     }
     if (!requiresSynchronization) {
         error.clear();
@@ -874,14 +910,102 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& sto
         glDeleteTextures(1, &name);
     };
 
-    for (std::uint32_t value = 1; value <= store.size(); ++value) {
-        const TextureView view = store.view(TextureHandle{value});
-        detail::OpenGlTextureState& texture = textures[value - 1U];
-        if (texture.object != 0 && texture.revision == view.revision) {
+    partialTextureUpdates.clear();
+    std::uint64_t pendingFullBytes = 0;
+    std::uint64_t pendingPartialBytes = 0;
+    std::uint64_t replacedTextures = 0;
+    const auto rollbackPartials = [&]() noexcept {
+        GLenum rollbackError = GL_NO_ERROR;
+        for (const std::uint32_t index : partialTextureUpdates) {
+            const TextureHandle handle = store.handleAt(index);
+            const TextureView view = store.view(handle);
+            detail::OpenGlTextureState& texture = textures[index];
+            const std::uint32_t pixelBytes = view.format == TextureFormat::Alpha8 ? 1U : 4U;
+            const GLenum sourceFormat = view.format == TextureFormat::Alpha8 ? kRed : GL_RGBA;
+            glBindTexture(GL_TEXTURE_2D, texture.object);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glPixelStorei(kUnpackRowLength, static_cast<GLint>(view.dirtyRegion.width));
+            glTexSubImage2D(
+                GL_TEXTURE_2D,
+                0,
+                static_cast<GLint>(view.dirtyRegion.x),
+                static_cast<GLint>(view.dirtyRegion.y),
+                static_cast<GLsizei>(view.dirtyRegion.width),
+                static_cast<GLsizei>(view.dirtyRegion.height),
+                sourceFormat,
+                GL_UNSIGNED_BYTE,
+                view.rollbackPixels.data());
+            static_cast<void>(pixelBytes);
+            const GLenum currentError = consumeOperationErrors();
+            if (rollbackError == GL_NO_ERROR) rollbackError = currentError;
+        }
+        return rollbackError;
+    };
+
+    for (std::size_t index = 0; index < textures.size(); ++index) {
+        const TextureHandle handle = store.handleAt(index);
+        if (!handle.valid()) continue;
+        const TextureView view = store.view(handle);
+        detail::OpenGlTextureState& texture = textures[index];
+        if (view.backingPolicy == TextureBackingPolicy::ExternalGpu
+            || (texture.object != 0 && texture.handle == handle.packed()
+                && texture.revision == view.revision)) {
+            continue;
+        }
+        const std::uint32_t pixelBytes = view.format == TextureFormat::Alpha8 ? 1U : 4U;
+        const bool partial = texture.object != 0 && texture.handle == handle.packed()
+            && texture.revision + 1U == view.revision && !view.fullUpdate
+            && view.dirtyRegion.width > 0 && view.dirtyRegion.height > 0
+            && view.dirtyRegion.x <= view.width
+            && view.dirtyRegion.width <= view.width - view.dirtyRegion.x
+            && view.dirtyRegion.y <= view.height
+            && view.dirtyRegion.height <= view.height - view.dirtyRegion.y
+            && view.rollbackPixels.size()
+                == static_cast<std::size_t>(view.dirtyRegion.width)
+                    * view.dirtyRegion.height * pixelBytes;
+        if (partial) {
+            partialTextureUpdates.push_back(static_cast<std::uint32_t>(index));
+            glBindTexture(GL_TEXTURE_2D, texture.object);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glPixelStorei(kUnpackRowLength, static_cast<GLint>(view.rowPitch / pixelBytes));
+            const GLenum sourceFormat = view.format == TextureFormat::Alpha8 ? kRed : GL_RGBA;
+            const std::size_t sourceOffset = static_cast<std::size_t>(view.dirtyRegion.y)
+                    * view.rowPitch
+                + static_cast<std::size_t>(view.dirtyRegion.x) * pixelBytes;
+            glTexSubImage2D(
+                GL_TEXTURE_2D,
+                0,
+                static_cast<GLint>(view.dirtyRegion.x),
+                static_cast<GLint>(view.dirtyRegion.y),
+                static_cast<GLsizei>(view.dirtyRegion.width),
+                static_cast<GLsizei>(view.dirtyRegion.height),
+                sourceFormat,
+                GL_UNSIGNED_BYTE,
+                view.pixels.data() + sourceOffset);
+            if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+                const henia::detail::FixedError diagnostic = error;
+                transaction.rollback(destroyTexture);
+                const GLenum rollbackError = rollbackPartials();
+                if (restoreUploadState() != GL_NO_ERROR || rollbackError != GL_NO_ERROR) {
+                    ++statistics.stateRestoreFailures;
+                }
+                error = diagnostic;
+                assignGlFailure(
+                    error,
+                    "OpenGL partial texture upload failed",
+                    glError,
+                    "texture",
+                    handle.packed());
+                ++statistics.textureSynchronizationFailures;
+                return false;
+            }
+            pendingPartialBytes += static_cast<std::uint64_t>(view.dirtyRegion.width)
+                * view.dirtyRegion.height * pixelBytes;
             continue;
         }
         const bool staged = transaction.stage(
-            value - 1U,
+            index,
+            handle.packed(),
             view.revision,
             [&]() noexcept {
                 GLuint candidate = 0;
@@ -896,7 +1020,7 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& sto
                         "OpenGL texture object creation failed",
                         glError,
                         "texture",
-                        value);
+                        handle.packed());
                     return 0U;
                 }
                 return candidate;
@@ -916,7 +1040,7 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& sto
                         "OpenGL texture configuration failed",
                         glError,
                         "texture",
-                        value);
+                        handle.packed());
                     return false;
                 }
 
@@ -938,7 +1062,7 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& sto
                             "OpenGL immutable texture storage allocation failed",
                             storageError,
                             "texture",
-                            value);
+                            handle.packed());
                         return false;
                     }
                 }
@@ -971,7 +1095,7 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& sto
                         "OpenGL texture pixel upload failed",
                         glError,
                         "texture",
-                        value);
+                        handle.packed());
                     return false;
                 }
                 return true;
@@ -980,7 +1104,8 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& sto
         if (!staged) {
             const henia::detail::FixedError diagnostic = error;
             transaction.rollback(destroyTexture);
-            if (restoreUploadState() != GL_NO_ERROR) {
+            const GLenum rollbackError = rollbackPartials();
+            if (restoreUploadState() != GL_NO_ERROR || rollbackError != GL_NO_ERROR) {
                 ++statistics.stateRestoreFailures;
             }
             static_cast<void>(consumeOperationErrors());
@@ -988,17 +1113,61 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& sto
             ++statistics.textureSynchronizationFailures;
             return false;
         }
+        texture.stagedByteSize = static_cast<std::uint64_t>(view.width)
+            * view.height * pixelBytes;
+        texture.stagedWidth = view.width;
+        texture.stagedHeight = view.height;
+        texture.stagedFormat = static_cast<std::uint8_t>(view.format);
+        texture.stagedExternal = false;
+        texture.stagedOwned = true;
+        pendingFullBytes += texture.stagedByteSize;
+        if (texture.object != 0) ++replacedTextures;
     }
     if (const GLenum restoreError = restoreUploadState(); restoreError != GL_NO_ERROR) {
         transaction.rollback(destroyTexture);
+        gl.bindBuffer(kPixelUnpackBuffer, 0);
+        const GLenum rollbackError = rollbackPartials();
+        static_cast<void>(restoreUploadState());
         static_cast<void>(consumeOperationErrors());
         ++statistics.stateRestoreFailures;
         ++statistics.textureSynchronizationFailures;
-        assignGlFailure(error, "OpenGL texture upload-state restoration failed", restoreError, "texture", 0);
+        assignGlFailure(
+            error,
+            rollbackError == GL_NO_ERROR
+                ? "OpenGL texture upload-state restoration failed"
+                : "OpenGL partial texture rollback failed",
+            rollbackError == GL_NO_ERROR ? restoreError : rollbackError,
+            "texture",
+            0);
         return false;
     }
     const std::size_t committed = transaction.commit(destroyTexture);
-    statistics.textureUploads += committed;
+    for (const std::uint32_t index : partialTextureUpdates) {
+        const TextureHandle handle = store.handleAt(index);
+        detail::OpenGlTextureState& texture = textures[index];
+        texture.handle = handle.packed();
+        texture.revision = store.view(handle).revision;
+    }
+    std::uint64_t directlyRetired = 0;
+    for (std::size_t index = 0; index < textures.size(); ++index) {
+        const TextureHandle handle = store.handleAt(index);
+        detail::OpenGlTextureState& texture = textures[index];
+        if (texture.object == 0 || (handle.valid() && texture.handle == handle.packed())) continue;
+        if (texture.owned) destroyTexture(texture.object);
+        texture = {};
+        ++directlyRetired;
+    }
+    statistics.textureUploads += committed + partialTextureUpdates.size();
+    statistics.fullTextureUploads += committed;
+    statistics.partialTextureUploads += partialTextureUpdates.size();
+    statistics.uploadedTextureBytes += pendingFullBytes + pendingPartialBytes;
+    statistics.retiredTextures += replacedTextures + directlyRetired;
+    statistics.gpuTextureBytes = 0;
+    statistics.externalTextures = 0;
+    for (const detail::OpenGlTextureState& texture : textures) {
+        statistics.gpuTextureBytes += texture.byteSize;
+        if (texture.object != 0 && texture.external) ++statistics.externalTextures;
+    }
     if (const GLenum cleanupError = consumeOperationErrors(); cleanupError != GL_NO_ERROR) {
         ++statistics.textureSynchronizationFailures;
         assignGlFailure(
@@ -1008,6 +1177,116 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& sto
             "texture",
             0);
         return false;
+    }
+    error.clear();
+    return true;
+}
+
+bool OpenGlRenderer::Implementation::bindExternalTexture(
+    const TextureStore& store,
+    TextureHandle handle,
+    std::uint32_t textureObject,
+    OpenGlExternalTextureOwnership ownership) noexcept {
+    if (!ready) {
+        error = "OpenGL renderer is not initialized";
+        return false;
+    }
+    if (!validateOwnerContext("bindExternalTexture")) return false;
+    const TextureView view = store.view(handle);
+    if (!view.handle.valid() || view.backingPolicy != TextureBackingPolicy::ExternalGpu
+        || handle.value() > textures.size() || textureObject == 0) {
+        error = "OpenGL external texture binding is invalid";
+        return false;
+    }
+
+    discardHostErrors();
+    if (glIsTexture(static_cast<GLuint>(textureObject)) != GL_TRUE) {
+        static_cast<void>(consumeOperationErrors());
+        error = "OpenGL external texture object is not a live GL_TEXTURE_2D object";
+        return false;
+    }
+    GLint previousTexture = 0;
+    glGetIntegerv(kTextureBinding2D, &previousTexture);
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        assignGlFailure(
+            error,
+            "OpenGL external texture state capture failed",
+            glError,
+            "texture",
+            handle.packed());
+        return false;
+    }
+    GLint width = 0;
+    GLint height = 0;
+    GLint internalFormat = 0;
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(textureObject));
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &internalFormat);
+    const GLenum validationError = consumeOperationErrors();
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture));
+    const GLenum restoreError = consumeOperationErrors();
+    if (restoreError != GL_NO_ERROR) {
+        ++statistics.stateRestoreFailures;
+        assignGlFailure(
+            error,
+            "OpenGL external texture state restoration failed",
+            restoreError,
+            "texture",
+            handle.packed());
+        return false;
+    }
+    if (validationError != GL_NO_ERROR) {
+        assignGlFailure(
+            error,
+            "OpenGL external texture validation failed",
+            validationError,
+            "texture",
+            handle.packed());
+        return false;
+    }
+    const GLint expectedFormat = view.format == TextureFormat::Alpha8 ? kR8 : kRgba8;
+    if (width != static_cast<GLint>(view.width)
+        || height != static_cast<GLint>(view.height)
+        || internalFormat != expectedFormat) {
+        error = "OpenGL external texture storage does not match its TextureStore entry";
+        return false;
+    }
+
+    detail::OpenGlTextureState& texture = textures[handle.value() - 1U];
+    const bool sameObject = texture.object == textureObject;
+    if (texture.object != 0 && !sameObject) {
+        if (texture.owned) {
+            const GLuint previous = texture.object;
+            glDeleteTextures(1, &previous);
+            if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+                assignGlFailure(
+                    error,
+                    "OpenGL replaced external texture cleanup failed",
+                    glError,
+                    "texture",
+                    handle.packed());
+                return false;
+            }
+        }
+        ++statistics.retiredTextures;
+    }
+    texture = {
+        .object = textureObject,
+        .handle = handle.packed(),
+        .revision = view.revision,
+        .byteSize = static_cast<std::uint64_t>(view.rowPitch) * view.height,
+        .width = view.width,
+        .height = view.height,
+        .format = static_cast<std::uint8_t>(view.format),
+        .external = true,
+        .owned = ownership == OpenGlExternalTextureOwnership::Transferred,
+    };
+    statistics.gpuTextureBytes = 0;
+    statistics.externalTextures = 0;
+    for (const detail::OpenGlTextureState& current : textures) {
+        statistics.gpuTextureBytes += current.byteSize;
+        if (current.object != 0 && current.external) ++statistics.externalTextures;
     }
     error.clear();
     return true;
@@ -1080,7 +1359,8 @@ bool OpenGlRenderer::Implementation::render(
         for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
             const TextureHandle handle = batch.textures[slot];
             if (!handle.valid() || handle.value() > textures.size()
-                || textures[handle.value() - 1U].object == 0) {
+                || textures[handle.value() - 1U].object == 0
+                || textures[handle.value() - 1U].handle != handle.packed()) {
                 ++statistics.rejectedFrames;
                 error = "Render packet references an unsynchronized texture";
                 return false;
@@ -1323,11 +1603,11 @@ bool OpenGlRenderer::Implementation::shutdown() noexcept {
     if (hadOwner) {
         discardHostErrors();
         for (detail::OpenGlTextureState& texture : textures) {
-            if (texture.object != 0) {
+            if (texture.object != 0 && texture.owned) {
                 const GLuint object = texture.object;
                 glDeleteTextures(1, &object);
             }
-            if (texture.stagedObject != 0) {
+            if (texture.stagedObject != 0 && texture.stagedOwned) {
                 const GLuint object = texture.stagedObject;
                 glDeleteTextures(1, &object);
             }
@@ -1349,6 +1629,7 @@ bool OpenGlRenderer::Implementation::shutdown() noexcept {
         }
     }
     textures.clear();
+    partialTextureUpdates.clear();
     uploadSlots.clear();
     uploadRing.clear();
     program = 0;
@@ -1361,6 +1642,8 @@ bool OpenGlRenderer::Implementation::shutdown() noexcept {
     ownerContext = nullptr;
     immutableTextureStorage = false;
     ready = false;
+    statistics.gpuTextureBytes = 0;
+    statistics.externalTextures = 0;
     if (hadOwner && consumeOperationErrors() != GL_NO_ERROR) {
         error = "OpenGL UI resource destruction generated an error";
         return false;
@@ -1372,6 +1655,7 @@ bool OpenGlRenderer::Implementation::shutdown() noexcept {
 void OpenGlRenderer::Implementation::abandon() noexcept {
     const bool hadOwner = ownerContext != nullptr;
     textures.clear();
+    partialTextureUpdates.clear();
     uploadSlots.clear();
     uploadRing.clear();
     program = 0;
@@ -1384,6 +1668,8 @@ void OpenGlRenderer::Implementation::abandon() noexcept {
     ownerContext = nullptr;
     immutableTextureStorage = false;
     ready = false;
+    statistics.gpuTextureBytes = 0;
+    statistics.externalTextures = 0;
     if (hadOwner) {
         ++statistics.abandonedContexts;
     }
@@ -1542,8 +1828,16 @@ bool OpenGlRenderer::initialize(
     }
 }
 
-bool OpenGlRenderer::synchronizeTextures(const TextureStore& textures) noexcept {
+bool OpenGlRenderer::synchronizeTextures(TextureStore& textures) noexcept {
     return mImplementation->synchronizeTextures(textures);
+}
+
+bool OpenGlRenderer::bindExternalTexture(
+    const TextureStore& textures,
+    TextureHandle handle,
+    std::uint32_t textureObject,
+    OpenGlExternalTextureOwnership ownership) noexcept {
+    return mImplementation->bindExternalTexture(textures, handle, textureObject, ownership);
 }
 
 bool OpenGlRenderer::render(

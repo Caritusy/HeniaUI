@@ -410,7 +410,7 @@ float4 pixelMain(PixelInput input) : SV_Target {
 
 struct D3D12Renderer::Implementation final {
     struct DescriptorTableCache final {
-        std::array<std::uint32_t, DrawBatch::kTextureCapacity> handles{};
+        std::array<std::uint64_t, DrawBatch::kTextureCapacity> handles{};
         std::array<std::uint64_t, DrawBatch::kTextureCapacity> revisions{};
         bool valid = false;
     };
@@ -426,7 +426,12 @@ struct D3D12Renderer::Implementation final {
 
     struct GpuTexture final {
         ComPtr<ID3D12Resource> resource;
+        std::uint64_t handle = 0;
         std::uint64_t revision = 0;
+        std::uint64_t descriptorRevision = 0;
+        std::uint64_t byteSize = 0;
+        bool pendingInPlace = false;
+        bool external = false;
     };
 
     struct StagedTexture final {
@@ -434,7 +439,11 @@ struct D3D12Renderer::Implementation final {
         ComPtr<ID3D12Resource> upload;
         D3D12_SHADER_RESOURCE_VIEW_DESC shaderView{};
         std::uint32_t value = 0;
+        std::uint64_t handle = 0;
         std::uint64_t revision = 0;
+        std::uint64_t byteSize = 0;
+        std::uint64_t uploadedBytes = 0;
+        bool partial = false;
     };
 
     struct TextureUploadBatch final {
@@ -457,6 +466,7 @@ struct D3D12Renderer::Implementation final {
     ComPtr<ID3D12DescriptorHeap> gpuBatchHeap;
     std::vector<Submission> submissions;
     std::vector<GpuTexture> textures;
+    std::vector<std::uint64_t> scheduledTextureHandles;
     std::vector<std::uint64_t> scheduledTextureRevisions;
     std::vector<TextureUploadBatch> textureUploadBatches;
     std::vector<std::uint32_t> dirtyTextures;
@@ -469,6 +479,7 @@ struct D3D12Renderer::Implementation final {
     D3D12RenderStatistics statistics{};
     henia::detail::FixedError error;
     std::uint64_t nextTextureUploadFenceValue = 1;
+    std::uint64_t nextDescriptorRevision = 1;
     bool ready = false;
 
     [[nodiscard]] bool initialize(
@@ -481,8 +492,12 @@ struct D3D12Renderer::Implementation final {
     [[nodiscard]] bool createSubmissionBuffers() noexcept;
     [[nodiscard]] bool createTextureUploadBatches() noexcept;
     [[nodiscard]] bool synchronizeTextures(
-        const TextureStore& store,
+        TextureStore& store,
         ID3D12CommandQueue& queue);
+    [[nodiscard]] bool bindExternalTexture(
+        const TextureStore& store,
+        TextureHandle handle,
+        ID3D12Resource& texture) noexcept;
     [[nodiscard]] bool pollTextureUploads() noexcept;
     void rollbackTextureUpload(TextureUploadBatch& batch) noexcept;
     [[nodiscard]] bool record(
@@ -577,6 +592,7 @@ bool D3D12Renderer::Implementation::initialize(
     gpuDescriptorCapacity = static_cast<std::uint32_t>(gpuDescriptors);
     submissions.resize(configuration.submissionCapacity);
     textures.resize(configuration.textureCapacity);
+    scheduledTextureHandles.resize(configuration.textureCapacity);
     scheduledTextureRevisions.resize(configuration.textureCapacity);
     textureUploadBatches.resize(configuration.textureUploadBatchCapacity);
     dirtyTextures.reserve(configuration.textureCapacity);
@@ -594,6 +610,7 @@ bool D3D12Renderer::Implementation::initialize(
     }
     statistics = {};
     nextTextureUploadFenceValue = 1;
+    nextDescriptorRevision = 1;
     ready = true;
     error.clear();
     return true;
@@ -854,7 +871,7 @@ bool D3D12Renderer::Implementation::createTextureUploadBatches() noexcept {
 }
 
 bool D3D12Renderer::Implementation::synchronizeTextures(
-    const TextureStore& store,
+    TextureStore& store,
     ID3D12CommandQueue& queue) {
     if (!ready) {
         error = "D3D12 renderer is not initialized";
@@ -868,16 +885,73 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
     if (!pollTextureUploads()) {
         return false;
     }
-    if (store.size() > configuration.textureCapacity) {
+    if (store.slotCount() > configuration.textureCapacity) {
         error = "D3D12 texture store exceeds configured capacity";
         return false;
     }
     dirtyTextures.clear();
-    for (std::uint32_t value = 1; value <= store.size(); ++value) {
-        const TextureView view = store.view(TextureHandle{value});
-        if (view.handle.valid() && scheduledTextureRevisions[value - 1U] != view.revision) {
-            dirtyTextures.push_back(value);
+    for (std::uint32_t index = 0; index < configuration.textureCapacity; ++index) {
+        const TextureHandle handle = store.handleAt(index);
+        GpuTexture& texture = textures[index];
+        if (texture.resource != nullptr
+            && (!handle.valid() || texture.handle != handle.packed())) {
+            texture = {};
+            device->CopyDescriptorsSimple(
+                1,
+                cpuDescriptor(index + 1U),
+                cpuDescriptor(0),
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            ++statistics.retiredTextures;
         }
+        if (!handle.valid()) {
+            scheduledTextureHandles[index] = 0;
+            scheduledTextureRevisions[index] = 0;
+            continue;
+        }
+        TextureView view = store.view(handle);
+        if (view.backingPolicy == TextureBackingPolicy::ExternalGpu) {
+            if (scheduledTextureHandles[index] != handle.packed()) {
+                scheduledTextureHandles[index] = 0;
+                scheduledTextureRevisions[index] = 0;
+            }
+            continue;
+        }
+        if (scheduledTextureHandles[index] == handle.packed()
+            && scheduledTextureRevisions[index] == view.revision) {
+            continue;
+        }
+        if (!view.backingAvailable) {
+            static_cast<void>(store.ensureCpuBacking(handle));
+            view = store.view(handle);
+        }
+        const std::uint32_t pixelBytes = view.format == TextureFormat::Alpha8 ? 1U : 4U;
+        std::size_t minimumPitch = 0;
+        std::size_t requiredBytes = 0;
+        if (!view.handle.valid() || !view.backingAvailable || view.revision == 0
+            || (view.format != TextureFormat::Alpha8 && view.format != TextureFormat::Rgba8)
+            || view.width == 0 || view.height == 0
+            || view.width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION
+            || view.height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION
+            || !checkedMultiply(
+                static_cast<std::size_t>(view.width),
+                static_cast<std::size_t>(pixelBytes),
+                minimumPitch)
+            || view.rowPitch < minimumPitch
+            || !checkedMultiply(
+                static_cast<std::size_t>(view.rowPitch),
+                static_cast<std::size_t>(view.height),
+                requiredBytes)
+            || requiredBytes != view.pixels.size()) {
+            error = "D3D12 texture metadata or CPU backing is invalid";
+            return false;
+        }
+        dirtyTextures.push_back(index + 1U);
+    }
+    statistics.gpuTextureBytes = 0;
+    statistics.externalTextures = 0;
+    for (const GpuTexture& texture : textures) {
+        statistics.gpuTextureBytes += texture.byteSize;
+        if (texture.resource != nullptr && texture.external) ++statistics.externalTextures;
     }
     if (dirtyTextures.empty()) {
         error.clear();
@@ -923,35 +997,78 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
     }
 
     for (const std::uint32_t value : dirtyTextures) {
-        const TextureView view = store.view(TextureHandle{value});
+        const TextureHandle handle = store.handleAt(value - 1U);
+        const TextureView view = store.view(handle);
         const D3D12_RESOURCE_DESC textureDesc = textureDescription(view);
-        const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
+        GpuTexture& current = textures[value - 1U];
+        bool retainedBySubmission = false;
+        for (const Submission& submission : submissions) {
+            if (submission.retainedTextures[value - 1U].Get() == current.resource.Get()
+                && current.resource != nullptr) {
+                retainedBySubmission = true;
+                break;
+            }
+        }
+        const std::uint32_t pixelBytes = view.format == TextureFormat::Alpha8 ? 1U : 4U;
+        const bool validRegion = view.dirtyRegion.width > 0 && view.dirtyRegion.height > 0
+            && view.dirtyRegion.x <= view.width
+            && view.dirtyRegion.width <= view.width - view.dirtyRegion.x
+            && view.dirtyRegion.y <= view.height
+            && view.dirtyRegion.height <= view.height - view.dirtyRegion.y;
+        const bool partial = current.resource != nullptr && !current.external
+            && !current.pendingInPlace && !retainedBySubmission
+            && current.handle == handle.packed() && current.revision + 1U == view.revision
+            && !view.fullUpdate && validRegion;
         StagedTexture staged{};
-        if (FAILED(device->CreateCommittedResource(
-                &defaultHeap,
-                D3D12_HEAP_FLAG_NONE,
-                &textureDesc,
-                D3D12_RESOURCE_STATE_COPY_DEST,
-                nullptr,
-                IID_PPV_ARGS(&staged.resource)))) {
-            error = "D3D12 texture resource creation failed";
-            rollbackTextureUpload(batch);
-            return false;
+        staged.value = value;
+        staged.handle = handle.packed();
+        staged.revision = view.revision;
+        staged.byteSize = static_cast<std::uint64_t>(view.width) * view.height * pixelBytes;
+        staged.partial = partial;
+        if (partial) {
+            staged.resource = current.resource;
+        } else {
+            const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
+            if (FAILED(device->CreateCommittedResource(
+                    &defaultHeap,
+                    D3D12_HEAP_FLAG_NONE,
+                    &textureDesc,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    nullptr,
+                    IID_PPV_ARGS(&staged.resource)))) {
+                error = "D3D12 texture resource creation failed";
+                rollbackTextureUpload(batch);
+                return false;
+            }
         }
 
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
         UINT rowCount = 0;
         UINT64 rowBytes = 0;
         UINT64 uploadBytes = 0;
-        device->GetCopyableFootprints(
-            &textureDesc,
-            0,
-            1,
-            0,
-            &footprint,
-            &rowCount,
-            &rowBytes,
-            &uploadBytes);
+        if (partial) {
+            rowCount = view.dirtyRegion.height;
+            rowBytes = static_cast<UINT64>(view.dirtyRegion.width) * pixelBytes;
+            footprint.Footprint.Format = textureDesc.Format;
+            footprint.Footprint.Width = view.dirtyRegion.width;
+            footprint.Footprint.Height = view.dirtyRegion.height;
+            footprint.Footprint.Depth = 1;
+            footprint.Footprint.RowPitch = static_cast<UINT>(
+                (rowBytes + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1U)
+                & ~(static_cast<UINT64>(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT) - 1U));
+            uploadBytes = static_cast<UINT64>(footprint.Footprint.RowPitch) * rowCount;
+        } else {
+            device->GetCopyableFootprints(
+                &textureDesc,
+                0,
+                1,
+                0,
+                &footprint,
+                &rowCount,
+                &rowBytes,
+                &uploadBytes);
+        }
+        staged.uploadedBytes = rowBytes * rowCount;
 
         const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
         const D3D12_RESOURCE_DESC uploadDesc = bufferDescription(uploadBytes);
@@ -976,9 +1093,13 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
             return false;
         }
         for (UINT row = 0; row < rowCount; ++row) {
+            const std::size_t sourceOffset = partial
+                ? static_cast<std::size_t>(view.dirtyRegion.y + row) * view.rowPitch
+                    + static_cast<std::size_t>(view.dirtyRegion.x) * pixelBytes
+                : static_cast<std::size_t>(row) * view.rowPitch;
             std::memcpy(
                 mapped + footprint.Offset + static_cast<std::size_t>(row) * footprint.Footprint.RowPitch,
-                view.pixels.data() + static_cast<std::size_t>(row) * view.rowPitch,
+                view.pixels.data() + sourceOffset,
                 static_cast<std::size_t>(rowBytes));
         }
         const D3D12_RANGE written{0, static_cast<SIZE_T>(uploadBytes)};
@@ -992,7 +1113,22 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
         source.pResource = staged.upload.Get();
         source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         source.PlacedFootprint = footprint;
-        batch.commandList->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        if (partial) {
+            D3D12_RESOURCE_BARRIER toCopy{};
+            toCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            toCopy.Transition.pResource = staged.resource.Get();
+            toCopy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            toCopy.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            toCopy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+            batch.commandList->ResourceBarrier(1, &toCopy);
+        }
+        batch.commandList->CopyTextureRegion(
+            &destination,
+            partial ? view.dirtyRegion.x : 0,
+            partial ? view.dirtyRegion.y : 0,
+            0,
+            &source,
+            nullptr);
 
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1002,12 +1138,12 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         batch.commandList->ResourceBarrier(1, &barrier);
 
-        staged.shaderView.Format = textureDesc.Format;
-        staged.shaderView.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        staged.shaderView.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        staged.shaderView.Texture2D.MipLevels = 1;
-        staged.value = value;
-        staged.revision = view.revision;
+        if (!partial) {
+            staged.shaderView.Format = textureDesc.Format;
+            staged.shaderView.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            staged.shaderView.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            staged.shaderView.Texture2D.MipLevels = 1;
+        }
         batch.staged.push_back(std::move(staged));
     }
 
@@ -1021,6 +1157,25 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
     queue.ExecuteCommandLists(1, commandLists);
     const std::uint64_t fenceValue = nextTextureUploadFenceValue;
     if (FAILED(queue.Signal(textureUploadFence.Get(), fenceValue))) {
+        for (const StagedTexture& staged : batch.staged) {
+            if (!staged.partial) continue;
+            GpuTexture& texture = textures[staged.value - 1U];
+            if (texture.resource.Get() == staged.resource.Get()) {
+                texture = {};
+                device->CopyDescriptorsSimple(
+                    1,
+                    cpuDescriptor(staged.value),
+                    cpuDescriptor(0),
+                    D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                ++statistics.retiredTextures;
+            }
+        }
+        statistics.gpuTextureBytes = 0;
+        statistics.externalTextures = 0;
+        for (const GpuTexture& texture : textures) {
+            statistics.gpuTextureBytes += texture.byteSize;
+            if (texture.resource != nullptr && texture.external) ++statistics.externalTextures;
+        }
         batch.transaction.abandon();
         ++statistics.failedTextureUploadBatches;
         error = "D3D12 texture upload fence signal failed; submitted resources were retained";
@@ -1030,7 +1185,12 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
     ++nextTextureUploadFenceValue;
     ++statistics.textureUploadBatches;
     for (const StagedTexture& staged : batch.staged) {
+        scheduledTextureHandles[staged.value - 1U] = staged.handle;
         scheduledTextureRevisions[staged.value - 1U] = staged.revision;
+        if (staged.partial) {
+            GpuTexture& texture = textures[staged.value - 1U];
+            if (texture.resource.Get() == staged.resource.Get()) texture.pendingInPlace = true;
+        }
     }
 
     error.clear();
@@ -1075,17 +1235,118 @@ bool D3D12Renderer::Implementation::pollTextureUploads() noexcept {
         }
 
         for (StagedTexture& staged : completedBatch->staged) {
-            device->CreateShaderResourceView(
-                staged.resource.Get(),
-                &staged.shaderView,
-                cpuDescriptor(staged.value));
+            ++statistics.textureUploads;
+            statistics.uploadedTextureBytes += staged.uploadedBytes;
+            if (staged.partial) {
+                ++statistics.partialTextureUploads;
+            } else {
+                ++statistics.fullTextureUploads;
+            }
             GpuTexture& texture = textures[staged.value - 1U];
-            texture.resource = std::move(staged.resource);
+            const bool stillScheduled = scheduledTextureHandles[staged.value - 1U]
+                    == staged.handle
+                && scheduledTextureRevisions[staged.value - 1U] == staged.revision;
+            if (!stillScheduled) {
+                if (staged.partial && texture.resource.Get() == staged.resource.Get()) {
+                    texture.pendingInPlace = false;
+                }
+                continue;
+            }
+            if (staged.partial) {
+                if (texture.resource.Get() != staged.resource.Get()
+                    || texture.handle != staged.handle) {
+                    scheduledTextureHandles[staged.value - 1U] = 0;
+                    scheduledTextureRevisions[staged.value - 1U] = 0;
+                    continue;
+                }
+                texture.pendingInPlace = false;
+            } else {
+                device->CreateShaderResourceView(
+                    staged.resource.Get(),
+                    &staged.shaderView,
+                    cpuDescriptor(staged.value));
+                if (texture.resource != nullptr
+                    && texture.resource.Get() != staged.resource.Get()) {
+                    ++statistics.retiredTextures;
+                }
+                texture.resource = std::move(staged.resource);
+                texture.byteSize = staged.byteSize;
+                texture.external = false;
+            }
+            texture.handle = staged.handle;
             texture.revision = staged.revision;
+            texture.descriptorRevision = nextDescriptorRevision++;
         }
-        statistics.textureUploads += completedBatch->staged.size();
         completedBatch->staged.clear();
         static_cast<void>(completedBatch->transaction.release(completedFence));
+    }
+    statistics.gpuTextureBytes = 0;
+    statistics.externalTextures = 0;
+    for (const GpuTexture& texture : textures) {
+        statistics.gpuTextureBytes += texture.byteSize;
+        if (texture.resource != nullptr && texture.external) ++statistics.externalTextures;
+    }
+    error.clear();
+    return true;
+}
+
+bool D3D12Renderer::Implementation::bindExternalTexture(
+    const TextureStore& store,
+    TextureHandle handle,
+    ID3D12Resource& nativeTexture) noexcept {
+    if (!ready) {
+        error = "D3D12 renderer is not initialized";
+        return false;
+    }
+    const TextureView view = store.view(handle);
+    if (!view.handle.valid() || view.backingPolicy != TextureBackingPolicy::ExternalGpu
+        || handle.value() > textures.size()) {
+        error = "D3D12 external texture binding is invalid";
+        return false;
+    }
+    if (!validateDeviceChild(
+            nativeTexture,
+            "D3D12 external texture belongs to a different device")) return false;
+    const D3D12_RESOURCE_DESC description = nativeTexture.GetDesc();
+    const DXGI_FORMAT expectedFormat = view.format == TextureFormat::Alpha8
+        ? DXGI_FORMAT_R8_UNORM
+        : DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D
+        || description.Width != view.width || description.Height != view.height
+        || description.DepthOrArraySize != 1 || description.MipLevels != 1
+        || description.Format != expectedFormat || description.SampleDesc.Count != 1
+        || description.SampleDesc.Quality != 0
+        || (description.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0) {
+        error = "D3D12 external texture metadata does not match its TextureStore entry";
+        return false;
+    }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC shaderView{};
+    shaderView.Format = expectedFormat;
+    shaderView.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    shaderView.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    shaderView.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(&nativeTexture, &shaderView, cpuDescriptor(handle.value()));
+    GpuTexture& texture = textures[handle.value() - 1U];
+    if (texture.resource != nullptr && texture.resource.Get() != &nativeTexture) {
+        ++statistics.retiredTextures;
+    }
+    texture = {
+        .resource = &nativeTexture,
+        .handle = handle.packed(),
+        .revision = view.revision,
+        .descriptorRevision = nextDescriptorRevision++,
+        .byteSize = static_cast<std::uint64_t>(view.rowPitch) * view.height,
+        .pendingInPlace = false,
+        .external = true,
+    };
+    scheduledTextureHandles[handle.value() - 1U] = handle.packed();
+    scheduledTextureRevisions[handle.value() - 1U] = view.revision;
+    statistics.gpuTextureBytes = 0;
+    statistics.externalTextures = 0;
+    for (const GpuTexture& current : textures) {
+        statistics.gpuTextureBytes += current.byteSize;
+        if (current.resource != nullptr && current.external) ++statistics.externalTextures;
     }
     error.clear();
     return true;
@@ -1173,7 +1434,9 @@ bool D3D12Renderer::Implementation::record(
         for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
             const TextureHandle handle = batch.textures[slot];
             if (!handle.valid() || handle.value() > textures.size()
-                || textures[handle.value() - 1U].resource == nullptr) {
+                || textures[handle.value() - 1U].resource == nullptr
+                || textures[handle.value() - 1U].handle != handle.packed()
+                || textures[handle.value() - 1U].pendingInPlace) {
                 ++statistics.rejectedFrames;
                 error = "D3D12 render packet references an unsynchronized texture";
                 return false;
@@ -1257,18 +1520,20 @@ bool D3D12Renderer::Implementation::record(
                 * DrawBatch::kTextureCapacity;
             const std::uint32_t tableIndex = static_cast<std::uint32_t>(tableIndexValue);
             DescriptorTableCache& cache = submission.descriptorTables[batchIndex];
-            std::array<std::uint32_t, DrawBatch::kTextureCapacity> handles{};
+            std::array<std::uint64_t, DrawBatch::kTextureCapacity> handles{};
+            std::array<std::uint32_t, DrawBatch::kTextureCapacity> values{};
             std::array<std::uint64_t, DrawBatch::kTextureCapacity> revisions{};
             for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
-                handles[slot] = batch.textures[slot].value();
-                revisions[slot] = textures[handles[slot] - 1U].revision;
+                handles[slot] = batch.textures[slot].packed();
+                values[slot] = batch.textures[slot].value();
+                revisions[slot] = textures[values[slot] - 1U].descriptorRevision;
             }
             if (!cache.valid || cache.handles != handles || cache.revisions != revisions) {
                 for (std::uint32_t slot = 0; slot < DrawBatch::kTextureCapacity; ++slot) {
                     device->CopyDescriptorsSimple(
                         1,
                         gpuCpuDescriptor(tableIndex + slot),
-                        cpuDescriptor(handles[slot]),
+                        cpuDescriptor(values[slot]),
                         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
                 }
                 cache.handles = handles;
@@ -1381,6 +1646,7 @@ void D3D12Renderer::Implementation::shutdown() noexcept {
     }
     submissions.clear();
     textures.clear();
+    scheduledTextureHandles.clear();
     scheduledTextureRevisions.clear();
     dirtyTextures.clear();
     textureUploadBatches.clear();
@@ -1402,7 +1668,10 @@ void D3D12Renderer::Implementation::shutdown() noexcept {
     cpuDescriptorCapacity = 0;
     gpuDescriptorCapacity = 0;
     nextTextureUploadFenceValue = 1;
+    nextDescriptorRevision = 1;
     ready = false;
+    statistics.gpuTextureBytes = 0;
+    statistics.externalTextures = 0;
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Renderer::Implementation::cpuDescriptor(std::uint32_t index) const noexcept {
@@ -1441,7 +1710,7 @@ bool D3D12Renderer::initialize(
 }
 
 bool D3D12Renderer::synchronizeTextures(
-    const TextureStore& textures,
+    TextureStore& textures,
     ID3D12CommandQueue& directQueue) noexcept {
     try {
         return mImplementation->synchronizeTextures(textures, directQueue);
@@ -1449,6 +1718,13 @@ bool D3D12Renderer::synchronizeTextures(
         mImplementation->error = "D3D12 texture synchronization exhausted CPU bookkeeping storage";
         return false;
     }
+}
+
+bool D3D12Renderer::bindExternalTexture(
+    const TextureStore& textures,
+    TextureHandle handle,
+    ID3D12Resource& texture) noexcept {
+    return mImplementation->bindExternalTexture(textures, handle, texture);
 }
 
 bool D3D12Renderer::pollTextureUploads() noexcept {

@@ -58,6 +58,11 @@ float FontFace::kerning(char32_t left, char32_t right) const noexcept {
         : 0.0F;
 }
 
+std::size_t FontFace::storageBytes() const noexcept {
+    return mGlyphs.capacity() * sizeof(GlyphMetrics)
+        + mKerning.capacity() * sizeof(KerningPair);
+}
+
 std::uint64_t FontFace::kerningKey(char32_t left, char32_t right) noexcept {
     return (static_cast<std::uint64_t>(left) << 32U) | static_cast<std::uint32_t>(right);
 }
@@ -66,17 +71,75 @@ FontHandle FontStore::add(FontDefinition definition) {
     if (!definition.atlas.valid() || definition.pixelSize <= 0.0F || definition.glyphs.empty()) {
         return {};
     }
-    mFonts.emplace_back(std::move(definition));
-    return FontHandle{static_cast<std::uint32_t>(mFonts.size())};
+    constexpr std::uint32_t invalidSlot = std::numeric_limits<std::uint32_t>::max();
+    if (mFreeHead != invalidSlot) {
+        const std::uint32_t slot = mFreeHead;
+        Entry& entry = mFonts[slot];
+        entry.face.emplace(std::move(definition));
+        mFreeHead = entry.nextFree;
+        entry.nextFree = invalidSlot;
+        ++mActiveFonts;
+        return FontHandle{slot + 1U, entry.generation};
+    }
+    if (mFonts.size() >= std::numeric_limits<std::uint32_t>::max()) return {};
+    Entry entry{};
+    entry.face.emplace(std::move(definition));
+    mFonts.push_back(std::move(entry));
+    ++mActiveFonts;
+    return FontHandle{static_cast<std::uint32_t>(mFonts.size()), 1};
+}
+
+bool FontStore::destroy(FontHandle handle) noexcept {
+    Entry* entry = findEntry(handle);
+    if (entry == nullptr) return false;
+    entry->face.reset();
+    --mActiveFonts;
+    constexpr std::uint32_t invalidSlot = std::numeric_limits<std::uint32_t>::max();
+    if (entry->generation != std::numeric_limits<std::uint32_t>::max()) {
+        ++entry->generation;
+        entry->nextFree = mFreeHead;
+        mFreeHead = static_cast<std::uint32_t>(handle.value() - 1U);
+    } else {
+        entry->generation = 0;
+        entry->nextFree = invalidSlot;
+    }
+    return true;
 }
 
 const FontFace* FontStore::find(FontHandle handle) const noexcept {
-    if (!handle.valid() || handle.value() > mFonts.size()) {
-        return nullptr;
-    }
-    return &mFonts[handle.value() - 1U];
+    const Entry* entry = findEntry(handle);
+    return entry == nullptr ? nullptr : &*entry->face;
 }
 
-std::size_t FontStore::size() const noexcept { return mFonts.size(); }
+FontHandle FontStore::handleAt(std::size_t slotIndex) const noexcept {
+    if (slotIndex >= mFonts.size() || !mFonts[slotIndex].face.has_value()) return {};
+    return FontHandle{
+        static_cast<std::uint32_t>(slotIndex + 1U),
+        mFonts[slotIndex].generation,
+    };
+}
+
+std::size_t FontStore::size() const noexcept { return mActiveFonts; }
+std::size_t FontStore::slotCount() const noexcept { return mFonts.size(); }
+
+std::size_t FontStore::storageBytes() const noexcept {
+    std::size_t result = mFonts.capacity() * sizeof(Entry);
+    for (const Entry& entry : mFonts) {
+        if (entry.face.has_value()) result += entry.face->storageBytes();
+    }
+    return result;
+}
+
+FontStore::Entry* FontStore::findEntry(FontHandle handle) noexcept {
+    if (!handle.valid() || handle.value() > mFonts.size()) return nullptr;
+    Entry& entry = mFonts[handle.value() - 1U];
+    return entry.face.has_value() && entry.generation == handle.generation() ? &entry : nullptr;
+}
+
+const FontStore::Entry* FontStore::findEntry(FontHandle handle) const noexcept {
+    if (!handle.valid() || handle.value() > mFonts.size()) return nullptr;
+    const Entry& entry = mFonts[handle.value() - 1U];
+    return entry.face.has_value() && entry.generation == handle.generation() ? &entry : nullptr;
+}
 
 } // namespace henia::ui
