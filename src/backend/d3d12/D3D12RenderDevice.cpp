@@ -245,6 +245,7 @@ struct D3D12RenderDevice::Implementation final {
         std::uint64_t uploadedRevision = 0;
     };
 
+    ComPtr<ID3D12Device> ownerDevice;
     ComPtr<ID3D12RootSignature> rootSignature;
     std::array<ComPtr<ID3D12PipelineState>, kDepthPipelineCount> pipelines;
     std::vector<Submission> submissions;
@@ -265,6 +266,7 @@ struct D3D12RenderDevice::Implementation final {
         const ViewParameters& view,
         ID3D12GraphicsCommandList& commandList,
         std::uint32_t submissionSlot) noexcept;
+    [[nodiscard]] bool validateCommandList(ID3D12GraphicsCommandList& commandList) noexcept;
     void shutdown() noexcept;
 };
 
@@ -279,6 +281,49 @@ bool D3D12RenderDevice::Implementation::initialize(
         error = "D3D12 gfx configuration has an invalid box capacity, sample count, or format";
         return false;
     }
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT renderTargetSupport{
+        .Format = value.renderTargetFormat,
+    };
+    D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS renderTargetSamples{
+        .Format = value.renderTargetFormat,
+        .SampleCount = value.sampleCount,
+    };
+    if (FAILED(device.CheckFeatureSupport(
+            D3D12_FEATURE_FORMAT_SUPPORT,
+            &renderTargetSupport,
+            sizeof(renderTargetSupport)))
+        || (renderTargetSupport.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) == 0
+        || FAILED(device.CheckFeatureSupport(
+            D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
+            &renderTargetSamples,
+            sizeof(renderTargetSamples)))
+        || renderTargetSamples.NumQualityLevels == 0) {
+        error = "D3D12 gfx render-target format/sample count is unsupported by the configured device";
+        return false;
+    }
+    if (value.depthStencilFormat != DXGI_FORMAT_UNKNOWN) {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT depthSupport{
+            .Format = value.depthStencilFormat,
+        };
+        D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS depthSamples{
+            .Format = value.depthStencilFormat,
+            .SampleCount = value.sampleCount,
+        };
+        if (FAILED(device.CheckFeatureSupport(
+                D3D12_FEATURE_FORMAT_SUPPORT,
+                &depthSupport,
+                sizeof(depthSupport)))
+            || (depthSupport.Support1 & D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL) == 0
+            || FAILED(device.CheckFeatureSupport(
+                D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
+                &depthSamples,
+                sizeof(depthSamples)))
+            || depthSamples.NumQualityLevels == 0) {
+            error = "D3D12 gfx depth format/sample count is unsupported by the configured device";
+            return false;
+        }
+    }
+    ownerDevice = &device;
     configuration = value;
     instanceBufferBytes = static_cast<std::uint32_t>(instanceBytes);
     submissions.resize(configuration.submissionCapacity);
@@ -389,6 +434,10 @@ bool D3D12RenderDevice::Implementation::record(
     if (!ready || submissionSlot >= submissions.size()) {
         ++statistics.rejectedFrames;
         error = "D3D12 gfx renderer or submissionSlot is unavailable";
+        return false;
+    }
+    if (!validateCommandList(commandList)) {
+        ++statistics.rejectedFrames;
         return false;
     }
     if (const std::string_view issue = validate(view); !issue.empty()) {
@@ -503,6 +552,27 @@ bool D3D12RenderDevice::Implementation::record(
     return true;
 }
 
+bool D3D12RenderDevice::Implementation::validateCommandList(
+    ID3D12GraphicsCommandList& commandList) noexcept {
+    if (commandList.GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+        ++statistics.commandListValidationFailures;
+        error = "D3D12 gfx recording requires a DIRECT command list";
+        return false;
+    }
+    ComPtr<ID3D12Device> commandListDevice;
+    ComPtr<IUnknown> configuredIdentity;
+    ComPtr<IUnknown> commandListIdentity;
+    if (FAILED(commandList.GetDevice(IID_PPV_ARGS(&commandListDevice)))
+        || FAILED(ownerDevice.As(&configuredIdentity))
+        || FAILED(commandListDevice.As(&commandListIdentity))
+        || configuredIdentity.Get() != commandListIdentity.Get()) {
+        ++statistics.commandListValidationFailures;
+        error = "D3D12 gfx command list belongs to a different device";
+        return false;
+    }
+    return true;
+}
+
 void D3D12RenderDevice::Implementation::shutdown() noexcept {
     for (Submission& submission : submissions) {
         if (submission.instances != nullptr && submission.mapped != nullptr) submission.instances->Unmap(0, nullptr);
@@ -512,6 +582,7 @@ void D3D12RenderDevice::Implementation::shutdown() noexcept {
     submissions.clear();
     for (ComPtr<ID3D12PipelineState>& pipeline : pipelines) pipeline.Reset();
     rootSignature.Reset();
+    ownerDevice.Reset();
     instanceBufferBytes = 0;
     ready = false;
 }

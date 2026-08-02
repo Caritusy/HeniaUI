@@ -31,6 +31,7 @@ struct D3D12GfxStatistics final {
     std::uint64_t rejectedFrames = 0;
     std::uint64_t invalidInputFrames = 0;
     std::uint64_t capacityRejectedFrames = 0;
+    std::uint64_t commandListValidationFailures = 0;
     RenderProfile profile{};
 };
 
@@ -38,6 +39,11 @@ struct D3D12GfxStatistics final {
 // submission and fences. A slot is reusable only after its host fence completes.
 // The device is not movable because its resources and submission slots remain
 // associated with that host device and fence lifecycle.
+// record() requires an open DIRECT list from the initialize() device and host-
+// bound RT/optional DS targets matching the configured formats/sample count. It
+// overwrites graphics root signature/constants, PSO, IA topology/VB slot 0,
+// viewport 0, and scissor 0. D3D12 cannot restore them, so the host must fully
+// rebind every state consumed by later draws.
 class D3D12RenderDevice final {
 public:
     D3D12RenderDevice();

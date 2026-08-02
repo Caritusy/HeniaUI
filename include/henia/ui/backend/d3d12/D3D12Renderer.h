@@ -32,6 +32,11 @@ struct D3D12RenderStatistics final {
     std::uint64_t rejectedFrames = 0;
     std::uint64_t invalidInputFrames = 0;
     std::uint64_t capacityRejectedFrames = 0;
+    std::uint64_t commandListValidationFailures = 0;
+    std::uint64_t descriptorHeapBindings = 0;
+    std::uint64_t descriptorTableCopies = 0;
+    std::uint64_t descriptorTableCacheHits = 0;
+    std::uint64_t textureFreeFrames = 0;
 };
 
 // The host owns command allocators, back-buffer transitions, render targets,
@@ -47,6 +52,15 @@ struct D3D12RenderStatistics final {
 // textures remain alive through every submission slot that copied their SRV.
 // Use one direct queue for the renderer's lifetime and make it idle before
 // shutdown.
+//
+// record() requires an open DIRECT command list created by the initialize()
+// device and compatible with the configured single-sample RT format. It does
+// not bind or transition render targets. It overwrites graphics root signature
+// and parameters, PSO, IA topology/VB slot 0, viewport 0, and scissor 0. A
+// textured packet also replaces the CBV/SRV/UAV descriptor heap, invalidating
+// host descriptor tables. D3D12 cannot query/restore these states: the host must
+// fully rebind every state used by subsequent draws. Texture-free packets use a
+// heap-free pipeline and do not call SetDescriptorHeaps().
 class D3D12Renderer final {
 public:
     D3D12Renderer();

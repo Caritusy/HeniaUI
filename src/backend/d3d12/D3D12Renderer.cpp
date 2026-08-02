@@ -31,8 +31,10 @@ cbuffer FrameConstants : register(b0) {
     float2 viewportSize;
 };
 
+#ifndef HENIA_TEXTURE_FREE
 Texture2D textures[8] : register(t0);
 SamplerState linearSampler : register(s0);
+#endif
 
 struct VertexInput {
     float4 bounds : INSTANCE_BOUNDS;
@@ -82,6 +84,9 @@ PixelInput vertexMain(VertexInput input) {
 }
 
 float4 sampleTexture(uint slot, float2 uv) {
+#ifdef HENIA_TEXTURE_FREE
+    return 1.0;
+#else
     if (slot == 0) return textures[0].Sample(linearSampler, uv);
     if (slot == 1) return textures[1].Sample(linearSampler, uv);
     if (slot == 2) return textures[2].Sample(linearSampler, uv);
@@ -90,6 +95,7 @@ float4 sampleTexture(uint slot, float2 uv) {
     if (slot == 5) return textures[5].Sample(linearSampler, uv);
     if (slot == 6) return textures[6].Sample(linearSampler, uv);
     return textures[7].Sample(linearSampler, uv);
+#endif
 }
 
 float roundedBoxDistance(float2 positionValue, float2 halfSize, float radius) {
@@ -187,14 +193,15 @@ float4 pixelMain(PixelInput input) : SV_Target {
     const char* entry,
     const char* target,
     ComPtr<ID3DBlob>& output,
-    henia::detail::FixedError& error) noexcept {
+    henia::detail::FixedError& error,
+    const D3D_SHADER_MACRO* macros = nullptr) noexcept {
     ComPtr<ID3DBlob> errors;
     const UINT flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
     const HRESULT result = D3DCompile(
         kShaderSource,
         std::strlen(kShaderSource),
         "HeniaUI",
-        nullptr,
+        macros,
         nullptr,
         entry,
         target,
@@ -261,12 +268,19 @@ float4 pixelMain(PixelInput input) : SV_Target {
 } // namespace
 
 struct D3D12Renderer::Implementation final {
+    struct DescriptorTableCache final {
+        std::array<std::uint32_t, DrawBatch::kTextureCapacity> handles{};
+        std::array<std::uint64_t, DrawBatch::kTextureCapacity> revisions{};
+        bool valid = false;
+    };
+
     struct Submission final {
         ComPtr<ID3D12Resource> instances;
         std::byte* mapped = nullptr;
         std::uint64_t uploadedIdentity = 0;
         std::uint64_t uploadedRevision = 0;
         std::vector<ComPtr<ID3D12Resource>> retainedTextures;
+        std::vector<DescriptorTableCache> descriptorTables;
     };
 
     struct GpuTexture final {
@@ -293,8 +307,11 @@ struct D3D12Renderer::Implementation final {
     ComPtr<ID3D12CommandQueue> textureUploadQueue;
     ComPtr<ID3D12Fence> textureUploadFence;
     ComPtr<ID3D12RootSignature> rootSignature;
+    ComPtr<ID3D12RootSignature> textureFreeRootSignature;
     ComPtr<ID3D12PipelineState> alphaPipeline;
     ComPtr<ID3D12PipelineState> additivePipeline;
+    ComPtr<ID3D12PipelineState> textureFreeAlphaPipeline;
+    ComPtr<ID3D12PipelineState> textureFreeAdditivePipeline;
     ComPtr<ID3D12DescriptorHeap> cpuTextureHeap;
     ComPtr<ID3D12DescriptorHeap> gpuBatchHeap;
     std::vector<Submission> submissions;
@@ -333,6 +350,7 @@ struct D3D12Renderer::Implementation final {
         std::uint32_t submissionSlot,
         std::uint32_t width,
         std::uint32_t height) noexcept;
+    [[nodiscard]] bool validateCommandList(ID3D12GraphicsCommandList& commandList) noexcept;
     void shutdown() noexcept;
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE cpuDescriptor(std::uint32_t index) const noexcept;
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE gpuCpuDescriptor(std::uint32_t index) const noexcept;
@@ -369,6 +387,15 @@ bool D3D12Renderer::Implementation::initialize(
         error = "D3D12 renderer configuration has an invalid capacity or format";
         return false;
     }
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT formatSupport{.Format = format};
+    if (FAILED(nativeDevice.CheckFeatureSupport(
+            D3D12_FEATURE_FORMAT_SUPPORT,
+            &formatSupport,
+            sizeof(formatSupport)))
+        || (formatSupport.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) == 0) {
+        error = "D3D12 renderer format is not render-target compatible on the configured device";
+        return false;
+    }
 
     device = &nativeDevice;
     configuration = requested;
@@ -383,6 +410,7 @@ bool D3D12Renderer::Implementation::initialize(
     dirtyTextures.reserve(configuration.textureCapacity);
     for (Submission& submission : submissions) {
         submission.retainedTextures.resize(configuration.textureCapacity);
+        submission.descriptorTables.resize(configuration.batchCapacity);
     }
     for (TextureUploadBatch& batch : textureUploadBatches) {
         batch.staged.reserve(configuration.textureCapacity);
@@ -464,14 +492,55 @@ bool D3D12Renderer::Implementation::createRootSignature() noexcept {
         error = "D3D12 root signature creation failed";
         return false;
     }
+
+    parameters[0] = parameters[1];
+    description.NumParameters = 1;
+    description.pParameters = parameters.data();
+    description.NumStaticSamplers = 0;
+    description.pStaticSamplers = nullptr;
+    blob.Reset();
+    errors.Reset();
+    if (FAILED(D3D12SerializeRootSignature(
+            &description,
+            D3D_ROOT_SIGNATURE_VERSION_1,
+            &blob,
+            &errors))) {
+        if (errors != nullptr) {
+            error.assign(
+                static_cast<const char*>(errors->GetBufferPointer()),
+                errors->GetBufferSize());
+        } else {
+            error = "D3D12 texture-free root signature serialization failed";
+        }
+        return false;
+    }
+    if (FAILED(device->CreateRootSignature(
+            0,
+            blob->GetBufferPointer(),
+            blob->GetBufferSize(),
+            IID_PPV_ARGS(&textureFreeRootSignature)))) {
+        error = "D3D12 texture-free root signature creation failed";
+        return false;
+    }
     return true;
 }
 
 bool D3D12Renderer::Implementation::createPipelines() noexcept {
     ComPtr<ID3DBlob> vertexShader;
     ComPtr<ID3DBlob> pixelShader;
+    ComPtr<ID3DBlob> textureFreePixelShader;
+    constexpr D3D_SHADER_MACRO textureFreeMacros[]{
+        {"HENIA_TEXTURE_FREE", "1"},
+        {nullptr, nullptr},
+    };
     if (!compileShader("vertexMain", "vs_5_0", vertexShader, error)
-        || !compileShader("pixelMain", "ps_5_0", pixelShader, error)) {
+        || !compileShader("pixelMain", "ps_5_0", pixelShader, error)
+        || !compileShader(
+            "pixelMain",
+            "ps_5_0",
+            textureFreePixelShader,
+            error,
+            textureFreeMacros)) {
         return false;
     }
 
@@ -507,6 +576,25 @@ bool D3D12Renderer::Implementation::createPipelines() noexcept {
     description.BlendState = blendDescription(true);
     if (FAILED(device->CreateGraphicsPipelineState(&description, IID_PPV_ARGS(&additivePipeline)))) {
         error = "D3D12 additive pipeline creation failed";
+        return false;
+    }
+    description.pRootSignature = textureFreeRootSignature.Get();
+    description.PS = {
+        textureFreePixelShader->GetBufferPointer(),
+        textureFreePixelShader->GetBufferSize(),
+    };
+    description.BlendState = blendDescription(false);
+    if (FAILED(device->CreateGraphicsPipelineState(
+            &description,
+            IID_PPV_ARGS(&textureFreeAlphaPipeline)))) {
+        error = "D3D12 texture-free alpha pipeline creation failed";
+        return false;
+    }
+    description.BlendState = blendDescription(true);
+    if (FAILED(device->CreateGraphicsPipelineState(
+            &description,
+            IID_PPV_ARGS(&textureFreeAdditivePipeline)))) {
+        error = "D3D12 texture-free additive pipeline creation failed";
         return false;
     }
     return true;
@@ -831,6 +919,10 @@ bool D3D12Renderer::Implementation::record(
         error = "D3D12 renderer or submissionSlot is unavailable";
         return false;
     }
+    if (!validateCommandList(commandList)) {
+        ++statistics.rejectedFrames;
+        return false;
+    }
     if (width == 0 || height == 0
         || width > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max())
         || height > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max())) {
@@ -854,6 +946,7 @@ bool D3D12Renderer::Implementation::record(
         error = "D3D12 render packet byte range exceeds the instance buffer";
         return false;
     }
+    bool usesTextures = false;
     for (const DrawBatch& batch : packet.batches()) {
         const std::size_t first = batch.firstInstance;
         const std::size_t count = batch.instanceCount;
@@ -864,6 +957,7 @@ bool D3D12Renderer::Implementation::record(
             error = "Render packet batch instance/texture range is invalid";
             return false;
         }
+        usesTextures = usesTextures || batch.textureCount != 0;
         if (batch.clip.enabled) {
             ScissorRect scissor{};
             if (!makeScissorRect(batch.clip.area, width, height, scissor)) {
@@ -918,11 +1012,18 @@ bool D3D12Renderer::Implementation::record(
         ++statistics.instanceUploads;
     }
 
-    ID3D12DescriptorHeap* heaps[]{gpuBatchHeap.Get()};
-    commandList.SetDescriptorHeaps(1, heaps);
-    commandList.SetGraphicsRootSignature(rootSignature.Get());
     const std::array viewportConstants{static_cast<float>(width), static_cast<float>(height)};
-    commandList.SetGraphicsRoot32BitConstants(1, 2, viewportConstants.data(), 0);
+    if (usesTextures) {
+        ID3D12DescriptorHeap* heaps[]{gpuBatchHeap.Get()};
+        commandList.SetDescriptorHeaps(1, heaps);
+        commandList.SetGraphicsRootSignature(rootSignature.Get());
+        commandList.SetGraphicsRoot32BitConstants(1, 2, viewportConstants.data(), 0);
+        ++statistics.descriptorHeapBindings;
+    } else {
+        commandList.SetGraphicsRootSignature(textureFreeRootSignature.Get());
+        commandList.SetGraphicsRoot32BitConstants(0, 2, viewportConstants.data(), 0);
+        ++statistics.textureFreeFrames;
+    }
     commandList.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     const D3D12_VERTEX_BUFFER_VIEW instanceView{
@@ -948,26 +1049,49 @@ bool D3D12Renderer::Implementation::record(
             continue;
         }
         if (activeBlend != batch.blend) {
-            commandList.SetPipelineState(
-                batch.blend == BlendMode::Additive ? additivePipeline.Get() : alphaPipeline.Get());
+            ID3D12PipelineState* pipeline = nullptr;
+            if (usesTextures) {
+                pipeline = batch.blend == BlendMode::Additive
+                    ? additivePipeline.Get()
+                    : alphaPipeline.Get();
+            } else {
+                pipeline = batch.blend == BlendMode::Additive
+                    ? textureFreeAdditivePipeline.Get()
+                    : textureFreeAlphaPipeline.Get();
+            }
+            commandList.SetPipelineState(pipeline);
             activeBlend = batch.blend;
         }
 
-        const std::uint64_t tableIndexValue = (
-            static_cast<std::uint64_t>(submissionSlot) * configuration.batchCapacity + batchIndex)
-            * DrawBatch::kTextureCapacity;
-        const std::uint32_t tableIndex = static_cast<std::uint32_t>(tableIndexValue);
-        for (std::uint32_t slot = 0; slot < DrawBatch::kTextureCapacity; ++slot) {
-            const std::uint32_t source = slot < batch.textureCount
-                ? batch.textures[slot].value()
-                : 0U;
-            device->CopyDescriptorsSimple(
-                1,
-                gpuCpuDescriptor(tableIndex + slot),
-                cpuDescriptor(source),
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        if (usesTextures) {
+            const std::uint64_t tableIndexValue = (
+                static_cast<std::uint64_t>(submissionSlot) * configuration.batchCapacity + batchIndex)
+                * DrawBatch::kTextureCapacity;
+            const std::uint32_t tableIndex = static_cast<std::uint32_t>(tableIndexValue);
+            DescriptorTableCache& cache = submission.descriptorTables[batchIndex];
+            std::array<std::uint32_t, DrawBatch::kTextureCapacity> handles{};
+            std::array<std::uint64_t, DrawBatch::kTextureCapacity> revisions{};
+            for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
+                handles[slot] = batch.textures[slot].value();
+                revisions[slot] = textures[handles[slot] - 1U].revision;
+            }
+            if (!cache.valid || cache.handles != handles || cache.revisions != revisions) {
+                for (std::uint32_t slot = 0; slot < DrawBatch::kTextureCapacity; ++slot) {
+                    device->CopyDescriptorsSimple(
+                        1,
+                        gpuCpuDescriptor(tableIndex + slot),
+                        cpuDescriptor(handles[slot]),
+                        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                }
+                cache.handles = handles;
+                cache.revisions = revisions;
+                cache.valid = true;
+                ++statistics.descriptorTableCopies;
+            } else {
+                ++statistics.descriptorTableCacheHits;
+            }
+            commandList.SetGraphicsRootDescriptorTable(0, gpuDescriptor(tableIndex));
         }
-        commandList.SetGraphicsRootDescriptorTable(0, gpuDescriptor(tableIndex));
 
         D3D12_RECT scissor{};
         if (batch.clip.enabled) {
@@ -985,6 +1109,27 @@ bool D3D12Renderer::Implementation::record(
 
     ++statistics.recordedFrames;
     error.clear();
+    return true;
+}
+
+bool D3D12Renderer::Implementation::validateCommandList(
+    ID3D12GraphicsCommandList& commandList) noexcept {
+    if (commandList.GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+        ++statistics.commandListValidationFailures;
+        error = "D3D12 UI recording requires a DIRECT command list";
+        return false;
+    }
+    ComPtr<ID3D12Device> commandListDevice;
+    ComPtr<IUnknown> configuredIdentity;
+    ComPtr<IUnknown> commandListIdentity;
+    if (FAILED(commandList.GetDevice(IID_PPV_ARGS(&commandListDevice)))
+        || FAILED(device.As(&configuredIdentity))
+        || FAILED(commandListDevice.As(&commandListIdentity))
+        || configuredIdentity.Get() != commandListIdentity.Get()) {
+        ++statistics.commandListValidationFailures;
+        error = "D3D12 UI command list belongs to a different device";
+        return false;
+    }
     return true;
 }
 
@@ -1010,6 +1155,9 @@ void D3D12Renderer::Implementation::shutdown() noexcept {
     cpuTextureHeap.Reset();
     additivePipeline.Reset();
     alphaPipeline.Reset();
+    textureFreeAdditivePipeline.Reset();
+    textureFreeAlphaPipeline.Reset();
+    textureFreeRootSignature.Reset();
     rootSignature.Reset();
     device.Reset();
     configuration = {};

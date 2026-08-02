@@ -4,6 +4,7 @@
 
 #include "../src/backend/FixedError.h"
 #include "D3D12Validation.h"
+#include "D3D12HostDraw.h"
 #include "VisualRegression.h"
 
 #include <Windows.h>
@@ -102,6 +103,10 @@ int main() {
     ComPtr<ID3D12CommandQueue> queue;
     if (FAILED(device->CreateCommandQueue(&queueDescription, IID_PPV_ARGS(&queue)))) {
         fail("Unable to create the D3D12 queue");
+    }
+    henia::test::D3D12HostDraw hostDraw;
+    if (!hostDraw.initialize(*device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM)) {
+        fail("Unable to create the D3D12 host-state contract pipeline");
     }
 
     TextureStore textures;
@@ -234,6 +239,55 @@ int main() {
         || renderer.lastError() != "viewportWidth/viewportHeight is outside the LONG range") {
         fail("D3D12 renderer accepted an out-of-range viewport");
     }
+
+    ComPtr<ID3D12CommandAllocator> bundleAllocator;
+    ComPtr<ID3D12GraphicsCommandList> bundleList;
+    if (FAILED(device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_BUNDLE,
+            IID_PPV_ARGS(&bundleAllocator)))
+        || FAILED(device->CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_BUNDLE,
+            bundleAllocator.Get(),
+            nullptr,
+            IID_PPV_ARGS(&bundleList)))
+        || renderer.record(packet, *bundleList.Get(), 0, width, height)
+        || renderer.lastError() != "D3D12 UI recording requires a DIRECT command list") {
+        fail("D3D12 renderer accepted an unsupported command-list type");
+    }
+    ComPtr<ID3D12Device> otherDevice;
+    ComPtr<ID3D12CommandAllocator> otherAllocator;
+    ComPtr<ID3D12GraphicsCommandList> otherCommandList;
+    std::uint64_t expectedCommandListValidationFailures = 1;
+    if (FAILED(D3D12CreateDevice(
+            warpAdapter.Get(),
+            D3D_FEATURE_LEVEL_11_0,
+            IID_PPV_ARGS(&otherDevice)))
+        || FAILED(otherDevice->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(&otherAllocator)))
+        || FAILED(otherDevice->CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            otherAllocator.Get(),
+            nullptr,
+            IID_PPV_ARGS(&otherCommandList)))) {
+        fail("Unable to create the second D3D12 validation device/list");
+    }
+    ComPtr<IUnknown> deviceIdentity;
+    ComPtr<IUnknown> otherIdentity;
+    if (FAILED(device.As(&deviceIdentity)) || FAILED(otherDevice.As(&otherIdentity))) {
+        fail("Unable to query D3D12 device identities");
+    }
+    // Some runtimes return the same cached WARP device for repeated creation.
+    // Exercise the mismatch path only when the returned COM identities differ.
+    if (deviceIdentity.Get() != otherIdentity.Get()) {
+        if (renderer.record(packet, *otherCommandList.Get(), 0, width, height)
+            || renderer.lastError() != "D3D12 UI command list belongs to a different device") {
+            fail("D3D12 renderer accepted a command list from another device");
+        }
+        ++expectedCommandListValidationFailures;
+    }
     const D3D12RenderStatistics invalidStatistics = renderer.statistics();
     if (invalidStatistics.invalidInputFrames != 1
         || invalidStatistics.capacityRejectedFrames != 0
@@ -244,10 +298,21 @@ int main() {
     constexpr std::array<float, 4> clearColor{0.0F, 0.0F, 0.0F, 1.0F};
     commandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);
     commandList->ClearRenderTargetView(renderTarget, clearColor.data(), 0, nullptr);
+    hostDraw.record(
+        *commandList.Get(), width, height,
+        {0.0F, 0.0F, 4.0F, 4.0F},
+        {1.0F, 0.0F, 0.0F, 1.0F});
     if (!renderer.record(packet, *commandList.Get(), 0, width, height)) {
         std::cerr << renderer.lastError() << '\n';
         return EXIT_FAILURE;
     }
+    // Henia deliberately does not restore command-list state. This full host
+    // rebind includes its descriptor heap, root state, PSO, IA, viewport, and
+    // scissor before the draw that follows Henia.
+    hostDraw.record(
+        *commandList.Get(), width, height,
+        {124.0F, 124.0F, 128.0F, 128.0F},
+        {0.0F, 1.0F, 0.0F, 1.0F});
 
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -296,16 +361,59 @@ int main() {
         }
     }
     readback->Unmap(0, nullptr);
+    const henia::test::Rgba8 beforeMarker = pixels[static_cast<std::size_t>(1) * width + 1];
+    const henia::test::Rgba8 afterMarker = pixels[static_cast<std::size_t>(126) * width + 126];
+    if (beforeMarker.red < 240 || beforeMarker.green > 8
+        || afterMarker.green < 240 || afterMarker.red > 8) {
+        fail("Host draws before/after Henia did not survive explicit state rebinding");
+    }
+    for (std::uint32_t y = 0; y < 4; ++y) {
+        for (std::uint32_t x = 0; x < 4; ++x) {
+            pixels[static_cast<std::size_t>(y) * width + x] = {0, 0, 0, 255};
+            pixels[static_cast<std::size_t>(height - 1U - y) * width + width - 1U - x]
+                = {0, 0, 0, 255};
+        }
+    }
     if (!henia::test::matchesUiGolden(pixels, width, height)) {
         henia::test::writePpm("d3d12-ui-actual.ppm", pixels, width, height);
         fail("D3D12 output exceeded the documented golden-image tolerance");
     }
 
+    if (FAILED(allocator->Reset()) || FAILED(commandList->Reset(allocator.Get(), nullptr))) {
+        fail("Unable to reset D3D12 recording objects for descriptor-cache validation");
+    }
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    commandList->ResourceBarrier(1, &barrier);
+    commandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);
+    if (!renderer.record(packet, *commandList.Get(), 0, width, height)
+        || FAILED(commandList->Close())) {
+        fail("D3D12 descriptor-table cache validation recording failed");
+    }
+
+    Frame textureFreeFrame;
+    Canvas& textureFreeCanvas = textureFreeFrame.begin();
+    textureFreeCanvas.fillRect({{16.0F, 16.0F}, {32.0F, 32.0F}}, {1.0F, 1.0F, 1.0F, 1.0F});
+    const RenderPacket textureFreePacket = textureFreeFrame.finish();
+    if (FAILED(allocator->Reset()) || FAILED(commandList->Reset(allocator.Get(), nullptr))) {
+        fail("Unable to reset D3D12 recording objects for texture-free validation");
+    }
+    commandList->ResourceBarrier(1, &barrier);
+    commandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);
+    if (!renderer.record(textureFreePacket, *commandList.Get(), 0, width, height)
+        || FAILED(commandList->Close())) {
+        fail("D3D12 texture-free heap-isolation recording failed");
+    }
+
     const D3D12RenderStatistics statistics = renderer.statistics();
-    if (statistics.drawCalls != packet.batches().size()
-        || statistics.submittedInstances != packet.instances().size()
+    if (statistics.drawCalls != packet.batches().size() * 2U + 1U
+        || statistics.submittedInstances != packet.instances().size() * 2U + 1U
         || statistics.textureUploads != 1 || statistics.textureUploadBatches != 1
-        || statistics.instanceUploads != 1) {
+        || statistics.instanceUploads != 2 || statistics.descriptorHeapBindings != 2
+        || statistics.descriptorTableCopies != packet.batches().size()
+        || statistics.descriptorTableCacheHits != packet.batches().size()
+        || statistics.textureFreeFrames != 1
+        || statistics.commandListValidationFailures != expectedCommandListValidationFailures) {
         fail("D3D12 renderer statistics are incorrect");
     }
 
@@ -348,12 +456,16 @@ int main() {
     }
 
     const D3D12RenderStatistics updatedStatistics = renderer.statistics();
-    if (updatedStatistics.drawCalls != packet.batches().size() * 2U
-        || updatedStatistics.submittedInstances != packet.instances().size() * 2U
-        || updatedStatistics.instanceUploads != 2
+    if (updatedStatistics.drawCalls != packet.batches().size() * 3U + 1U
+        || updatedStatistics.submittedInstances != packet.instances().size() * 3U + 1U
+        || updatedStatistics.instanceUploads != 3
         || updatedStatistics.textureUploads != 3
         || updatedStatistics.textureUploadBatches != 3
-        || updatedStatistics.failedTextureUploadBatches != 0) {
+        || updatedStatistics.failedTextureUploadBatches != 0
+        || updatedStatistics.descriptorHeapBindings != 3
+        || updatedStatistics.descriptorTableCopies != packet.batches().size() * 2U
+        || updatedStatistics.descriptorTableCacheHits != packet.batches().size()
+        || updatedStatistics.textureFreeFrames != 1) {
         fail("D3D12 repeated texture update statistics are incorrect");
     }
 

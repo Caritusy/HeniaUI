@@ -331,6 +331,7 @@ if(HENIAUI_BUILD_TESTS)
                 HeniaUI::Core
                 HeniaUI::D3D12
                 d3d12
+                d3dcompiler
                 dxgi
         )
         target_compile_features(HeniaUID3D12Tests PRIVATE cxx_std_23)
@@ -348,6 +349,7 @@ if(HENIAUI_BUILD_TESTS)
                 HeniaUI::Gfx
                 HeniaUI::D3D12
                 d3d12
+                d3dcompiler
                 dxgi
         )
         target_compile_features(HeniaUID3D12GfxTests PRIVATE cxx_std_23)
