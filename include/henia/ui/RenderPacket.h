@@ -11,19 +11,38 @@
 namespace henia::ui {
 
 struct DrawInstance final {
+    // One ordered payload stream serves every primitive kind:
+    // - rect/image/glyph: bounds is geometry, uv is texture data;
+    // - stroke: bounds is the tight region, uv is the logical rectangle;
+    // - line: bounds contains endpoints, uv contains adjacent endpoints.
     Rect bounds{};
     Rect uv{};
-    Vec2 pointA{};
-    Vec2 pointB{};
     Color color{};
     float radius = 0.0F;
     float thickness = 0.0F;
-    std::uint32_t textureSlot = 0;
     PrimitiveKind kind = PrimitiveKind::SolidRect;
+    std::uint8_t textureSlot = 0xFFU;
     LineCap lineCap = LineCap::Round;
-    LineJoin lineJoin = LineJoin::Round;
-    std::uint8_t lineFlags = 0;
+    // Bit 0 is LineJoin; bits 1..2 are kLineHasPrevious/kLineHasNext.
+    std::uint8_t lineStyle = static_cast<std::uint8_t>(LineJoin::Round);
+
+    [[nodiscard]] constexpr LineJoin lineJoin() const noexcept {
+        return static_cast<LineJoin>(lineStyle & 0x1U);
+    }
+    [[nodiscard]] constexpr std::uint8_t lineFlags() const noexcept {
+        return static_cast<std::uint8_t>((lineStyle >> 1U) & 0x3U);
+    }
+    constexpr void setLineStyle(LineJoin join, std::uint8_t flags) noexcept {
+        lineStyle = static_cast<std::uint8_t>(
+            (static_cast<std::uint8_t>(join) & 0x1U) | ((flags & 0x3U) << 1U));
+    }
 };
+
+static_assert(sizeof(DrawInstance) == 60, "DrawInstance layout is the GPU upload contract");
+static_assert(offsetof(DrawInstance, uv) == 16);
+static_assert(offsetof(DrawInstance, color) == 32);
+static_assert(offsetof(DrawInstance, radius) == 48);
+static_assert(offsetof(DrawInstance, kind) == 56);
 
 struct DrawBatch final {
     static constexpr std::size_t kTextureCapacity = 8;

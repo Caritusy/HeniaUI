@@ -23,9 +23,10 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 static_assert(std::is_standard_layout_v<DrawInstance>);
-static_assert(offsetof(DrawInstance, pointB) == offsetof(DrawInstance, pointA) + sizeof(Vec2));
+static_assert(offsetof(DrawInstance, uv) == offsetof(DrawInstance, bounds) + sizeof(Rect));
+static_assert(offsetof(DrawInstance, color) == offsetof(DrawInstance, uv) + sizeof(Rect));
 static_assert(offsetof(DrawInstance, thickness) == offsetof(DrawInstance, radius) + sizeof(float));
-static_assert(offsetof(DrawInstance, lineFlags) == offsetof(DrawInstance, kind) + 3U);
+static_assert(offsetof(DrawInstance, lineStyle) == offsetof(DrawInstance, kind) + 3U);
 
 constexpr const char* kShaderSource = R"hlsl(
 cbuffer FrameConstants : register(b0) {
@@ -40,10 +41,8 @@ SamplerState linearSampler : register(s0);
 struct VertexInput {
     float4 bounds : INSTANCE_BOUNDS;
     float4 uv : INSTANCE_UV;
-    float4 points : INSTANCE_POINTS;
     float4 color : INSTANCE_COLOR;
     float2 metrics : INSTANCE_METRICS;
-    uint textureSlot : INSTANCE_TEXTURE_SLOT;
     uint4 style : INSTANCE_STYLE;
     uint vertexId : SV_VertexID;
 };
@@ -72,21 +71,23 @@ PixelInput vertexMain(VertexInput input) {
     PixelInput output;
     float2 corner = corners[input.vertexId];
     uint kind = input.style.x;
+    uint decodedLineJoin = input.style.w & 1;
+    uint decodedLineFlags = (input.style.w >> 1) & 3;
     float2 pixel;
     if (kind == 2) {
-        float2 start = input.points.xy;
-        float2 finish = input.points.zw;
+        float2 start = input.bounds.xy;
+        float2 finish = input.bounds.zw;
         float2 segment = finish - start;
         float segmentLength = length(segment);
         float2 direction = segment / segmentLength;
         float2 normal = float2(-direction.y, direction.x);
         float halfWidth = input.metrics.y * 0.5;
-        uint joinMode = input.style.z == 0 ? 0 : 2;
-        uint startMode = (input.style.w & 1) != 0 ? joinMode : input.style.y;
-        uint endMode = (input.style.w & 2) != 0 ? joinMode : input.style.y;
-        float startExtension = (((input.style.w & 1) != 0 || startMode != 0)
+        uint joinMode = decodedLineJoin == 0 ? 0 : 2;
+        uint startMode = (decodedLineFlags & 1) != 0 ? joinMode : input.style.z;
+        uint endMode = (decodedLineFlags & 2) != 0 ? joinMode : input.style.z;
+        float startExtension = (((decodedLineFlags & 1) != 0 || startMode != 0)
             ? halfWidth : 0.0) + 2.0;
-        float endExtension = (((input.style.w & 2) != 0 || endMode != 0)
+        float endExtension = (((decodedLineFlags & 2) != 0 || endMode != 0)
             ? halfWidth : 0.0) + 2.0;
         float along = lerp(-startExtension, segmentLength + endExtension, corner.x);
         float across = lerp(-halfWidth - 2.0, halfWidth + 2.0, corner.y);
@@ -101,14 +102,14 @@ PixelInput vertexMain(VertexInput input) {
     output.pixelPosition = pixel;
     output.textureUv = lerp(input.uv.xy, input.uv.zw, corner);
     output.tintColor = input.color;
-    output.linePoints = kind == 0 ? input.bounds : input.points;
+    output.linePoints = kind == 1 ? input.uv : input.bounds;
     output.lineNeighbors = input.uv;
     output.shapeMetrics = input.metrics;
-    output.textureSlot = input.textureSlot;
+    output.textureSlot = input.style.y;
     output.primitiveKind = kind;
-    output.lineCap = input.style.y;
-    output.lineJoin = input.style.z;
-    output.lineFlags = input.style.w;
+    output.lineCap = input.style.z;
+    output.lineJoin = decodedLineJoin;
+    output.lineFlags = decodedLineFlags;
     return output;
 }
 
@@ -736,10 +737,8 @@ bool D3D12Renderer::Implementation::createPipelines() noexcept {
     constexpr std::array inputElements{
         D3D12_INPUT_ELEMENT_DESC{"INSTANCE_BOUNDS", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, static_cast<UINT>(offsetof(DrawInstance, bounds)), D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
         D3D12_INPUT_ELEMENT_DESC{"INSTANCE_UV", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, static_cast<UINT>(offsetof(DrawInstance, uv)), D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
-        D3D12_INPUT_ELEMENT_DESC{"INSTANCE_POINTS", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, static_cast<UINT>(offsetof(DrawInstance, pointA)), D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
         D3D12_INPUT_ELEMENT_DESC{"INSTANCE_COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, static_cast<UINT>(offsetof(DrawInstance, color)), D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
         D3D12_INPUT_ELEMENT_DESC{"INSTANCE_METRICS", 0, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(DrawInstance, radius)), D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
-        D3D12_INPUT_ELEMENT_DESC{"INSTANCE_TEXTURE_SLOT", 0, DXGI_FORMAT_R32_UINT, 0, static_cast<UINT>(offsetof(DrawInstance, textureSlot)), D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
         D3D12_INPUT_ELEMENT_DESC{"INSTANCE_STYLE", 0, DXGI_FORMAT_R8G8B8A8_UINT, 0, static_cast<UINT>(offsetof(DrawInstance, kind)), D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
     };
 

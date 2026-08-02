@@ -1001,6 +1001,13 @@ void writeJson(
            << "  \"configuration\": \"" << configuration << "\",\n"
            << "  \"compiler\": \"" << compiler << "\",\n"
            << "  \"pointer_bits\": " << sizeof(void*) * 8U << ",\n"
+           << "  \"draw_layout\": {\n"
+           << "    \"command_bytes\": " << sizeof(henia::ui::DrawCommand) << ",\n"
+           << "    \"instance_bytes\": " << sizeof(henia::ui::DrawInstance) << ",\n"
+           << "    \"glyph_command_bytes\": " << sizeof(henia::ui::DrawCommand) << ",\n"
+           << "    \"glyph_upload_bytes\": " << sizeof(henia::ui::DrawInstance) << ",\n"
+           << "    \"vertex_attributes\": 5\n"
+           << "  },\n"
            << "  \"iterations\": " << options.iterations << ",\n"
            << "  \"warmup\": " << options.warmup << ",\n"
            << "  \"scenarios\": [\n";
@@ -1052,6 +1059,9 @@ void writeJson(
 
 void printResults(std::span<const ScenarioResult> results) {
     std::cout << "HeniaUI reproducible renderer benchmarks\n"
+              << "draw layout: command " << sizeof(henia::ui::DrawCommand)
+              << " B, instance/glyph upload " << sizeof(henia::ui::DrawInstance)
+              << " B, 5 vertex attributes\n"
               << std::left << std::setw(33) << "scenario"
               << std::right << std::setw(12) << "median us"
               << std::setw(12) << "p95 us"

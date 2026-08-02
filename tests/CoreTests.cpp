@@ -150,7 +150,8 @@ void testNestedClipIntersection() {
 }
 
 void testTightAnalyticGeometryAndLineStyles() {
-    static_assert(sizeof(DrawInstance) == 80, "line styles must stay inside instance padding");
+    static_assert(sizeof(DrawCommand) == 88, "source commands must remain compact");
+    static_assert(sizeof(DrawInstance) == 60, "compiled instances must remain compact");
 
     Frame frame;
     frame.reserve(5, 12, 4, CapacityPolicy::Fixed);
@@ -186,21 +187,25 @@ void testTightAnalyticGeometryAndLineStyles() {
             && commands[4].lineFlags == kLineHasPrevious
             && commands[4].uv.min == polylinePoints[0],
         "polyline cap/join adjacency metadata is incorrect");
-    require(commands[3].bounds.min.x < 15.0F && commands[3].bounds.max.y > 107.0F,
-        "rotated square-cap bounds do not contain the generated geometry");
+    require(commands[3].bounds.min == polylinePoints[0]
+            && commands[3].bounds.max == polylinePoints[1],
+        "line command did not retain ordered endpoints in its compact geometry payload");
 
     const RenderPacket packet = frame.finish();
     require(packet.statistics().sourceCommands == 5 && packet.instances().size() == 12,
         "tight stroke compilation produced an unexpected instance topology");
     require(packet.instances()[0].bounds == Rect{{10.0F, 20.0F}, {110.0F, 70.0F}},
         "filled rectangle did not preserve logical bounds for shader-side AA expansion");
+    require(packet.instances()[10].lineCap == LineCap::Square
+            && packet.instances()[10].lineJoin() == LineJoin::Bevel
+            && packet.instances()[10].lineFlags() == kLineHasNext,
+        "compact instance style did not preserve cap, join, and adjacency flags");
 
     double strokeArea = 0.0;
     for (std::size_t index = 1; index <= 8; ++index) {
         const Rect bounds = packet.instances()[index].bounds;
         strokeArea += static_cast<double>(bounds.width()) * bounds.height();
-        require(packet.instances()[index].pointA == Vec2{0.0F, 0.0F}
-                && packet.instances()[index].pointB == Vec2{1000.0F, 500.0F},
+        require(packet.instances()[index].uv == Rect{{0.0F, 0.0F}, {1000.0F, 500.0F}},
             "stroke region lost its original logical rectangle");
     }
     const double fullStrokeRectangle = 1004.0 * 504.0;

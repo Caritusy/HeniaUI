@@ -18,41 +18,6 @@ namespace {
         && length <= static_cast<double>(std::numeric_limits<float>::max());
 }
 
-[[nodiscard]] Rect lineBounds(
-    Vec2 from,
-    Vec2 to,
-    float thickness,
-    LineCap cap,
-    std::uint8_t flags) noexcept {
-    const double deltaX = static_cast<double>(to.x) - from.x;
-    const double deltaY = static_cast<double>(to.y) - from.y;
-    const double length = std::hypot(deltaX, deltaY);
-    const float directionX = static_cast<float>(deltaX / length);
-    const float directionY = static_cast<float>(deltaY / length);
-    const float halfWidth = thickness * 0.5F;
-    const float startExtension = (((flags & kLineHasPrevious) != 0 || cap != LineCap::Butt)
-        ? halfWidth : 0.0F) + kAnalyticAaFringe;
-    const float endExtension = (((flags & kLineHasNext) != 0 || cap != LineCap::Butt)
-        ? halfWidth : 0.0F) + kAnalyticAaFringe;
-    const Vec2 startCenter{
-        from.x - directionX * startExtension,
-        from.y - directionY * startExtension,
-    };
-    const Vec2 endCenter{
-        to.x + directionX * endExtension,
-        to.y + directionY * endExtension,
-    };
-    const float across = halfWidth + kAnalyticAaFringe;
-    const float extentX = std::abs(directionY) * across;
-    const float extentY = std::abs(directionX) * across;
-    return {
-        {std::min(startCenter.x, endCenter.x) - extentX,
-         std::min(startCenter.y, endCenter.y) - extentY},
-        {std::max(startCenter.x, endCenter.x) + extentX,
-         std::max(startCenter.y, endCenter.y) + extentY},
-    };
-}
-
 } // namespace
 
 Canvas::Canvas(DisplayList& displayList) noexcept : mDisplayList(&displayList) {}
@@ -138,10 +103,8 @@ void Canvas::appendLine(
     std::uint8_t flags) noexcept {
     DrawCommand command{};
     command.kind = PrimitiveKind::Line;
-    command.bounds = lineBounds(from, to, thickness, cap, flags);
+    command.bounds = {from, to};
     command.uv = {{previous.x, previous.y}, {next.x, next.y}};
-    command.pointA = from;
-    command.pointB = to;
     command.color = color;
     command.thickness = thickness;
     command.lineCap = cap;

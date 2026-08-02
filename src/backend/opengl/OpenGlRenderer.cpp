@@ -77,9 +77,10 @@ constexpr GLenum kSampleCoverage = 0x80A0;
 constexpr GLenum kUnpackRowLength = 0x0CF2;
 
 static_assert(std::is_standard_layout_v<DrawInstance>);
-static_assert(offsetof(DrawInstance, pointB) == offsetof(DrawInstance, pointA) + sizeof(Vec2));
+static_assert(offsetof(DrawInstance, uv) == offsetof(DrawInstance, bounds) + sizeof(Rect));
+static_assert(offsetof(DrawInstance, color) == offsetof(DrawInstance, uv) + sizeof(Rect));
 static_assert(offsetof(DrawInstance, thickness) == offsetof(DrawInstance, radius) + sizeof(float));
-static_assert(offsetof(DrawInstance, lineFlags) == offsetof(DrawInstance, kind) + 3U);
+static_assert(offsetof(DrawInstance, lineStyle) == offsetof(DrawInstance, kind) + 3U);
 
 using CreateShaderFn = GLuint(APIENTRYP)(GLenum);
 using ShaderSourceFn = void(APIENTRYP)(GLuint, GLsizei, const GlChar* const*, const GLint*);
@@ -243,11 +244,9 @@ constexpr const char* kVertexShaderSource = R"glsl(
 #version 330 core
 layout(location = 0) in vec4 instanceBounds;
 layout(location = 1) in vec4 instanceUv;
-layout(location = 2) in vec4 instancePoints;
-layout(location = 3) in vec4 instanceColor;
-layout(location = 4) in vec2 instanceMetrics;
-layout(location = 5) in uint instanceTextureSlot;
-layout(location = 6) in uvec4 instanceStyle;
+layout(location = 2) in vec4 instanceColor;
+layout(location = 3) in vec2 instanceMetrics;
+layout(location = 4) in uvec4 instanceStyle;
 
 uniform vec2 viewportSize;
 
@@ -270,21 +269,23 @@ const vec2 corners[6] = vec2[6](
 void main() {
     vec2 corner = corners[gl_VertexID];
     uint kind = instanceStyle.x;
+    uint decodedLineJoin = instanceStyle.w & 1u;
+    uint decodedLineFlags = (instanceStyle.w >> 1u) & 3u;
     vec2 pixel;
     if (kind == 2u) {
-        vec2 start = instancePoints.xy;
-        vec2 finish = instancePoints.zw;
+        vec2 start = instanceBounds.xy;
+        vec2 finish = instanceBounds.zw;
         vec2 segment = finish - start;
         float segmentLength = length(segment);
         vec2 direction = segment / segmentLength;
         vec2 normal = vec2(-direction.y, direction.x);
         float halfWidth = instanceMetrics.y * 0.5;
-        uint joinMode = instanceStyle.z == 0u ? 0u : 2u;
-        uint startMode = (instanceStyle.w & 1u) != 0u ? joinMode : instanceStyle.y;
-        uint endMode = (instanceStyle.w & 2u) != 0u ? joinMode : instanceStyle.y;
-        float startExtension = (((instanceStyle.w & 1u) != 0u || startMode != 0u)
+        uint joinMode = decodedLineJoin == 0u ? 0u : 2u;
+        uint startMode = (decodedLineFlags & 1u) != 0u ? joinMode : instanceStyle.z;
+        uint endMode = (decodedLineFlags & 2u) != 0u ? joinMode : instanceStyle.z;
+        float startExtension = (((decodedLineFlags & 1u) != 0u || startMode != 0u)
             ? halfWidth : 0.0) + 2.0;
-        float endExtension = (((instanceStyle.w & 2u) != 0u || endMode != 0u)
+        float endExtension = (((decodedLineFlags & 2u) != 0u || endMode != 0u)
             ? halfWidth : 0.0) + 2.0;
         float along = mix(-startExtension, segmentLength + endExtension, corner.x);
         float across = mix(-halfWidth - 2.0, halfWidth + 2.0, corner.y);
@@ -303,14 +304,14 @@ void main() {
     pixelPosition = pixel;
     textureUv = mix(instanceUv.xy, instanceUv.zw, corner);
     tintColor = instanceColor;
-    linePoints = kind == 0u ? instanceBounds : instancePoints;
+    linePoints = kind == 1u ? instanceUv : instanceBounds;
     lineNeighbors = instanceUv;
     shapeMetrics = instanceMetrics;
-    textureSlot = instanceTextureSlot;
+    textureSlot = instanceStyle.y;
     primitiveKind = kind;
-    lineCap = instanceStyle.y;
-    lineJoin = instanceStyle.z;
-    lineFlags = instanceStyle.w;
+    lineCap = instanceStyle.z;
+    lineJoin = decodedLineJoin;
+    lineFlags = decodedLineFlags;
 }
 )glsl";
 
@@ -1704,12 +1705,10 @@ void OpenGlRenderer::Implementation::configureAttributes(std::size_t firstInstan
 
     gl.vertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, stride, pointer(offsetof(DrawInstance, bounds)));
     gl.vertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, pointer(offsetof(DrawInstance, uv)));
-    gl.vertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, pointer(offsetof(DrawInstance, pointA)));
-    gl.vertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, pointer(offsetof(DrawInstance, color)));
-    gl.vertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, stride, pointer(offsetof(DrawInstance, radius)));
-    gl.vertexAttribIPointer(5, 1, GL_UNSIGNED_INT, stride, pointer(offsetof(DrawInstance, textureSlot)));
-    gl.vertexAttribIPointer(6, 4, GL_UNSIGNED_BYTE, stride, pointer(offsetof(DrawInstance, kind)));
-    for (GLuint index = 0; index <= 6; ++index) {
+    gl.vertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, pointer(offsetof(DrawInstance, color)));
+    gl.vertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, pointer(offsetof(DrawInstance, radius)));
+    gl.vertexAttribIPointer(4, 4, GL_UNSIGNED_BYTE, stride, pointer(offsetof(DrawInstance, kind)));
+    for (GLuint index = 0; index <= 4; ++index) {
         gl.enableVertexAttribArray(index);
         gl.vertexAttribDivisor(index, 1);
     }

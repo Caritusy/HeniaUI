@@ -51,6 +51,15 @@ scene's display list, packet/instance storage, or tessellated vectors. It is
 reported separately from transient allocation peaks and does not claim to be a
 whole-process working-set measurement.
 
+The JSON `draw_layout` object records command, compiled-instance, per-glyph
+command/upload sizes, and the vertex-attribute count. Text-cache hits and misses
+remain explicit scenario metrics. Hardware cache-miss counters and graphics
+timestamps are intentionally not synthesized: the portable CI harness uses
+capacity-backed resident bytes as its cache-pressure proxy and upload bytes plus
+vertex-attribute count as deterministic shader-input facts. Backend hosts may
+add real timestamp queries through `RenderProfile` when comparing GPU shader
+time on one device.
+
 ## Reproduce locally
 
 Visual Studio 2022 / x64 Release:
@@ -152,3 +161,29 @@ At 100,000 boxes, stable snapshot publication measured 0.1 us with zero
 allocations. One edit measured 6.7 us / one copied page / 64 upload bytes;
 32 clustered edits measured 17.5 us / one copied page / 2,048 upload bytes;
 four distant edits measured 8.5 us / four copied pages / 256 upload bytes.
+
+## Compact 2D layout capture (#22)
+
+Recorded on the same MSVC Release/x64 workstation on 2026-08-02, with 25
+measured iterations after 5 warmups. The base and candidate executables ran
+consecutively and passed `tools/compare_benchmarks.py`.
+
+| Payload | Before | After | Reduction |
+|---|---:|---:|---:|
+| `DrawCommand` (all kinds, including one glyph) | 104 B | 88 B | 15.4% |
+| `DrawInstance` / one glyph upload | 80 B | 60 B | 25.0% |
+| Vertex attributes | 7 | 5 | 28.6% |
+
+| Scenario | Packet compile before / after | CPU resident before / after | Upload before / after | Text cache misses | Draws |
+|---|---:|---:|---:|---:|---:|
+| 4,096 rounded rectangles | 235.4 / 193.3 us | 753,936 / 606,480 B | 327,680 / 245,760 B | 0 | 1 / 1 |
+| Full dynamic widget repaint | 85.2 / 70.0 us | 755,840 / 608,384 B | 89,040 / 66,780 B | 32 prewarm misses | 1 / 1 |
+| 4,270-glyph text UI | 257.5 / 268.8 us | 805,120 / 648,448 B | 341,600 / 256,200 B | 0 | 1 / 1 |
+
+The deterministic improvements are a 25% upload reduction and roughly 19.5%
+less capacity-backed CPU storage in both rectangle-heavy and text-heavy cases,
+with unchanged instance counts and draw calls. The text compile sample moved
+4.4% on this short capture while the rectangle samples improved; the comparator
+accepted the full suite. OpenGL and D3D12 output tests cover the extra join/flag
+decode and the removed attributes. The portable harness continues to report GPU
+timestamps unavailable rather than labeling a CPU proxy as shader time.

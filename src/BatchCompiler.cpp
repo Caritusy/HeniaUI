@@ -11,6 +11,10 @@ namespace {
 
 constexpr std::uint32_t kNoTextureSlot = std::numeric_limits<std::uint32_t>::max();
 
+[[nodiscard]] constexpr std::uint8_t compactTextureSlot(std::uint32_t slot) noexcept {
+    return slot == kNoTextureSlot ? 0xFFU : static_cast<std::uint8_t>(slot);
+}
+
 [[nodiscard]] DrawBatch makeBatch(
     ClipRect clip,
     BlendMode blend,
@@ -180,8 +184,7 @@ std::size_t BatchCompiler::prepareCommand(
     };
 
     DrawInstance instance = makeInstance(command, kNoTextureSlot);
-    instance.pointA = command.bounds.min;
-    instance.pointB = command.bounds.max;
+    instance.uv = command.bounds;
     const Rect outer{
         {command.bounds.min.x - kAnalyticAaFringe, command.bounds.min.y - kAnalyticAaFringe},
         {command.bounds.max.x + kAnalyticAaFringe, command.bounds.max.y + kAnalyticAaFringe},
@@ -257,7 +260,7 @@ bool BatchCompiler::append(
     }
 
     DrawInstance instance = command.instance;
-    instance.textureSlot = textureSlot;
+    instance.textureSlot = compactTextureSlot(textureSlot);
     if (!output.appendInstance(instance)) {
         return output.rejectPacket();
     }
@@ -311,25 +314,22 @@ DrawInstance BatchCompiler::makeInstance(
     DrawInstance instance{
         .bounds = command.bounds,
         .uv = command.uv,
-        .pointA = command.pointA,
-        .pointB = command.pointB,
         .color = command.color,
         .radius = command.radius,
         .thickness = command.thickness,
-        .textureSlot = textureSlot,
         .kind = command.kind,
+        .textureSlot = compactTextureSlot(textureSlot),
         .lineCap = command.lineCap,
-        .lineJoin = command.lineJoin,
-        .lineFlags = command.lineFlags,
     };
+    instance.setLineStyle(command.lineJoin, command.lineFlags);
     return instance;
 }
 
 std::uint64_t BatchCompiler::estimateFragmentArea(const DrawInstance& instance) noexcept {
     double area = 0.0;
     if (instance.kind == PrimitiveKind::Line) {
-        const double deltaX = static_cast<double>(instance.pointB.x - instance.pointA.x);
-        const double deltaY = static_cast<double>(instance.pointB.y - instance.pointA.y);
+        const double deltaX = static_cast<double>(instance.bounds.max.x - instance.bounds.min.x);
+        const double deltaY = static_cast<double>(instance.bounds.max.y - instance.bounds.min.y);
         const double length = std::hypot(deltaX, deltaY);
         const double halfWidth = static_cast<double>(instance.thickness) * 0.5;
         const auto endpointExtension = [halfWidth](bool internal, LineCap cap, LineJoin join) {
@@ -340,13 +340,13 @@ std::uint64_t BatchCompiler::estimateFragmentArea(const DrawInstance& instance) 
             return cap == LineCap::Butt ? 0.0 : halfWidth;
         };
         const double start = endpointExtension(
-            (instance.lineFlags & kLineHasPrevious) != 0,
+            (instance.lineFlags() & kLineHasPrevious) != 0,
             instance.lineCap,
-            instance.lineJoin);
+            instance.lineJoin());
         const double end = endpointExtension(
-            (instance.lineFlags & kLineHasNext) != 0,
+            (instance.lineFlags() & kLineHasNext) != 0,
             instance.lineCap,
-            instance.lineJoin);
+            instance.lineJoin());
         area = (length + start + end + kAnalyticAaFringe * 2.0)
             * (static_cast<double>(instance.thickness) + kAnalyticAaFringe * 2.0);
     } else if (instance.kind == PrimitiveKind::SolidRect) {
