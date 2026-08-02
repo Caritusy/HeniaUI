@@ -1,4 +1,6 @@
 #include "henia/ui/backend/d3d12/D3D12Renderer.h"
+#include "henia/CheckedArithmetic.h"
+#include "henia/ui/Validation.h"
 
 #include "D3D12TextureUploadTransaction.h"
 #include "../FixedError.h"
@@ -303,6 +305,9 @@ struct D3D12Renderer::Implementation final {
     D3D12RendererConfiguration configuration{};
     DXGI_FORMAT renderTargetFormat = DXGI_FORMAT_UNKNOWN;
     std::uint32_t descriptorStride = 0;
+    std::uint32_t instanceBufferBytes = 0;
+    std::uint32_t cpuDescriptorCapacity = 0;
+    std::uint32_t gpuDescriptorCapacity = 0;
     D3D12RenderStatistics statistics{};
     henia::detail::FixedError error;
     std::uint64_t nextTextureUploadFenceValue = 1;
@@ -341,20 +346,36 @@ bool D3D12Renderer::Implementation::initialize(
     if (ready) {
         return true;
     }
-    const std::uint64_t gpuDescriptors = static_cast<std::uint64_t>(requested.submissionCapacity)
-        * requested.batchCapacity * DrawBatch::kTextureCapacity;
+    std::size_t instanceBytes = 0;
+    std::uint64_t descriptorFrames = 0;
+    std::uint64_t gpuDescriptors = 0;
+    std::uint32_t cpuDescriptors = 0;
     if (requested.instanceCapacity == 0 || requested.submissionCapacity == 0
         || requested.batchCapacity == 0 || requested.textureCapacity == 0
         || requested.textureUploadBatchCapacity == 0
+        || !checkedMultiply(requested.instanceCapacity, sizeof(DrawInstance), instanceBytes)
+        || instanceBytes > std::numeric_limits<std::uint32_t>::max()
+        || !checkedMultiply(
+            static_cast<std::uint64_t>(requested.submissionCapacity),
+            static_cast<std::uint64_t>(requested.batchCapacity),
+            descriptorFrames)
+        || !checkedMultiply(
+            descriptorFrames,
+            static_cast<std::uint64_t>(DrawBatch::kTextureCapacity),
+            gpuDescriptors)
         || gpuDescriptors > std::numeric_limits<std::uint32_t>::max()
+        || !checkedAdd(requested.textureCapacity, 1U, cpuDescriptors)
         || format == DXGI_FORMAT_UNKNOWN) {
-        error = "Invalid D3D12 renderer configuration";
+        error = "D3D12 renderer configuration has an invalid capacity or format";
         return false;
     }
 
     device = &nativeDevice;
     configuration = requested;
     renderTargetFormat = format;
+    instanceBufferBytes = static_cast<std::uint32_t>(instanceBytes);
+    cpuDescriptorCapacity = cpuDescriptors;
+    gpuDescriptorCapacity = static_cast<std::uint32_t>(gpuDescriptors);
     submissions.resize(configuration.submissionCapacity);
     textures.resize(configuration.textureCapacity);
     scheduledTextureRevisions.resize(configuration.textureCapacity);
@@ -494,7 +515,7 @@ bool D3D12Renderer::Implementation::createPipelines() noexcept {
 bool D3D12Renderer::Implementation::createDescriptorHeaps() noexcept {
     D3D12_DESCRIPTOR_HEAP_DESC cpuDescription{};
     cpuDescription.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    cpuDescription.NumDescriptors = configuration.textureCapacity + 1U;
+    cpuDescription.NumDescriptors = cpuDescriptorCapacity;
     cpuDescription.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     if (FAILED(device->CreateDescriptorHeap(&cpuDescription, IID_PPV_ARGS(&cpuTextureHeap)))) {
         error = "D3D12 CPU texture descriptor heap creation failed";
@@ -503,8 +524,7 @@ bool D3D12Renderer::Implementation::createDescriptorHeaps() noexcept {
 
     D3D12_DESCRIPTOR_HEAP_DESC gpuDescription{};
     gpuDescription.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    gpuDescription.NumDescriptors = configuration.submissionCapacity
-        * configuration.batchCapacity * static_cast<UINT>(DrawBatch::kTextureCapacity);
+    gpuDescription.NumDescriptors = gpuDescriptorCapacity;
     gpuDescription.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(device->CreateDescriptorHeap(&gpuDescription, IID_PPV_ARGS(&gpuBatchHeap)))) {
         error = "D3D12 shader-visible descriptor heap creation failed";
@@ -522,7 +542,7 @@ bool D3D12Renderer::Implementation::createDescriptorHeaps() noexcept {
 }
 
 bool D3D12Renderer::Implementation::createSubmissionBuffers() noexcept {
-    const std::uint64_t bufferSize = configuration.instanceCapacity * sizeof(DrawInstance);
+    const std::uint64_t bufferSize = instanceBufferBytes;
     const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
     const D3D12_RESOURCE_DESC description = bufferDescription(bufferSize);
     for (Submission& submission : submissions) {
@@ -806,12 +826,53 @@ bool D3D12Renderer::Implementation::record(
     std::uint32_t submissionSlot,
     std::uint32_t width,
     std::uint32_t height) noexcept {
-    if (!ready || submissionSlot >= submissions.size() || width == 0 || height == 0
-        || packet.instances().size() > configuration.instanceCapacity
+    if (!ready || submissionSlot >= submissions.size()) {
+        ++statistics.rejectedFrames;
+        error = "D3D12 renderer or submissionSlot is unavailable";
+        return false;
+    }
+    if (width == 0 || height == 0
+        || width > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max())
+        || height > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max())) {
+        ++statistics.rejectedFrames;
+        ++statistics.invalidInputFrames;
+        error = "viewportWidth/viewportHeight is outside the LONG range";
+        return false;
+    }
+    if (packet.instances().size() > configuration.instanceCapacity
         || packet.batches().size() > configuration.batchCapacity) {
         ++statistics.rejectedFrames;
+        ++statistics.capacityRejectedFrames;
         error = "D3D12 render packet exceeds a configured frame capacity";
         return false;
+    }
+    std::size_t packetBytes = 0;
+    if (!checkedMultiply(packet.instances().size(), sizeof(DrawInstance), packetBytes)
+        || packetBytes > instanceBufferBytes) {
+        ++statistics.rejectedFrames;
+        ++statistics.capacityRejectedFrames;
+        error = "D3D12 render packet byte range exceeds the instance buffer";
+        return false;
+    }
+    for (const DrawBatch& batch : packet.batches()) {
+        const std::size_t first = batch.firstInstance;
+        const std::size_t count = batch.instanceCount;
+        if (batch.textureCount > DrawBatch::kTextureCapacity
+            || first > packet.instances().size() || count > packet.instances().size() - first) {
+            ++statistics.rejectedFrames;
+            ++statistics.invalidInputFrames;
+            error = "Render packet batch instance/texture range is invalid";
+            return false;
+        }
+        if (batch.clip.enabled) {
+            ScissorRect scissor{};
+            if (!makeScissorRect(batch.clip.area, width, height, scissor)) {
+                ++statistics.rejectedFrames;
+                ++statistics.invalidInputFrames;
+                error = "clip.area is invalid";
+                return false;
+            }
+        }
     }
     if (!pollTextureUploads()) {
         ++statistics.rejectedFrames;
@@ -851,7 +912,7 @@ bool D3D12Renderer::Implementation::record(
         }
     }
     if (submission.uploadedIdentity != packet.identity() || submission.uploadedRevision != packet.revision()) {
-        std::memcpy(submission.mapped, packet.instances().data(), packet.instances().size_bytes());
+        std::memcpy(submission.mapped, packet.instances().data(), packetBytes);
         submission.uploadedIdentity = packet.identity();
         submission.uploadedRevision = packet.revision();
         ++statistics.instanceUploads;
@@ -866,7 +927,7 @@ bool D3D12Renderer::Implementation::record(
 
     const D3D12_VERTEX_BUFFER_VIEW instanceView{
         submission.instances->GetGPUVirtualAddress(),
-        static_cast<UINT>(configuration.instanceCapacity * sizeof(DrawInstance)),
+        instanceBufferBytes,
         static_cast<UINT>(sizeof(DrawInstance)),
     };
     commandList.IASetVertexBuffers(0, 1, &instanceView);
@@ -892,9 +953,10 @@ bool D3D12Renderer::Implementation::record(
             activeBlend = batch.blend;
         }
 
-        const std::uint32_t tableIndex = (
-            submissionSlot * configuration.batchCapacity + static_cast<std::uint32_t>(batchIndex))
-            * static_cast<std::uint32_t>(DrawBatch::kTextureCapacity);
+        const std::uint64_t tableIndexValue = (
+            static_cast<std::uint64_t>(submissionSlot) * configuration.batchCapacity + batchIndex)
+            * DrawBatch::kTextureCapacity;
+        const std::uint32_t tableIndex = static_cast<std::uint32_t>(tableIndexValue);
         for (std::uint32_t slot = 0; slot < DrawBatch::kTextureCapacity; ++slot) {
             const std::uint32_t source = slot < batch.textureCount
                 ? batch.textures[slot].value()
@@ -909,10 +971,9 @@ bool D3D12Renderer::Implementation::record(
 
         D3D12_RECT scissor{};
         if (batch.clip.enabled) {
-            scissor.left = std::max(static_cast<LONG>(batch.clip.area.min.x), 0L);
-            scissor.top = std::max(static_cast<LONG>(batch.clip.area.min.y), 0L);
-            scissor.right = std::min(static_cast<LONG>(batch.clip.area.max.x), static_cast<LONG>(width));
-            scissor.bottom = std::min(static_cast<LONG>(batch.clip.area.max.y), static_cast<LONG>(height));
+            ScissorRect converted{};
+            static_cast<void>(makeScissorRect(batch.clip.area, width, height, converted));
+            scissor = {converted.left, converted.top, converted.right, converted.bottom};
         } else {
             scissor = {0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
         }
@@ -954,6 +1015,9 @@ void D3D12Renderer::Implementation::shutdown() noexcept {
     configuration = {};
     renderTargetFormat = DXGI_FORMAT_UNKNOWN;
     descriptorStride = 0;
+    instanceBufferBytes = 0;
+    cpuDescriptorCapacity = 0;
+    gpuDescriptorCapacity = 0;
     nextTextureUploadFenceValue = 1;
     ready = false;
 }

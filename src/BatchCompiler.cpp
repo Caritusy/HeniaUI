@@ -1,4 +1,5 @@
 #include "henia/ui/BatchCompiler.h"
+#include "henia/ui/Validation.h"
 
 #include <algorithm>
 #include <limits>
@@ -28,6 +29,12 @@ bool BatchCompiler::compile(
     output.setSourceCommands(displayList.size());
 
     for (const DrawCommand& command : displayList.commands()) {
+        if (!validateDrawCommand(command).empty()) {
+            return output.rejectPacket(true);
+        }
+        if (output.instanceCount() >= std::numeric_limits<std::uint32_t>::max()) {
+            return output.rejectPacket();
+        }
         DrawBatch* batch = output.lastBatch();
         if (batch == nullptr || !compatible(*batch, command)) {
             batch = output.appendBatch(makeBatch(

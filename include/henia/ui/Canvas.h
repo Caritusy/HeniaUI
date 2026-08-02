@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <span>
+#include <string_view>
 
 namespace henia::ui {
 
@@ -39,9 +40,13 @@ public:
     [[nodiscard]] BlendMode blendMode() const noexcept;
     [[nodiscard]] std::size_t clipDepth() const noexcept;
     [[nodiscard]] std::uint64_t rejectedCommands() const noexcept;
+    [[nodiscard]] std::uint64_t invalidInputCommands() const noexcept;
+    [[nodiscard]] std::uint64_t capacityRejectedCommands() const noexcept;
+    [[nodiscard]] std::string_view lastError() const noexcept;
 
 private:
     [[nodiscard]] ClipRect currentClip() const noexcept;
+    void rejectInvalid(std::string_view field) noexcept;
     void append(DrawCommand command) noexcept;
 
     DisplayList* mDisplayList = nullptr;
@@ -49,6 +54,9 @@ private:
     std::size_t mClipDepth = 0;
     BlendMode mBlendMode = BlendMode::PremultipliedAlpha;
     std::uint64_t mRejectedCommands = 0;
+    std::uint64_t mInvalidInputCommands = 0;
+    std::uint64_t mCapacityRejectedCommands = 0;
+    std::string_view mLastError{};
 };
 
 } // namespace henia::ui

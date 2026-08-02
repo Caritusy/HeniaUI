@@ -1,4 +1,5 @@
 #include "henia/ui/resource/TextureStore.h"
+#include "henia/CheckedArithmetic.h"
 
 #include <limits>
 
@@ -11,9 +12,11 @@ TextureHandle TextureStore::create(
     std::uint32_t rowPitch,
     std::span<const std::byte> pixels) {
     const std::size_t pixelBytes = bytesPerPixel(format);
-    const std::size_t minimumPitch = static_cast<std::size_t>(width) * pixelBytes;
-    const std::size_t requiredBytes = static_cast<std::size_t>(rowPitch) * height;
-    if (width == 0 || height == 0 || rowPitch < minimumPitch || pixels.size() != requiredBytes
+    std::size_t minimumPitch = 0;
+    std::size_t requiredBytes = 0;
+    if (!checkedMultiply(static_cast<std::size_t>(width), pixelBytes, minimumPitch)
+        || !checkedMultiply(static_cast<std::size_t>(rowPitch), static_cast<std::size_t>(height), requiredBytes)
+        || width == 0 || height == 0 || rowPitch < minimumPitch || pixels.size() != requiredBytes
         || mEntries.size() == std::numeric_limits<std::uint32_t>::max() - 1ULL) {
         return {};
     }
@@ -36,9 +39,13 @@ bool TextureStore::update(
     if (entry == nullptr) {
         return false;
     }
-    const std::size_t minimumPitch = static_cast<std::size_t>(entry->width) * bytesPerPixel(entry->format);
-    const std::size_t requiredBytes = static_cast<std::size_t>(rowPitch) * entry->height;
-    if (rowPitch < minimumPitch || pixels.size() != requiredBytes) {
+    std::size_t minimumPitch = 0;
+    std::size_t requiredBytes = 0;
+    if (!checkedMultiply(
+            static_cast<std::size_t>(entry->width), bytesPerPixel(entry->format), minimumPitch)
+        || !checkedMultiply(
+            static_cast<std::size_t>(rowPitch), static_cast<std::size_t>(entry->height), requiredBytes)
+        || rowPitch < minimumPitch || pixels.size() != requiredBytes) {
         return false;
     }
 

@@ -1,5 +1,7 @@
 #include "VisualRegression.h"
 
+#include "henia/gfx/ShapeBatch3D.h"
+#include "henia/gfx/backend/opengl/OpenGlRenderDevice.h"
 #include "henia/ui/backend/opengl/OpenGlRenderer.h"
 
 #include <Windows.h>
@@ -11,6 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <string_view>
 #include <vector>
@@ -174,11 +177,24 @@ int main() {
     TextureStore textures;
     Frame frame;
     const RenderPacket packet = henia::test::buildUiVisualScene(textures, frame);
+    OpenGlRenderer oversizedRenderer;
+    if (oversizedRenderer.initialize(std::numeric_limits<std::size_t>::max(), 1, 1)) {
+        fail("OpenGL renderer accepted an overflowing instance capacity");
+    }
     OpenGlRenderer renderer;
     if (!renderer.initialize(64, 8, 3) || !renderer.synchronizeTextures(textures)) {
         std::cout << "OpenGL 3.3 renderer unavailable (" << version << "): "
                   << renderer.lastError() << "\n";
         return 77;
+    }
+    if (renderer.render(packet, std::numeric_limits<std::uint32_t>::max(), 128)
+        || renderer.lastError() != "viewportWidth/viewportHeight is outside the GLsizei range") {
+        fail("OpenGL renderer accepted an out-of-range viewport");
+    }
+    const OpenGlRenderStatistics rejected = renderer.statistics();
+    if (rejected.invalidInputFrames != 1 || rejected.capacityRejectedFrames != 0
+        || rejected.drawCalls != 0 || rejected.instanceUploads != 0) {
+        fail("OpenGL invalid-input rejection issued work or used capacity statistics");
     }
 
     glViewport(0, 0, henia::test::kVisualWidth, henia::test::kVisualHeight);
@@ -296,9 +312,37 @@ int main() {
     }
     const OpenGlRenderStatistics statistics = renderer.statistics();
     if (statistics.frames != 97 || statistics.instanceUploads != 65
-        || statistics.uploadFenceFailures != 0 || statistics.rejectedFrames != 0) {
+        || statistics.uploadFenceFailures != 0 || statistics.rejectedFrames != 1
+        || statistics.invalidInputFrames != 1 || statistics.capacityRejectedFrames != 0) {
         fail("OpenGL multi-slot stress statistics are incorrect");
     }
+
+    using namespace henia::gfx;
+    OpenGlRenderDevice oversizedGfx;
+    if (oversizedGfx.initialize(std::numeric_limits<std::size_t>::max(), 1)) {
+        fail("OpenGL gfx accepted an overflowing box capacity");
+    }
+    ShapeBatch3D shapes;
+    if (shapes.addBox({}) == ShapeBatch3D::kInvalidIndex) {
+        fail("OpenGL gfx validation setup rejected a valid box");
+    }
+    const InstanceBatch boxBatch = shapes.snapshot();
+    OpenGlRenderDevice gfx;
+    if (!gfx.initialize(1, 1)) {
+        fail("OpenGL gfx validation renderer did not initialize");
+    }
+    ViewParameters invalidView{.viewport = {128.0F, 128.0F}};
+    invalidView.timeSeconds = std::numeric_limits<float>::quiet_NaN();
+    if (gfx.render(boxBatch, invalidView)
+        || gfx.lastError() != "view.timeSeconds") {
+        fail("OpenGL gfx accepted a non-finite view");
+    }
+    const OpenGlGfxStatistics gfxStatistics = gfx.statistics();
+    if (gfxStatistics.invalidInputFrames != 1 || gfxStatistics.capacityRejectedFrames != 0
+        || gfxStatistics.drawCalls != 0 || gfxStatistics.fullInstanceUploads != 0) {
+        fail("OpenGL gfx invalid-input rejection issued GPU work");
+    }
+    gfx.shutdown();
 
     renderer.shutdown();
     for (std::uint32_t slot = 0; slot < hostTextures.size(); ++slot) {

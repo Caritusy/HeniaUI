@@ -98,6 +98,29 @@ For D3D12, the host binds the render/depth targets, transitions resources, suppl
 
 Depth is generic `DepthState`, not a visibility policy. When a depth-enabled request cannot use a host depth attachment, the backend selects a depth-disabled pipeline and increments `depthFallbacks`.
 
+## Input validation and numeric policy
+
+Public 2D rectangles and 3D boxes use a reject-inverted policy; HeniaUI does not
+silently swap endpoints. All recorded coordinates, colors, line metrics, view
+matrices, viewport dimensions, and animation constants must be finite. Colors
+may intentionally use HDR or out-of-range channel values, so finite channels are
+not clamped. `tryPerspective()` and `tryLookAt()` report invalid or degenerate
+parameters explicitly; the convenience matrix-returning forms produce a finite
+identity matrix when those checks fail.
+
+Canvas and batch compilation validate before publishing GPU constants, and each
+backend repeats a complete preflight before mapping buffers or recording draw
+commands. `lastError()` names the rejected field. Invalid-input counters are
+separate from capacity-exhaustion counters while the aggregate rejection count
+is retained for compatibility.
+
+Clip rectangles are converted once with floor for minima and ceil for maxima,
+then clamped to the viewport. This preserves fractional analytic-AA coverage and
+gives OpenGL and D3D12 identical integer coverage. Capacity products, byte
+ranges, descriptor counts, and narrowing conversions are checked before any
+allocation or API call; configurations whose instance-buffer view would exceed
+`GLsizeiptr` or D3D12's `UINT` byte count are rejected during initialization.
+
 ## Profiling
 
 Statistics separate producer build time, instance upload time, draw-recording/submit time, and optional GPU time. GPU timing is unavailable until the host reports a resolved timestamp sample; a zero value is therefore never silently presented as a measured GPU duration.

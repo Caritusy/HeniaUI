@@ -1,4 +1,6 @@
 #include "henia/gfx/ShapeBatch3D.h"
+#include "henia/CheckedArithmetic.h"
+#include "henia/gfx/Validation.h"
 #include "henia/ui/Frame.h"
 #include "henia/ui/resource/TextureStore.h"
 #include "henia/ui/text/FontStore.h"
@@ -8,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -172,6 +175,57 @@ void propertyBatchCompilation() {
     }
 }
 
+void fuzzFiniteGeometryAndArithmetic() {
+    std::mt19937 random(0xF117E123);
+    std::uniform_int_distribution<std::uint32_t> bits(
+        0, std::numeric_limits<std::uint32_t>::max());
+    Frame frame;
+    frame.reserve(2, 1, CapacityPolicy::Fixed);
+    for (int iteration = 0; iteration < 50000; ++iteration) {
+        const float value = std::bit_cast<float>(bits(random));
+        Canvas& canvas = frame.begin();
+        canvas.fillRect({{0.0F, 0.0F}, {value, 1.0F}}, {value, 0.5F, 0.25F, 1.0F});
+        const RenderPacket packet = frame.finish();
+        for (const DrawInstance& instance : packet.instances()) {
+            const std::array constants{
+                instance.bounds.min.x, instance.bounds.min.y,
+                instance.bounds.max.x, instance.bounds.max.y,
+                instance.color.red, instance.color.green,
+                instance.color.blue, instance.color.alpha,
+                instance.radius, instance.thickness,
+            };
+            if (!std::all_of(constants.begin(), constants.end(), [](float component) {
+                    return std::isfinite(component);
+                })) {
+                fail("Geometry fuzz published a non-finite GPU constant");
+            }
+        }
+
+        henia::gfx::BoxInstance box{};
+        box.maximum.x = value;
+        const bool accepted = henia::gfx::validate(box).empty();
+        if (accepted && !std::isfinite(value)) {
+            fail("3D geometry fuzz accepted a non-finite GPU constant");
+        }
+
+        const std::size_t left = static_cast<std::size_t>(bits(random));
+        const std::size_t right = static_cast<std::size_t>(bits(random));
+        std::size_t product = 0;
+        const bool multiplied = henia::checkedMultiply(left, right, product);
+        const bool expected = left == 0
+            || right <= std::numeric_limits<std::size_t>::max() / left;
+        if (multiplied != expected || (multiplied && product != left * right)) {
+            fail("Checked-capacity multiplication property failed");
+        }
+        std::size_t sum = 0;
+        const bool added = henia::checkedAdd(left, right, sum);
+        const bool addExpected = right <= std::numeric_limits<std::size_t>::max() - left;
+        if (added != addExpected || (added && sum != left + right)) {
+            fail("Checked-capacity addition property failed");
+        }
+    }
+}
+
 void stressImmutable3dSnapshots() {
     using namespace henia::gfx;
     ShapeBatch3D shapes;
@@ -202,6 +256,7 @@ int main() {
     fuzzUtf8();
     propertyLayoutConstraints();
     propertyBatchCompilation();
+    fuzzFiniteGeometryAndArithmetic();
     stressImmutable3dSnapshots();
     std::cout << "HeniaUI validation/property tests passed\n";
     return EXIT_SUCCESS;

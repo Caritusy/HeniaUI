@@ -1,6 +1,8 @@
 #include "henia/ui/BatchCompiler.h"
 #include "henia/ui/Canvas.h"
+#include "henia/CheckedArithmetic.h"
 #include "henia/ui/Frame.h"
+#include "henia/ui/Validation.h"
 #include "henia/ui/backend/opengl/OpenGlRenderer.h"
 #include "henia/ui/resource/TextureStore.h"
 #include "henia/ui/text/FontStore.h"
@@ -11,6 +13,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <string_view>
 #include <thread>
@@ -152,13 +155,16 @@ void testFixedCapacityOverflowIsRejected() {
     Canvas& canvas = frame.begin();
     canvas.fillRect({{0.0F, 0.0F}, {10.0F, 10.0F}}, {});
     canvas.fillRect({{12.0F, 0.0F}, {22.0F, 10.0F}}, {});
-    require(canvas.rejectedCommands() == 1, "fixed display-list overflow was not rejected");
+    require(canvas.rejectedCommands() == 1 && canvas.invalidInputCommands() == 0
+            && canvas.capacityRejectedCommands() == 1,
+        "fixed display-list overflow was not classified as capacity exhaustion");
     const RenderPacket& framePacket = frame.finish();
     require(framePacket.instances().size() == 1, "fixed display-list overflow changed accepted work");
 
     DisplayList displayList;
     displayList.reserve(2);
     DrawCommand command{};
+    command.bounds = {{0.0F, 0.0F}, {1.0F, 1.0F}};
     require(displayList.append(command) && displayList.append(command), "test commands were not recorded");
     RenderPacketBuilder builder;
     builder.reserve(1, 1, CapacityPolicy::Fixed);
@@ -167,8 +173,72 @@ void testFixedCapacityOverflowIsRejected() {
     require(!compiler.compile(displayList, builder), "fixed packet overflow unexpectedly compiled");
     const RenderPacket packet = builder.publish();
     require(packet.instances().empty() && packet.batches().empty(), "packet overflow published partial work");
-    require(packet.statistics().sourceCommands == 2 && packet.statistics().rejectedCommands == 2,
+    require(packet.statistics().sourceCommands == 2 && packet.statistics().rejectedCommands == 2
+            && packet.statistics().invalidInputCommands == 0
+            && packet.statistics().capacityRejectedCommands == 2,
         "packet overflow statistics are incorrect");
+}
+
+void testInvalidGeometryAndCheckedArithmetic() {
+    DisplayList displayList;
+    Canvas canvas(displayList);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float infinity = std::numeric_limits<float>::infinity();
+    canvas.fillRect({{0.0F, 0.0F}, {nan, 1.0F}}, {});
+    canvas.line({0.0F, 0.0F}, {1.0F, infinity}, {}, 1.0F);
+    canvas.strokeRect({{0.0F, 0.0F}, {4.0F, 4.0F}}, {}, nan, 1.0F);
+    require(!canvas.pushClip({{5.0F, 0.0F}, {4.0F, 1.0F}}),
+        "inverted clip rectangle was accepted");
+    require(displayList.commands().empty() && canvas.rejectedCommands() == 4
+            && canvas.invalidInputCommands() == 4 && canvas.capacityRejectedCommands() == 0,
+        "non-finite/inverted Canvas inputs were not rejected and classified");
+    require(canvas.lastError() == "clip.area",
+        "Canvas diagnostics did not identify the rejected field");
+
+    DrawCommand invalid{};
+    invalid.bounds = {{0.0F, 0.0F}, {nan, 1.0F}};
+    require(displayList.append(invalid), "raw invalid command setup failed");
+    RenderPacketBuilder builder;
+    builder.reserve(4, 2, CapacityPolicy::Fixed);
+    require(builder.begin(), "invalid command test could not begin packet");
+    BatchCompiler compiler;
+    require(!compiler.compile(displayList, builder), "raw invalid command compiled");
+    const RenderPacket rejected = builder.publish();
+    require(rejected.instances().empty() && rejected.batches().empty()
+            && rejected.statistics().invalidInputCommands == 1
+            && rejected.statistics().capacityRejectedCommands == 0,
+        "raw invalid command rejection was not transactional/classified");
+
+    ScissorRect scissor{};
+    require(makeScissorRect({{-2.25F, 3.75F}, {10.10F, 20.01F}}, 8, 16, scissor)
+            && scissor.left == 0 && scissor.top == 3
+            && scissor.right == 8 && scissor.bottom == 16,
+        "fractional scissor did not floor minima, ceil maxima, and clamp");
+    require(!makeScissorRect({{0.0F, 0.0F}, {nan, 2.0F}}, 8, 8, scissor),
+        "non-finite scissor was accepted");
+    const std::uint32_t maximumViewport = static_cast<std::uint32_t>(
+        std::numeric_limits<std::int32_t>::max());
+    require(makeScissorRect(
+            {{0.0F, 0.0F}, {std::numeric_limits<float>::max(), 1.0F}},
+            maximumViewport,
+            8,
+            scissor)
+            && scissor.right == std::numeric_limits<std::int32_t>::max(),
+        "maximum viewport scissor narrowing was not range safe");
+
+    std::size_t result = 0;
+    require(henia::checkedMultiply<std::size_t>(7, 9, result) && result == 63,
+        "checked multiplication rejected a valid product");
+    require(!henia::checkedMultiply(
+            std::numeric_limits<std::size_t>::max(), std::size_t{2}, result),
+        "checked multiplication accepted overflow");
+    require(!henia::checkedAdd(
+            std::numeric_limits<std::size_t>::max(), std::size_t{1}, result),
+        "checked addition accepted overflow");
+    std::uint32_t narrowed = 0;
+    require(!henia::checkedNarrow(
+            std::numeric_limits<std::uint64_t>::max(), narrowed),
+        "checked narrowing accepted an out-of-range value");
 }
 
 void testPacketSnapshotsRemainImmutable() {
@@ -381,6 +451,7 @@ int main() {
     testWarmFrameDoesNotGrow();
     testNestedClipIntersection();
     testFixedCapacityOverflowIsRejected();
+    testInvalidGeometryAndCheckedArithmetic();
     testPacketSnapshotsRemainImmutable();
     testFixedSnapshotPoolRejectsExhaustion();
     testPacketSnapshotsSupportConcurrentConsumption();

@@ -1,9 +1,12 @@
 #include "henia/gfx/ShapeBatch3D.h"
+#include "henia/gfx/Math.h"
+#include "henia/gfx/Validation.h"
 #include "henia/gfx/backend/opengl/OpenGlRenderDevice.h"
 
 #include <array>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <type_traits>
 
 namespace {
@@ -36,7 +39,9 @@ int main() {
             .effects = BoxEffect::HueCycle,
         };
     }
-    shapes.replaceBoxes(boxes);
+    if (!shapes.replaceBoxes(boxes)) {
+        fail("Valid boxes were rejected");
+    }
     const InstanceBatch first = shapes.snapshot();
     if (first.boxes().size() != boxes.size() || first.dirtyOffset() != 0
         || first.dirtyCount() != boxes.size() || first.revision() == 0) {
@@ -69,6 +74,46 @@ int main() {
         || partial.dirtyCount() != 1 || first.boxes()[137].lineWidth != 2.0F
         || partial.boxes()[137].lineWidth != 3.0F) {
         fail("Incremental immutable instance update is incorrect");
+    }
+
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    BoxInstance invalid = boxes[0];
+    invalid.minimum.x = nan;
+    if (shapes.addBox(invalid) != ShapeBatch3D::kInvalidIndex
+        || shapes.lastError() != "box.minimum.x" || shapes.size() != boxes.size()) {
+        fail("Non-finite box input was not rejected with an exact field");
+    }
+    invalid = boxes[0];
+    invalid.minimum.y = invalid.maximum.y + 1.0F;
+    if (shapes.updateBox(0, invalid)
+        || shapes.lastError() != "box.minimum.y > box.maximum.y") {
+        fail("Inverted box input was not rejected deterministically");
+    }
+    std::array<BoxInstance, 2> replacement{boxes[0], invalid};
+    if (shapes.replaceBoxes(replacement) || shapes.size() != boxes.size()
+        || shapes.rejectedBoxChanges() != 3) {
+        fail("Invalid replacement mutated the 3D batch or its rejection statistics");
+    }
+    if (shapes.setDepthState({.compare = static_cast<CompareOp>(0xFF)})
+        || shapes.lastError() != "depth.compare") {
+        fail("Invalid depth comparison was accepted");
+    }
+
+    Mat4 matrix{};
+    if (tryPerspective(0.0F, 1.0F, 0.1F, 100.0F, matrix) || !finite(matrix)
+        || tryPerspective(1.0F, 1.0F, 1.0F, 1.0F, matrix)) {
+        fail("Invalid perspective parameters were not rejected to a finite identity");
+    }
+    if (!tryPerspective(1.0F, 16.0F / 9.0F, 0.1F, 100.0F, matrix) || !finite(matrix)) {
+        fail("Valid perspective parameters were rejected");
+    }
+    if (tryLookAt({}, {}, {0.0F, 1.0F, 0.0F}, matrix) || !finite(matrix)
+        || tryLookAt({}, {0.0F, 0.0F, 1.0F}, {0.0F, 0.0F, 2.0F}, matrix)) {
+        fail("Degenerate lookAt parameters were not rejected to a finite identity");
+    }
+    if (!tryLookAt({0.0F, 0.0F, -2.0F}, {}, {0.0F, 1.0F, 0.0F}, matrix)
+        || !finite(matrix)) {
+        fail("Valid lookAt parameters were rejected");
     }
 
     std::cout << "HeniaUI gfx lifecycle tests passed\n";

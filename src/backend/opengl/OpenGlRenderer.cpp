@@ -1,4 +1,6 @@
 #include "henia/ui/backend/opengl/OpenGlRenderer.h"
+#include "henia/CheckedArithmetic.h"
+#include "henia/ui/Validation.h"
 
 #include "../FixedError.h"
 #include "OpenGlUploadRing.h"
@@ -381,6 +383,7 @@ struct OpenGlRenderer::Implementation final {
     GLint viewportLocation = -1;
     GLint texturesLocation = -1;
     std::size_t capacity = 0;
+    std::size_t instanceBufferBytes = 0;
     std::vector<UploadSlot> uploadSlots;
     henia::detail::OpenGlUploadRing uploadRing;
     std::vector<GpuTexture> textures;
@@ -412,12 +415,15 @@ bool OpenGlRenderer::Implementation::initialize(
     if (ready) {
         return true;
     }
+    std::size_t instanceBytes = 0;
     if (wglGetCurrentContext() == nullptr || requestedCapacity == 0 || requestedTextureCapacity == 0
         || requestedUploadSlots == 0
         || requestedCapacity > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())
         || requestedTextureCapacity > std::numeric_limits<std::uint32_t>::max()
-        || requestedUploadSlots > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
-        error = "OpenGL 3.3 context and non-zero instance/texture/upload capacities are required";
+        || requestedUploadSlots > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())
+        || !checkedMultiply(requestedCapacity, sizeof(DrawInstance), instanceBytes)
+        || instanceBytes > static_cast<std::size_t>(std::numeric_limits<GlSize>::max())) {
+        error = "OpenGL renderer configuration has an invalid instance/texture/upload capacity";
         return false;
     }
     textures.resize(requestedTextureCapacity);
@@ -487,7 +493,7 @@ bool OpenGlRenderer::Implementation::initialize(
         gl.bindBuffer(kArrayBuffer, slot.buffer);
         gl.bufferData(
             kArrayBuffer,
-            static_cast<GlSize>(requestedCapacity * sizeof(DrawInstance)),
+            static_cast<GlSize>(instanceBytes),
             nullptr,
             kDynamicDraw);
     }
@@ -497,6 +503,7 @@ bool OpenGlRenderer::Implementation::initialize(
     gl.bindVertexArray(0);
 
     capacity = requestedCapacity;
+    instanceBufferBytes = instanceBytes;
     ready = true;
     error.clear();
     return true;
@@ -508,6 +515,20 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& sto
             ? "OpenGL texture store exceeds configured capacity"
             : "Texture synchronization requires the renderer context";
         return false;
+    }
+
+    for (std::uint32_t value = 1; value <= store.size(); ++value) {
+        const TextureView view = store.view(TextureHandle{value});
+        const std::uint32_t pixelBytes = view.format == TextureFormat::Alpha8 ? 1U : 4U;
+        if (!view.handle.valid() || view.width == 0 || view.height == 0
+            || view.width > static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())
+            || view.height > static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())
+            || view.rowPitch % pixelBytes != 0
+            || view.rowPitch / pixelBytes
+                > static_cast<std::uint32_t>(std::numeric_limits<GLint>::max())) {
+            error = "OpenGL texture has an invalid width, height, or rowPitch";
+            return false;
+        }
     }
 
     GLint previousTexture = 0;
@@ -571,14 +592,54 @@ bool OpenGlRenderer::Implementation::render(
     const RenderPacket& packet,
     std::uint32_t width,
     std::uint32_t height) noexcept {
-    if (!ready || wglGetCurrentContext() == nullptr || width == 0 || height == 0
-        || packet.instances().size() > capacity
+    if (!ready || wglGetCurrentContext() == nullptr) {
+        ++statistics.rejectedFrames;
+        error = "OpenGL render context is unavailable";
+        return false;
+    }
+    if (width == 0 || height == 0
+        || width > static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())
+        || height > static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())) {
+        ++statistics.rejectedFrames;
+        ++statistics.invalidInputFrames;
+        error = "viewportWidth/viewportHeight is outside the GLsizei range";
+        return false;
+    }
+    if (packet.instances().size() > capacity
         || packet.instances().size() > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
         ++statistics.rejectedFrames;
-        error = packet.instances().size() > capacity
-            ? "Render packet exceeds the preallocated OpenGL instance capacity"
-            : "OpenGL render prerequisites are unavailable";
+        ++statistics.capacityRejectedFrames;
+        error = "Render packet exceeds the preallocated OpenGL instance capacity";
         return false;
+    }
+    std::size_t packetBytes = 0;
+    if (!checkedMultiply(packet.instances().size(), sizeof(DrawInstance), packetBytes)
+        || packetBytes > instanceBufferBytes
+        || packetBytes > static_cast<std::size_t>(std::numeric_limits<GlSize>::max())) {
+        ++statistics.rejectedFrames;
+        ++statistics.capacityRejectedFrames;
+        error = "Render packet byte range exceeds the OpenGL instance buffer";
+        return false;
+    }
+    for (const DrawBatch& batch : packet.batches()) {
+        const std::size_t first = batch.firstInstance;
+        const std::size_t count = batch.instanceCount;
+        if (batch.textureCount > DrawBatch::kTextureCapacity
+            || first > packet.instances().size() || count > packet.instances().size() - first) {
+            ++statistics.rejectedFrames;
+            ++statistics.invalidInputFrames;
+            error = "Render packet batch instance/texture range is invalid";
+            return false;
+        }
+        if (batch.clip.enabled) {
+            ScissorRect scissor{};
+            if (!makeScissorRect(batch.clip.area, width, height, scissor)) {
+                ++statistics.rejectedFrames;
+                ++statistics.invalidInputFrames;
+                error = "clip.area is invalid";
+                return false;
+            }
+        }
     }
     if (packet.instances().empty() || packet.batches().empty()) {
         ++statistics.frames;
@@ -628,7 +689,7 @@ bool OpenGlRenderer::Implementation::render(
         void* mapped = gl.mapBufferRange(
             kArrayBuffer,
             0,
-            static_cast<GlSize>(packet.instances().size_bytes()),
+            static_cast<GlSize>(packetBytes),
             kMapWriteBit | kMapUnsynchronizedBit);
         if (mapped == nullptr) {
             restoreState(previous);
@@ -636,7 +697,7 @@ bool OpenGlRenderer::Implementation::render(
             error = "OpenGL instance upload mapping failed";
             return false;
         }
-        std::memcpy(mapped, packet.instances().data(), packet.instances().size_bytes());
+        std::memcpy(mapped, packet.instances().data(), packetBytes);
         if (gl.unmapBuffer(kArrayBuffer) != GL_TRUE) {
             uploadRing.invalidate(upload.slot);
             restoreState(previous);
@@ -646,7 +707,7 @@ bool OpenGlRenderer::Implementation::render(
         }
         uploadRing.markUploaded(upload.slot, packet.identity(), packet.revision());
         ++statistics.instanceUploads;
-        statistics.uploadedInstanceBytes += packet.instances().size_bytes();
+        statistics.uploadedInstanceBytes += packetBytes;
     }
 
     bool submitted = false;
@@ -661,11 +722,13 @@ bool OpenGlRenderer::Implementation::render(
         }
 
         if (batch.clip.enabled) {
-            const GLint x = static_cast<GLint>(batch.clip.area.min.x);
-            const GLint y = static_cast<GLint>(static_cast<float>(height) - batch.clip.area.max.y);
-            const GLsizei clipWidth = static_cast<GLsizei>(batch.clip.area.width());
-            const GLsizei clipHeight = static_cast<GLsizei>(batch.clip.area.height());
-            glScissor(x, y, clipWidth, clipHeight);
+            ScissorRect scissor{};
+            static_cast<void>(makeScissorRect(batch.clip.area, width, height, scissor));
+            glScissor(
+                static_cast<GLint>(scissor.left),
+                static_cast<GLint>(height - static_cast<std::uint32_t>(scissor.bottom)),
+                static_cast<GLsizei>(scissor.right - scissor.left),
+                static_cast<GLsizei>(scissor.bottom - scissor.top));
         } else {
             glScissor(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
         }
@@ -774,11 +837,13 @@ void OpenGlRenderer::Implementation::shutdown() noexcept {
     viewportLocation = -1;
     texturesLocation = -1;
     capacity = 0;
+    instanceBufferBytes = 0;
     ready = false;
 }
 
 void OpenGlRenderer::Implementation::configureAttributes(std::size_t firstInstance) const noexcept {
-    const auto base = firstInstance * sizeof(DrawInstance);
+    std::size_t base = 0;
+    static_cast<void>(checkedMultiply(firstInstance, sizeof(DrawInstance), base));
     const auto pointer = [base](std::size_t memberOffset) {
         return reinterpret_cast<const void*>(base + memberOffset);
     };

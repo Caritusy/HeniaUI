@@ -21,6 +21,8 @@ struct OpenGlRenderStatistics final {
     std::uint64_t uploadFenceFailures = 0;
     std::uint64_t textureUploads = 0;
     std::uint64_t rejectedFrames = 0;
+    std::uint64_t invalidInputFrames = 0;
+    std::uint64_t capacityRejectedFrames = 0;
 };
 
 // OpenGlRenderer never creates, binds, or swaps a native context. Its owner must

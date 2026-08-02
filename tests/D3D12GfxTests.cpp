@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <type_traits>
 #include <vector>
 
@@ -147,6 +148,13 @@ int main() {
     };
     builder.replaceBoxes(boxes);
     const InstanceBatch batch = builder.snapshot();
+    D3D12RenderDevice oversizedRenderer;
+    if (oversizedRenderer.initialize(*device.Get(), {
+            .boxCapacity = static_cast<std::size_t>(std::numeric_limits<UINT>::max())
+                / sizeof(BoxInstance) + 1U,
+        })) {
+        fail("D3D12 gfx accepted a buffer-view byte capacity above UINT");
+    }
     D3D12RenderDevice renderer;
     if (!renderer.initialize(*device.Get(), {
             .boxCapacity = boxes.size(),
@@ -163,6 +171,19 @@ int main() {
         || FAILED(device->CreateCommandList(
             0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&commandList)))) {
         fail("Unable to create D3D12 gfx recording objects");
+    }
+    ViewParameters invalidView{.viewport = {
+        static_cast<float>(width), static_cast<float>(height)}};
+    invalidView.viewProjection.values[7] = std::numeric_limits<float>::quiet_NaN();
+    if (renderer.record(batch, invalidView, *commandList.Get(), 0)
+        || renderer.lastError() != "view.viewProjection") {
+        fail("D3D12 gfx accepted a non-finite view matrix");
+    }
+    const D3D12GfxStatistics invalidStatistics = renderer.statistics();
+    if (invalidStatistics.invalidInputFrames != 1
+        || invalidStatistics.capacityRejectedFrames != 0
+        || invalidStatistics.drawCalls != 0 || invalidStatistics.fullInstanceUploads != 0) {
+        fail("D3D12 gfx invalid-input rejection issued GPU work");
     }
     constexpr std::array<float, 4> black{0.0F, 0.0F, 0.0F, 1.0F};
     commandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);

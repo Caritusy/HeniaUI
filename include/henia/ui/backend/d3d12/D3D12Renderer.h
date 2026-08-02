@@ -30,6 +30,8 @@ struct D3D12RenderStatistics final {
     std::uint64_t textureUploadBatches = 0;
     std::uint64_t failedTextureUploadBatches = 0;
     std::uint64_t rejectedFrames = 0;
+    std::uint64_t invalidInputFrames = 0;
+    std::uint64_t capacityRejectedFrames = 0;
 };
 
 // The host owns command allocators, back-buffer transitions, render targets,
