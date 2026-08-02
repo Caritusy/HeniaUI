@@ -7,9 +7,10 @@ Frame::Frame() : mCanvas(mDisplayList) {}
 void Frame::reserve(
     std::size_t commandCapacity,
     std::size_t batchCapacity,
-    CapacityPolicy capacityPolicy) {
+    CapacityPolicy capacityPolicy,
+    std::size_t snapshotSlots) {
     mDisplayList.reserve(commandCapacity, capacityPolicy);
-    mPacket.reserve(commandCapacity, batchCapacity, capacityPolicy);
+    mPacketBuilder.reserve(commandCapacity, batchCapacity, capacityPolicy, snapshotSlots);
 }
 
 Canvas& Frame::begin() noexcept {
@@ -19,16 +20,35 @@ Canvas& Frame::begin() noexcept {
     return mCanvas;
 }
 
-const RenderPacket& Frame::finish() {
+RenderPacket Frame::finish() {
+    mLastBuildPublished = false;
     if (mRecording) {
-        static_cast<void>(mCompiler.compile(mDisplayList, mPacket));
         mRecording = false;
+        if (mPacketBuilder.begin()) {
+            static_cast<void>(mCompiler.compile(mDisplayList, mPacketBuilder));
+            mPacket = mPacketBuilder.publish();
+            mLastBuildPublished = true;
+        }
     }
     return mPacket;
 }
 
 const DisplayList& Frame::displayList() const noexcept { return mDisplayList; }
 
-const RenderPacket& Frame::packet() const noexcept { return mPacket; }
+RenderPacket Frame::packet() const noexcept { return mPacket; }
+
+std::size_t Frame::snapshotSlotCount() const noexcept {
+    return mPacketBuilder.snapshotSlotCount();
+}
+
+std::uint64_t Frame::snapshotSlotGrowths() const noexcept {
+    return mPacketBuilder.snapshotSlotGrowths();
+}
+
+std::uint64_t Frame::rejectedFrames() const noexcept {
+    return mPacketBuilder.rejectedBuilds();
+}
+
+bool Frame::lastBuildPublished() const noexcept { return mLastBuildPublished; }
 
 } // namespace henia::ui

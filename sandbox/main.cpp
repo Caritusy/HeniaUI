@@ -35,7 +35,7 @@ int main() {
             2.0F);
     }
 
-    const RenderPacket& packet = frame.finish();
+    const RenderPacket packet = frame.finish();
     const PacketStatistics& stats = packet.statistics();
 
     std::cout << "HeniaUI batching sandbox\n"

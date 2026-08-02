@@ -5,8 +5,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
-#include <vector>
 
 namespace henia::ui {
 
@@ -43,19 +43,23 @@ struct PacketStatistics final {
     std::uint64_t batchCapacityGrowths = 0;
 };
 
+namespace detail {
+
+struct RenderPacketPool;
+struct RenderPacketStorage;
+
+} // namespace detail
+
+// A cheap immutable snapshot handle. Copies may be consumed on other threads
+// after the host publishes the handle with its normal synchronization primitive.
 class RenderPacket final {
 public:
-    RenderPacket() noexcept;
-    RenderPacket(const RenderPacket&) = delete;
-    RenderPacket& operator=(const RenderPacket&) = delete;
-    RenderPacket(RenderPacket&&) = delete;
-    RenderPacket& operator=(RenderPacket&&) = delete;
-
-    void reserve(
-        std::size_t instanceCapacity,
-        std::size_t batchCapacity,
-        CapacityPolicy capacityPolicy = CapacityPolicy::Grow);
-    void clear() noexcept;
+    RenderPacket() noexcept = default;
+    ~RenderPacket();
+    RenderPacket(const RenderPacket& other) noexcept;
+    RenderPacket& operator=(const RenderPacket& other) noexcept;
+    RenderPacket(RenderPacket&& other) noexcept;
+    RenderPacket& operator=(RenderPacket&& other) noexcept;
 
     [[nodiscard]] std::span<const DrawInstance> instances() const noexcept;
     [[nodiscard]] std::span<const DrawBatch> batches() const noexcept;
@@ -65,19 +69,62 @@ public:
     [[nodiscard]] std::size_t instanceCapacity() const noexcept;
     [[nodiscard]] std::size_t batchCapacity() const noexcept;
     [[nodiscard]] CapacityPolicy capacityPolicy() const noexcept;
+    [[nodiscard]] explicit operator bool() const noexcept;
+
+private:
+    friend class RenderPacketBuilder;
+
+    RenderPacket(
+        std::shared_ptr<detail::RenderPacketPool> pool,
+        detail::RenderPacketStorage* storage) noexcept;
+    void retain() noexcept;
+    void release() noexcept;
+
+    std::shared_ptr<detail::RenderPacketPool> mPool;
+    detail::RenderPacketStorage* mStorage = nullptr;
+};
+
+// Single-producer mutable packet builder backed by reusable snapshot slots.
+// begin()/publish() delimit one build. Published storage is never mutated while
+// any RenderPacket handle still refers to it.
+class RenderPacketBuilder final {
+public:
+    static constexpr std::size_t kDefaultSnapshotSlots = 3;
+
+    RenderPacketBuilder();
+    ~RenderPacketBuilder();
+    RenderPacketBuilder(const RenderPacketBuilder&) = delete;
+    RenderPacketBuilder& operator=(const RenderPacketBuilder&) = delete;
+    RenderPacketBuilder(RenderPacketBuilder&&) = delete;
+    RenderPacketBuilder& operator=(RenderPacketBuilder&&) = delete;
+
+    void reserve(
+        std::size_t instanceCapacity,
+        std::size_t batchCapacity,
+        CapacityPolicy capacityPolicy = CapacityPolicy::Grow,
+        std::size_t snapshotSlots = kDefaultSnapshotSlots);
+    [[nodiscard]] bool begin() noexcept;
+    [[nodiscard]] RenderPacket publish() noexcept;
+
+    [[nodiscard]] std::size_t snapshotSlotCount() const noexcept;
+    [[nodiscard]] std::uint64_t snapshotSlotGrowths() const noexcept;
+    [[nodiscard]] std::uint64_t rejectedBuilds() const noexcept;
 
 private:
     friend class BatchCompiler;
 
+    [[nodiscard]] bool active() const noexcept;
+    void clear() noexcept;
+    [[nodiscard]] DrawBatch* lastBatch() noexcept;
+    [[nodiscard]] std::size_t instanceCount() const noexcept;
     [[nodiscard]] bool appendInstance(const DrawInstance& instance) noexcept;
     [[nodiscard]] DrawBatch* appendBatch(const DrawBatch& batch) noexcept;
+    void setSourceCommands(std::size_t count) noexcept;
+    [[nodiscard]] bool rejectPacket() noexcept;
+    void completePacket() noexcept;
 
-    std::vector<DrawInstance> mInstances;
-    std::vector<DrawBatch> mBatches;
-    PacketStatistics mStatistics{};
-    CapacityPolicy mCapacityPolicy = CapacityPolicy::Grow;
-    std::uint64_t mIdentity = 0;
-    std::uint64_t mRevision = 0;
+    std::shared_ptr<detail::RenderPacketPool> mPool;
+    detail::RenderPacketStorage* mStorage = nullptr;
 };
 
 } // namespace henia::ui
