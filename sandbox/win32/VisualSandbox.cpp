@@ -607,8 +607,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     SetWindowLongPtrW(native.window, GWLP_USERDATA, 0);
-    gfxRenderer.shutdown();
-    renderer.shutdown();
+    if (!gfxRenderer.shutdown() || !renderer.shutdown()) {
+        return 9;
+    }
     if (result == 0 && headless) {
         const henia::gfx::OpenGlGfxStatistics statistics = gfxRenderer.statistics();
         if (!uiOnly && (statistics.fullInstanceUploads != 1 || statistics.partialInstanceUploads != 0

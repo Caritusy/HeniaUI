@@ -87,7 +87,34 @@ slot. It never waits or allocates from `record()`.
 
 HeniaUI does not own hooks, windows, OpenGL contexts, swap chains, back buffers, command allocators, resource transitions, queues, or fences.
 
-For OpenGL, the host makes the correct context current and keeps one device instance per resource-sharing context group. The renderer restores mutable GL state that it changes. The host explicitly tells `render()` whether the currently bound framebuffer has a compatible depth attachment; HeniaUI does not guess from deprecated global queries.
+For OpenGL, the host keeps the exact context passed to `initialize()` current for
+every renderer call that can access GL objects. HeniaUI deliberately validates
+the `HGLRC` rather than assuming that another context belongs to the same share
+group, because WGL provides no portable share-group identity query. Calls on a
+different or missing context fail before issuing GL work. `shutdown()` returns
+`false` and preserves the GL objects in that case, so the host can make the owner
+context current and retry. The destructor cannot perform that retry; hosts must
+therefore call and check `shutdown()` before destroying a live renderer.
+
+Each render submission uses a full state-isolation contract. The 2D and 3D
+backends capture and restore the current program (or bind zero when a captured,
+pending-delete program disappears), VAO, array-buffer binding, viewport,
+scissor box, blend enable/factors/equations, depth/cull/stencil enables,
+front/back polygon modes, draw-buffer-zero color mask, framebuffer sRGB,
+rasterizer discard, color logic operation, dither, multisampling, sample-alpha
+controls, and sample coverage. The 2D path additionally isolates texture and
+sampler bindings for texture units 0 through 7. The 3D path additionally
+isolates the depth function, depth write mask, and depth range. Texture
+synchronization isolates the texture binding plus pixel-unpack buffer,
+alignment, and row length. Initialization also preserves the host VAO and
+array-buffer bindings.
+
+OpenGL error flags cannot be restored. Immediately before an isolated render or
+destruction boundary, HeniaUI drains pre-existing host errors, counts them in
+`ignoredHostErrors`, and attributes only later errors to its own work. State
+restoration failures are reported separately. The host explicitly tells
+`render()` whether the currently bound framebuffer has a compatible depth
+attachment; HeniaUI does not guess from deprecated global queries.
 
 Backend `lastError()` storage is fixed and bounded, so reporting an allocation
 failure cannot itself allocate. OpenGL and D3D12 texture/submission bookkeeping
