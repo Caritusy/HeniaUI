@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -42,6 +43,19 @@ enum class GfxClipPosition : std::uint8_t {
     Outside,
     Crossing,
     Inside,
+};
+
+enum class GfxAaKind : std::uint8_t {
+    PerspectiveWidth,
+    Subpixel,
+    Thick,
+    TranslucentCorner,
+};
+
+struct GfxAaCase final {
+    std::string_view name;
+    henia::gfx::BoxInstance box{};
+    GfxAaKind kind = GfxAaKind::PerspectiveWidth;
 };
 
 struct GfxClipFrame final {
@@ -105,6 +119,49 @@ inline constexpr henia::gfx::BoxInstance kGfxCameraCrossingBox = gfxClipBox(
     {0.18F, -0.04F, -0.25F},
     {0.28F, 0.04F, 1.00F});
 
+inline constexpr std::array kGfxAaCases{
+    GfxAaCase{
+        "perspective-width",
+        {
+            .minimum = {-0.30F, -0.35F, 0.65F},
+            .lineWidth = 6.0F,
+            .maximum = {0.35F, 0.40F, 3.50F},
+            .color = {0.95F, 0.10F, 0.08F, 1.0F},
+        },
+        GfxAaKind::PerspectiveWidth,
+    },
+    GfxAaCase{
+        "subpixel",
+        {
+            .minimum = {0.15F, -0.01F, 1.40F},
+            .lineWidth = 0.60F,
+            .maximum = {0.16F, 0.0F, 1.41F},
+            .color = {0.95F, 0.80F, 0.10F, 1.0F},
+        },
+        GfxAaKind::Subpixel,
+    },
+    GfxAaCase{
+        "thick",
+        {
+            .minimum = {-0.65F, -0.40F, 1.40F},
+            .lineWidth = 14.0F,
+            .maximum = {-0.20F, 0.35F, 1.45F},
+            .color = {0.08F, 0.90F, 0.20F, 1.0F},
+        },
+        GfxAaKind::Thick,
+    },
+    GfxAaCase{
+        "translucent-corner",
+        {
+            .minimum = {0.15F, -0.35F, 1.0F},
+            .lineWidth = 8.0F,
+            .maximum = {0.55F, 0.35F, 1.60F},
+            .color = {0.10F, 0.35F, 0.95F, 0.35F},
+        },
+        GfxAaKind::TranslucentCorner,
+    },
+};
+
 [[nodiscard]] inline henia::gfx::ViewParameters gfxClipView(
     henia::gfx::ClipDepthRange depthRange) noexcept {
     constexpr float halfPi = 1.57079632679489661923F;
@@ -123,11 +180,162 @@ inline constexpr henia::gfx::BoxInstance kGfxCameraCrossingBox = gfxClipBox(
     };
 }
 
+[[nodiscard]] inline henia::gfx::ViewParameters gfxAaView() noexcept {
+    constexpr float halfPi = 1.57079632679489661923F;
+    return {
+        .viewProjection = henia::gfx::perspective(halfPi, 1.0F, 0.5F, 6.0F),
+        .viewport = {static_cast<float>(kVisualWidth), static_cast<float>(kVisualHeight)},
+    };
+}
+
 [[nodiscard]] inline henia::gfx::InstanceBatch gfxClipBatch(
     const henia::gfx::BoxInstance& box) {
     henia::gfx::ShapeBatch3D shapes;
     static_cast<void>(shapes.addBox(box));
     return shapes.snapshot();
+}
+
+[[nodiscard]] inline henia::gfx::InstanceBatch gfxAaBatch(const GfxAaCase& value) {
+    return gfxClipBatch(value.box);
+}
+
+struct GfxPixelPoint final {
+    float x = 0.0F;
+    float y = 0.0F;
+};
+
+[[nodiscard]] inline GfxPixelPoint projectGfxPoint(
+    const henia::gfx::Mat4& matrix,
+    henia::gfx::Vec3 point) noexcept {
+    const float clipX = matrix.values[0] * point.x + matrix.values[4] * point.y
+        + matrix.values[8] * point.z + matrix.values[12];
+    const float clipY = matrix.values[1] * point.x + matrix.values[5] * point.y
+        + matrix.values[9] * point.z + matrix.values[13];
+    const float clipW = matrix.values[3] * point.x + matrix.values[7] * point.y
+        + matrix.values[11] * point.z + matrix.values[15];
+    return {
+        (clipX / clipW * 0.5F + 0.5F) * static_cast<float>(kVisualWidth),
+        (0.5F - clipY / clipW * 0.5F) * static_cast<float>(kVisualHeight),
+    };
+}
+
+[[nodiscard]] inline std::uint8_t gfxChannel(Rgba8 pixel, std::uint32_t channel) noexcept {
+    if (channel == 0) return pixel.red;
+    if (channel == 1) return pixel.green;
+    return pixel.blue;
+}
+
+[[nodiscard]] inline std::uint8_t maxGfxChannelNear(
+    std::span<const Rgba8> pixels,
+    GfxPixelPoint point,
+    std::uint32_t channel,
+    int radius = 1) noexcept {
+    std::uint8_t maximum = 0;
+    const int centerX = static_cast<int>(std::lround(point.x));
+    const int centerY = static_cast<int>(std::lround(point.y));
+    for (int y = centerY - radius; y <= centerY + radius; ++y) {
+        for (int x = centerX - radius; x <= centerX + radius; ++x) {
+            if (x < 0 || y < 0 || x >= static_cast<int>(kVisualWidth)
+                || y >= static_cast<int>(kVisualHeight)) {
+                continue;
+            }
+            maximum = std::max(
+                maximum,
+                gfxChannel(
+                    pixels[static_cast<std::size_t>(y) * kVisualWidth
+                        + static_cast<std::size_t>(x)],
+                    channel));
+        }
+    }
+    return maximum;
+}
+
+[[nodiscard]] inline std::size_t gfxProfileWidth(
+    std::span<const Rgba8> pixels,
+    GfxPixelPoint point,
+    GfxPixelPoint normal,
+    std::uint32_t channel,
+    std::uint8_t threshold,
+    int radius) noexcept {
+    std::size_t count = 0;
+    for (int offset = -radius; offset <= radius; ++offset) {
+        const int x = static_cast<int>(std::lround(point.x + normal.x * static_cast<float>(offset)));
+        const int y = static_cast<int>(std::lround(point.y + normal.y * static_cast<float>(offset)));
+        if (x < 0 || y < 0 || x >= static_cast<int>(kVisualWidth)
+            || y >= static_cast<int>(kVisualHeight)) {
+            continue;
+        }
+        const Rgba8 pixel = pixels[static_cast<std::size_t>(y) * kVisualWidth
+            + static_cast<std::size_t>(x)];
+        count += gfxChannel(pixel, channel) > threshold ? 1U : 0U;
+    }
+    return count;
+}
+
+[[nodiscard]] inline bool matchesGfxAaCase(
+    std::span<const Rgba8> pixels,
+    const GfxAaCase& value) noexcept {
+    if (pixels.size() != static_cast<std::size_t>(kVisualWidth) * kVisualHeight) return false;
+    const henia::gfx::ViewParameters view = gfxAaView();
+    if (value.kind == GfxAaKind::PerspectiveWidth) {
+        const GfxPixelPoint start = projectGfxPoint(view.viewProjection, value.box.minimum);
+        const GfxPixelPoint finish = projectGfxPoint(
+            view.viewProjection,
+            {value.box.minimum.x, value.box.minimum.y, value.box.maximum.z});
+        const float dx = finish.x - start.x;
+        const float dy = finish.y - start.y;
+        const float inverseLength = 1.0F / std::sqrt(dx * dx + dy * dy);
+        const GfxPixelPoint normal{-dy * inverseLength, dx * inverseLength};
+        const GfxPixelPoint nearPoint{start.x + dx * 0.30F, start.y + dy * 0.30F};
+        const GfxPixelPoint farPoint{start.x + dx * 0.85F, start.y + dy * 0.85F};
+        const std::size_t nearWidth = gfxProfileWidth(pixels, nearPoint, normal, 0, 24, 6);
+        const std::size_t farWidth = gfxProfileWidth(pixels, farPoint, normal, 0, 24, 6);
+        const std::uint8_t nearCenter = maxGfxChannelNear(pixels, nearPoint, 0, 0);
+        const std::uint8_t farCenter = maxGfxChannelNear(pixels, farPoint, 0, 0);
+        const std::size_t difference = nearWidth > farWidth
+            ? nearWidth - farWidth
+            : farWidth - nearWidth;
+        return nearWidth >= 7 && nearWidth <= 9
+            && farWidth >= 7 && farWidth <= 9 && difference <= 1
+            && nearCenter >= 220 && farCenter >= 220;
+    }
+    if (value.kind == GfxAaKind::Subpixel) {
+        const std::size_t visible = static_cast<std::size_t>(std::count_if(
+            pixels.begin(), pixels.end(), [](Rgba8 pixel) noexcept {
+                return pixel.red > 16 || pixel.green > 16 || pixel.blue > 16;
+            }));
+        const GfxPixelPoint center = projectGfxPoint(
+            view.viewProjection,
+            {
+                (value.box.minimum.x + value.box.maximum.x) * 0.5F,
+                (value.box.minimum.y + value.box.maximum.y) * 0.5F,
+                (value.box.minimum.z + value.box.maximum.z) * 0.5F,
+            });
+        const std::uint8_t red = maxGfxChannelNear(pixels, center, 0, 2);
+        return visible >= 1 && visible <= 24 && red >= 24 && red <= 240;
+    }
+    if (value.kind == GfxAaKind::Thick) {
+        const GfxPixelPoint start = projectGfxPoint(view.viewProjection, value.box.minimum);
+        const GfxPixelPoint finish = projectGfxPoint(
+            view.viewProjection,
+            {value.box.maximum.x, value.box.minimum.y, value.box.minimum.z});
+        const GfxPixelPoint middle{(start.x + finish.x) * 0.5F, (start.y + finish.y) * 0.5F};
+        const std::size_t width = gfxProfileWidth(pixels, middle, {0.0F, 1.0F}, 1, 24, 16);
+        return width >= 13 && width <= 17;
+    }
+    const GfxPixelPoint edgeStart = projectGfxPoint(view.viewProjection, value.box.minimum);
+    const GfxPixelPoint edgeFinish = projectGfxPoint(
+        view.viewProjection,
+        {value.box.maximum.x, value.box.minimum.y, value.box.minimum.z});
+    const GfxPixelPoint edgeMiddle{
+        (edgeStart.x + edgeFinish.x) * 0.5F,
+        (edgeStart.y + edgeFinish.y) * 0.5F,
+    };
+    const std::uint8_t edgeBlue = maxGfxChannelNear(pixels, edgeMiddle, 2, 1);
+    const std::uint8_t cornerBlue = maxGfxChannelNear(pixels, edgeFinish, 2, 1);
+    return edgeBlue >= 48 && edgeBlue <= 110
+        && cornerBlue >= 96 && cornerBlue <= 210
+        && cornerBlue >= static_cast<std::uint8_t>(edgeBlue + 24U);
 }
 
 [[nodiscard]] inline std::size_t visibleGfxPixelCount(

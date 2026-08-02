@@ -226,6 +226,25 @@ edge that crosses the camera or any frustum plane instead of discarding the
 whole edge or dividing by a near-zero value. OpenGL and D3D12 then perform only
 their API-specific depth-range conversion on the already clipped endpoint.
 
+After clipping, both shaders express each edge in pixel-space `along` and
+`across` coordinates. Those varyings use `noperspective` interpolation; segment
+length, requested half-width, color, and effects are flat. The quad extends
+1.25 pixels beyond both endpoints and both sides, while the fragment shader
+evaluates the signed distance to the requested screen-space rectangle. This
+keeps width and the AA transition constant when endpoint clip-space `w` values
+differ, and preserves the fringe of a butt cap instead of clipping it at the
+endpoint.
+
+The 3D cap/join policy is deliberately simple: every one of the twelve box
+edges has an analytic butt cap, and a box corner is the deterministic
+source-over overlap of its incident premultiplied edges rather than a generated
+3D miter or round join. Opaque corners remain visually uniform. Translucent
+corners are darker than an isolated edge because source-over coverage is
+accumulated; normalizing that overlap would require joined topology or an
+intermediate coverage target and is not hidden behind incorrect blend factors.
+Shared OpenGL/D3D12 golden probes lock the overlap range, cap fringe, subpixel
+coverage, thick width, and near-to-far width constancy.
+
 The OpenGL backends allocate a configurable ring of complete instance buffers
 during initialization and never call `glBufferData` from the render path. Every
 drawn slot receives a `glFenceSync`. Before any later CPU write, the renderer
@@ -243,10 +262,12 @@ not map/copy the bounding interval between them. Otherwise the renderer performs
 a full page-by-page upload and increments `fullUploadFallbacks`. Statistics also
 expose uploaded bytes, slot exhaustion, and fence failures.
 
-The D3D12 backend permanently maps one upload buffer per fence-owned submission
-slot. `record()` copies full pages or the exact dirty ranges into that buffer; it
-never waits or allocates. Both 3D backends validate and traverse the segmented
-pages in place rather than materializing a contiguous CPU vector.
+The D3D12 backend permanently maps one staging buffer per fence-owned submission
+slot. Depending on the configured/automatic instance-storage strategy,
+`record()` either binds it directly or copies full pages/exact dirty ranges to
+the slot's GPU-local default buffer. It never waits or allocates. Both 3D
+backends validate and traverse the segmented pages in place rather than
+materializing a contiguous CPU vector.
 
 ## Host ownership
 
