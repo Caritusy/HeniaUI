@@ -141,7 +141,11 @@ subtree and segment totals are observable through `UiDocumentStatistics`.
 `Panel`, `Label`, `Button`, and `NumericInput` use direct
 context/function-pointer callbacks and platform-neutral input events. The Win32
 adapter translates an existing host `WndProc` message stream without
-subclassing or owning the window.
+subclassing or owning the window. It owns native mouse capture only for handled
+pointer sequences, releases it after the last pressed button, and translates
+capture loss into pointer cancellation. Hosts should forward capture, cancel,
+focus-loss, and destruction messages as described in
+[docs/architecture.md](docs/architecture.md#win32-input-and-message-ownership).
 
 Widget interaction uses stable identities. Root replacement, child removal, and
 reparenting requested by callbacks are deferred until the outer dispatch ends;

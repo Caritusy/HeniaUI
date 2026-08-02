@@ -42,7 +42,12 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wordParameter
         DestroyWindow(window);
         return 0;
     }
+    auto* input = reinterpret_cast<Win32InputAdapter*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_DESTROY) {
+        if (input != nullptr) {
+            static_cast<void>(input->handleMessage(window, message, wordParameter, longParameter));
+            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+        }
         PostQuitMessage(0);
         return 0;
     }
@@ -50,7 +55,6 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wordParameter
         DestroyWindow(window);
         return 0;
     }
-    auto* input = reinterpret_cast<Win32InputAdapter*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     if (input != nullptr && input->handleMessage(window, message, wordParameter, longParameter)) {
         return 0;
     }
@@ -168,6 +172,24 @@ struct NativeWindow final {
         UpdateWindow(window);
         return true;
     }
+};
+
+struct WindowInputAttachment final {
+    WindowInputAttachment(HWND windowValue, Win32InputAdapter& input) noexcept
+        : window(windowValue) {
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&input));
+    }
+
+    ~WindowInputAttachment() {
+        if (window != nullptr && IsWindow(window)) {
+            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+        }
+    }
+
+    WindowInputAttachment(const WindowInputAttachment&) = delete;
+    WindowInputAttachment& operator=(const WindowInputAttachment&) = delete;
+
+    HWND window = nullptr;
 };
 
 [[maybe_unused]] void drawInterface(
@@ -458,7 +480,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     document.reserve(4096, 128);
     document.setRoot(createOverlay(font, controls));
     Win32InputAdapter input(document);
-    SetWindowLongPtrW(native.window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&input));
+    [[maybe_unused]] WindowInputAttachment inputAttachment(native.window, input);
 
     OpenGlRenderer renderer;
     henia::gfx::ShapeBatch3D boxBuilder;
@@ -606,7 +628,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
     }
 
-    SetWindowLongPtrW(native.window, GWLP_USERDATA, 0);
     if (!gfxRenderer.shutdown() || !renderer.shutdown()) {
         return 9;
     }
