@@ -45,6 +45,23 @@ overflow publishes no partial packet and is reported in `PacketStatistics`.
 Grow mode may expand retained vectors, but allocation failure is converted into
 the same rejection path rather than escaping a `noexcept` boundary.
 
+### Compact 2D draw payloads
+
+The retained and compiled streams keep paint order in one contiguous sequence,
+but each entry now carries only two four-float payload rectangles. A regular
+rectangle uses them as geometry and UV data, a line uses them as ordered
+endpoints and neighbours, and a stroke uses them as a tight raster region and
+its original logical rectangle. This tagged reuse removes the separate line
+endpoint pair without introducing per-kind streams, indirection, or additional
+draw calls.
+
+`DrawInstance` keeps the full four-float color and two float metrics so HDR and
+additive colors do not lose precision. Its final four bytes contain primitive
+kind, the eight-entry batch texture slot, cap, and packed join/adjacency bits.
+OpenGL and D3D12 both consume the same 60-byte, four-byte-aligned layout through
+five vertex attributes. Header and backend `static_assert`s lock its size,
+offsets, standard-layout property, and shader input compatibility.
+
 ### Analytic 2D geometry
 
 Analytic shape instances keep logical SDF bounds separate from raster geometry.

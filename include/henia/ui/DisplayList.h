@@ -42,10 +42,11 @@ struct DrawCommand final {
     BlendMode blend     = BlendMode::PremultipliedAlpha;
     ClipRect clip{};
     TextureHandle texture{};
+    // For lines, bounds.min/bounds.max are the ordered segment endpoints and
+    // uv.min/uv.max are the optional previous/next neighbours. Other
+    // primitives keep the conventional rectangle and texture-UV meanings.
     Rect bounds{};
     Rect uv{{0.0F, 0.0F}, {1.0F, 1.0F}};
-    Vec2 pointA{};
-    Vec2 pointB{};
     Color color{};
     float radius    = 0.0F;
     float thickness = 0.0F;
@@ -53,6 +54,8 @@ struct DrawCommand final {
     LineJoin lineJoin = LineJoin::Round;
     std::uint8_t lineFlags = 0;
 };
+
+static_assert(sizeof(DrawCommand) == 88, "DrawCommand layout is part of the retained-memory budget");
 
 // A stable, independently revisioned slice of retained paint output. Segment
 // order is the document's global paint order; commands never borrow state from

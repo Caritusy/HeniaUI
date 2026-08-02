@@ -69,8 +69,10 @@ namespace henia::ui {
     if (static_cast<std::uint8_t>(command.blend) > static_cast<std::uint8_t>(BlendMode::Additive)) {
         return "blend";
     }
-    if (const std::string_view issue = validateRect(command.bounds, "bounds"); !issue.empty()) {
-        return issue;
+    if (command.kind != PrimitiveKind::Line) {
+        if (const std::string_view issue = validateRect(command.bounds, "bounds"); !issue.empty()) {
+            return issue;
+        }
     }
     if (const std::string_view issue = validateColor(command.color); !issue.empty()) return issue;
     if (!std::isfinite(command.radius) || command.radius < 0.0F) return "radius";
@@ -95,22 +97,22 @@ namespace henia::ui {
             return start != finish && std::isfinite(length)
                 && length <= static_cast<double>(std::numeric_limits<float>::max());
         };
-        if (!std::isfinite(command.pointA.x)) return "pointA.x";
-        if (!std::isfinite(command.pointA.y)) return "pointA.y";
-        if (!std::isfinite(command.pointB.x)) return "pointB.x";
-        if (!std::isfinite(command.pointB.y)) return "pointB.y";
-        if (!validSegment(command.pointA, command.pointB) || command.thickness <= 0.0F) {
+        if (!std::isfinite(command.bounds.min.x)) return "pointA.x";
+        if (!std::isfinite(command.bounds.min.y)) return "pointA.y";
+        if (!std::isfinite(command.bounds.max.x)) return "pointB.x";
+        if (!std::isfinite(command.bounds.max.y)) return "pointB.y";
+        if (!validSegment(command.bounds.min, command.bounds.max) || command.thickness <= 0.0F) {
             return "line.geometry";
         }
         if ((command.lineFlags & kLineHasPrevious) != 0) {
             if (!std::isfinite(command.uv.min.x)) return "line.previous.x";
             if (!std::isfinite(command.uv.min.y)) return "line.previous.y";
-            if (!validSegment(command.uv.min, command.pointA)) return "line.previous";
+            if (!validSegment(command.uv.min, command.bounds.min)) return "line.previous";
         }
         if ((command.lineFlags & kLineHasNext) != 0) {
             if (!std::isfinite(command.uv.max.x)) return "line.next.x";
             if (!std::isfinite(command.uv.max.y)) return "line.next.y";
-            if (!validSegment(command.pointB, command.uv.max)) return "line.next";
+            if (!validSegment(command.bounds.max, command.uv.max)) return "line.next";
         }
     }
     if (command.kind == PrimitiveKind::Image || command.kind == PrimitiveKind::Glyph) {
