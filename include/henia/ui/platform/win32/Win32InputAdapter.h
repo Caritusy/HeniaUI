@@ -11,6 +11,8 @@
 #include <Windows.h>
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 namespace henia::ui {
 
@@ -23,8 +25,9 @@ public:
 
     // Returns true only when translated input was handled, a UTF-16 high
     // surrogate was buffered, or WM_UNICHAR queried Unicode support. Capture,
-    // focus, cancellation, and destruction notifications are observed and
-    // return false so the host can continue its normal window processing.
+    // IME composition is dispatched synchronously as UTF-8 start/update/
+    // commit/cancel events. Focus, cancellation, and destruction notifications
+    // are observed and return false so the host can continue normal processing.
     [[nodiscard]] bool handleMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
 
 private:
@@ -35,12 +38,20 @@ private:
     [[nodiscard]] InputEvent makeKeyEvent(InputEventKind kind, WPARAM wParam, LPARAM lParam) const noexcept;
     [[nodiscard]] bool handleUtf16Unit(char16_t unit);
     [[nodiscard]] bool handleUnicodeScalar(std::uint64_t value);
+    [[nodiscard]] bool handleImeComposition(HWND window, LPARAM flags);
+    [[nodiscard]] bool dispatchComposition(
+        InputEventKind kind,
+        std::string_view text = {},
+        std::size_t selectionStart = 0,
+        std::size_t selectionLength = 0);
+    void cancelComposition();
     [[nodiscard]] bool dispatchText(char32_t value);
     [[nodiscard]] bool acquireNativeCapture(HWND window) noexcept;
     void releaseNativeCapture() noexcept;
     void cancelInteraction(bool loseFocus);
     [[nodiscard]] static PressedButtonMask buttonMask(UINT message) noexcept;
     [[nodiscard]] static bool validUnicodeScalar(std::uint64_t value) noexcept;
+    [[nodiscard]] static std::string utf8FromUtf16(std::u16string_view text);
     [[nodiscard]] static KeyCode translateKey(WPARAM key) noexcept;
     static void addModifiers(InputEvent& event) noexcept;
 
@@ -48,6 +59,9 @@ private:
     HWND mCaptureWindow = nullptr;
     PressedButtonMask mPressedButtons = 0;
     char16_t mHighSurrogate = u'\0';
+    std::u16string mCommittedImeUnits;
+    std::size_t mCommittedImeOffset = 0;
+    bool mImeActive = false;
     bool mReleasingNativeCapture = false;
 };
 

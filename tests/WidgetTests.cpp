@@ -6,6 +6,7 @@
 #include "henia/ui/widget/controls/Label.h"
 #include "henia/ui/widget/controls/NumericInput.h"
 #include "henia/ui/widget/controls/Panel.h"
+#include "henia/ui/widget/controls/TextInput.h"
 
 #include <array>
 #include <cstdlib>
@@ -36,6 +37,15 @@ struct ValueRecorder final {
         ++calls;
     }
     double value = 0.0;
+    int calls = 0;
+};
+
+struct TextRecorder final {
+    void changed(std::string_view next) {
+        value.assign(next);
+        ++calls;
+    }
+    std::string value;
     int calls = 0;
 };
 
@@ -88,6 +98,7 @@ struct RemoveOnValueChange final {
 
 static_assert(!noexcept(std::declval<Button&>().handleInput(std::declval<const InputEvent&>())));
 static_assert(!noexcept(std::declval<NumericInput&>().handleInput(std::declval<const InputEvent&>())));
+static_assert(!noexcept(std::declval<TextInput&>().handleInput(std::declval<const InputEvent&>())));
 static_assert(!noexcept(std::declval<UiDocument&>().dispatch(std::declval<const InputEvent&>())));
 static_assert(!noexcept(std::declval<Widget&>().setVisible(false)));
 static_assert(!noexcept(std::declval<Widget&>().setEnabled(false)));
@@ -512,6 +523,87 @@ void verifyInteractionCapabilities(TextPainter& painter, FontHandle font) {
     }
 }
 
+void verifyEditorGradeTextInput(TextPainter& painter, FontHandle font) {
+    UiDocument document(painter);
+    document.reserve(256, 16, CapacityPolicy::Fixed);
+    document.setViewport({300.0F, 80.0F});
+    auto root = std::make_unique<Panel>();
+    TextInput& input = root->emplaceChild<TextInput>(
+        "seed",
+        TextInputStyle{.font = font, .controlWidth = 260.0F});
+    MemoryTextClipboard clipboard;
+    input.setClipboard(&clipboard);
+    TextRecorder recorder;
+    input.setOnTextChanged(
+        Callback<std::string_view>::bind<TextRecorder, &TextRecorder::changed>(recorder));
+    document.setRoot(std::move(root));
+    static_cast<void>(document.compose());
+    click(document, rectCenter(input.frame()));
+
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::A,
+        .control = true,
+    }));
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::TextInput,
+        .textUtf8 = "\xE4\xB8\xAD",
+    }));
+    if (input.text() != "\xE4\xB8\xAD" || recorder.calls != 1) {
+        fail("TextInput did not replace a UTF-8 selection or invoke its callback");
+    }
+
+    static_cast<void>(document.dispatch({.kind = InputEventKind::CompositionStart}));
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::CompositionUpdate,
+        .textUtf8 = "\xE3\x81\x82",
+        .compositionSelectionStart = 3,
+    }));
+    if (input.text() != "\xE4\xB8\xAD" || recorder.calls != 1
+        || !input.editor().composition().active) {
+        fail("TextInput IME preedit changed committed storage");
+    }
+    const RenderPacket composing = document.compose();
+    if (composing.instances().empty()) {
+        fail("TextInput IME composition did not produce retained paint output");
+    }
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::CompositionCommit,
+        .textUtf8 = "\xE3\x81\x82",
+    }));
+    if (input.text() != "\xE4\xB8\xAD\xE3\x81\x82" || recorder.calls != 2) {
+        fail("TextInput IME commit was not applied as one edit");
+    }
+
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::A,
+        .control = true,
+    }));
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::C,
+        .control = true,
+    }));
+    static_cast<void>(document.dispatch({.kind = InputEventKind::KeyDown, .key = KeyCode::End}));
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::V,
+        .control = true,
+    }));
+    if (input.text() != "\xE4\xB8\xAD\xE3\x81\x82\xE4\xB8\xAD\xE3\x81\x82") {
+        fail("TextInput clipboard copy/paste lost multilingual UTF-8 text");
+    }
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::Z,
+        .control = true,
+    }));
+    if (input.text() != "\xE4\xB8\xAD\xE3\x81\x82") {
+        fail("TextInput Ctrl+Z did not restore the previous committed text");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -527,6 +619,7 @@ int main() {
     TextPainter painter(cache);
     verifyConstraintSensitiveLayout(painter);
     verifyInteractionCapabilities(painter, font);
+    verifyEditorGradeTextInput(painter, font);
     UiDocument document(painter);
     document.reserve(512, 32);
     document.setViewport({320.0F, 200.0F});

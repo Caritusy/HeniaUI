@@ -4,7 +4,7 @@ HeniaUI is a compact retained UI and rendering engine for native C++ application
 
 The project is intentionally independent from ImGui and from any host application's hook, SDK, runtime, or input implementation. A host can embed the library with `add_subdirectory`, consume an installed CMake package, or build the included standalone sandbox.
 
-> Status: usable foundation. The public API includes retained widgets, UTF-8 text, native Win32 input/font adapters, native OpenGL 3.3 and Direct3D 12 UI renderers, plus a separate `henia::gfx` instance path for large 3D box fields.
+> Status: usable foundation. The public API includes retained widgets, fallback/optionally-shaped UTF-8 text, editor-grade input, native Win32 input/font/IME adapters, native OpenGL 3.3 and Direct3D 12 UI renderers, plus a separate `henia::gfx` instance path for large 3D box fields.
 
 ## Why another UI renderer?
 
@@ -166,13 +166,13 @@ target_link_libraries(MyApplication PRIVATE
 leaf rebuilds only its affected branch; unrelated sibling `onPaint()` output and
 compiled segment data are reused in depth-first draw order. Rebuilt/reused
 subtree and segment totals are observable through `UiDocumentStatistics`.
-`Panel`, `Label`, `Button`, and `NumericInput` use direct
+`Panel`, `Label`, `Button`, `NumericInput`, and `TextInput` use direct
 context/function-pointer callbacks and platform-neutral input events. The Win32
 adapter translates an existing host `WndProc` message stream without
 subclassing or owning the window. It owns native mouse capture only for handled
 pointer sequences, releases it after the last pressed button, and translates
 capture loss into pointer cancellation. Hosts should forward capture, cancel,
-focus-loss, and destruction messages as described in
+focus-loss, IME composition, and destruction messages as described in
 [docs/architecture.md](docs/architecture.md#win32-input-and-message-ownership).
 
 Widget interaction uses stable identities. Root replacement, child removal, and
@@ -187,6 +187,40 @@ message boundary should catch there. HeniaUI does not convert a throwing callbac
 into process termination.
 
 The numeric control reserves fixed, separately centered decrement/value/increment regions, supports direct typing, wheel and key stepping, range clamping and precision, and does not depend on a debug UI library.
+
+## Multilingual text and editing
+
+The default text path remains strict UTF-8 codepoint lookup plus kerning and has
+no external dependency. Ordered fallback chains can mix atlas textures inside
+the existing batch table. Hosts that need Arabic, Indic, bidirectional, or
+other complex shaping implement the small `TextShapingBackend` interface (for
+example with HarfBuzz); minimal ASCII builds do not link that backend.
+
+Layout and rendering are cached independently. Layout entries retain clusters,
+caret stops, hit testing, and selection geometry, while render entries resolve
+current atlas pages and UVs. `DynamicGlyphAtlas` adds rasterized glyphs through
+stable fixed-size pages, and the optional Win32 loader can rasterize additional
+GDI glyphs on demand.
+
+```cpp
+#include <henia/ui/text/TextEditor.h>
+#include <henia/ui/widget/controls/TextInput.h>
+
+henia::ui::MemoryTextClipboard clipboard;
+henia::ui::TextInput input("配置", {
+    .font = latinFont,
+    .fallbackFonts = {cjkFont},
+    .multiline = true,
+});
+input.setClipboard(&clipboard);
+```
+
+`TextEditorState` keeps committed UTF-8 separate from IME preedit text and
+supports codepoint-safe cursor movement, selection, copy/cut/paste, and bounded
+undo/redo. `TextInput` paints selection, caret, and composition underline and
+handles the corresponding platform-neutral events. `Win32InputAdapter`
+translates the native IME lifecycle and UTF-16 composition caret to these
+events; `Win32Clipboard` provides an optional `CF_UNICODETEXT` bridge.
 
 ## 3D instance path
 

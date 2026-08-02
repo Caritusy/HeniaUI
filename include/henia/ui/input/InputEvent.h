@@ -2,7 +2,9 @@
 
 #include "henia/ui/Types.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace henia::ui {
 
@@ -14,6 +16,10 @@ enum class InputEventKind : std::uint8_t {
     KeyDown,
     KeyUp,
     TextInput,
+    CompositionStart,
+    CompositionUpdate,
+    CompositionCommit,
+    CompositionCancel,
     FocusLost,
     PointerCancel,
 };
@@ -38,6 +44,12 @@ enum class KeyCode : std::uint16_t {
     Enter,
     Escape,
     Tab,
+    A,
+    C,
+    V,
+    X,
+    Y,
+    Z,
 };
 
 struct InputEvent final {
@@ -48,6 +60,11 @@ struct InputEvent final {
     float scrollY = 0.0F;
     KeyCode key = KeyCode::Unknown;
     char32_t text = U'\0';
+    // Synchronous UTF-8 payload for committed multi-codepoint input or IME
+    // preedit text. The adapter-owned view is valid only during dispatch.
+    std::string_view textUtf8{};
+    std::size_t compositionSelectionStart = 0;
+    std::size_t compositionSelectionLength = 0;
     bool repeated = false;
     bool shift = false;
     bool control = false;

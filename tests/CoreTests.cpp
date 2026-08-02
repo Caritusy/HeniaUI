@@ -5,7 +5,9 @@
 #include "henia/ui/Validation.h"
 #include "henia/ui/backend/opengl/OpenGlRenderer.h"
 #include "henia/ui/resource/TextureStore.h"
+#include "henia/ui/text/DynamicGlyphAtlas.h"
 #include "henia/ui/text/FontStore.h"
+#include "henia/ui/text/TextEditor.h"
 #include "henia/ui/text/TextLayout.h"
 #include "henia/ui/text/Utf8.h"
 
@@ -758,6 +760,199 @@ void testTextRunsAreCachedAndBatched() {
     require(packet.batches().size() == 1, "text and shape did not share one batch");
 }
 
+class ComplexScriptShaper final : public TextShapingBackend {
+public:
+    [[nodiscard]] bool shape(
+        const TextShapingRequest& request,
+        std::vector<TextShapingGlyph>& output) const override {
+        if (request.fontChain.empty() || request.text.empty()) return false;
+        output.push_back({
+            .font = request.fontChain.front(),
+            .glyphId = 99,
+            .byteBegin = request.textByteOffset,
+            .byteEnd = request.textByteOffset + request.text.size(),
+            .advance = 12.0F,
+        });
+        return true;
+    }
+};
+
+void testFallbackShapingAndDynamicGlyphPages() {
+    TextureStore textures;
+    const std::array<std::byte, 16> empty{};
+    const TextureHandle latinAtlas = textures.create(TextureFormat::Alpha8, 4, 4, 4, empty);
+    const TextureHandle fallbackAtlas = textures.create(TextureFormat::Alpha8, 4, 4, 4, empty);
+    require(latinAtlas.valid() && fallbackAtlas.valid(), "multilingual atlases were not created");
+
+    FontStore fonts;
+    const FontHandle latin = fonts.add({
+        .atlas = latinAtlas,
+        .pixelSize = 10.0F,
+        .ascent = 8.0F,
+        .descent = 2.0F,
+        .glyphs = {
+            {U'?', {{0.0F, 0.0F}, {0.25F, 0.25F}}, {5.0F, 8.0F}, {0.0F, 7.0F}, 6.0F},
+            {U'A', {{0.25F, 0.0F}, {0.5F, 0.25F}}, {6.0F, 8.0F}, {0.0F, 7.0F}, 7.0F},
+            GlyphMetrics{
+                .codepoint = U'\uE000',
+                .uv = {{0.5F, 0.0F}, {0.75F, 0.25F}},
+                .size = {9.0F, 9.0F},
+                .bearing = {0.0F, 8.0F},
+                .advance = 12.0F,
+                .glyphId = 99,
+            },
+        },
+    });
+    const FontHandle cjk = fonts.add({
+        .atlas = fallbackAtlas,
+        .pixelSize = 10.0F,
+        .ascent = 8.0F,
+        .descent = 2.0F,
+        .glyphs = {
+            {U'\u4E2D', {{0.0F, 0.0F}, {0.5F, 0.5F}}, {9.0F, 9.0F}, {0.0F, 8.0F}, 10.0F},
+        },
+    });
+    require(latin.valid() && cjk.valid(), "fallback test fonts were not created");
+    const std::array chain{latin, cjk};
+    TextRunCache cache(fonts);
+    TextPainter painter(cache);
+    const std::string mixed = "A\xE4\xB8\xAD";
+    const TextLayoutResult* mixedLayout = painter.layout(chain, 10.0F, mixed);
+    require(mixedLayout != nullptr && mixedLayout->glyphs.size() == 2
+            && mixedLayout->glyphs[0].font == latin
+            && mixedLayout->glyphs[1].font == cjk
+            && mixedLayout->metrics.width == 17.0F,
+        "CJK fallback chain did not select faces or preserve metrics");
+    require(cache.layoutCache().size() == 1 && cache.renderCache().size() == 0,
+        "layout cache populated atlas-dependent render data eagerly");
+    Frame mixedFrame;
+    mixedFrame.reserve(4, 2);
+    painter.drawLayout(mixedFrame.begin(), *mixedLayout, {}, {});
+    const RenderPacket mixedPacket = mixedFrame.finish();
+    require(mixedPacket.instances().size() == 2 && mixedPacket.batches().size() == 1
+            && mixedPacket.batches()[0].textureCount == 2,
+        "fallback atlas changes did not preserve texture-table batching");
+    require(cache.renderCache().size() == 1,
+        "render cache did not remain independent from shaped layout storage");
+    const bool mixedSelectionAvailable = !TextPainter::selectionRects(*mixedLayout, 1, 4).empty();
+    const TextLayoutResult* multiline = painter.layout(chain, 10.0F, "A\n\xE4\xB8\xAD");
+    require(multiline != nullptr && multiline->metrics.height == 20.0F
+            && TextPainter::hitTest(*multiline, {1.0F, 15.0F}) == 2
+            && TextPainter::caretPosition(*multiline, 5).y == 10.0F
+            && mixedSelectionAvailable,
+        "cluster-aware multiline caret, hit testing, or selection geometry failed");
+
+    ComplexScriptShaper shaper;
+    TextRunCache shapedCache(fonts, &shaper);
+    TextPainter shapedPainter(shapedCache);
+    const std::array latinOnly{latin};
+    const std::string conjunct = "\xE0\xA4\x95\xE0\xA5\x8D\xE0\xA4\xB7";
+    const TextLayoutResult* shaped = shapedPainter.layout(latinOnly, 10.0F, conjunct);
+    require(shaped != nullptr && shaped->glyphs.size() == 1
+            && shaped->glyphs[0].glyphId == 99
+            && shaped->glyphs[0].byteBegin == 0
+            && shaped->glyphs[0].byteEnd == conjunct.size()
+            && shaped->metrics.width == 12.0F,
+        "optional complex-script shaper did not publish one ligature cluster");
+
+    const std::array dynamicChain{latin};
+    const TextLayoutResult* beforeDynamic = painter.layout(
+        dynamicChain, 10.0F, "\xE4\xB8\xAD");
+    require(beforeDynamic != nullptr && beforeDynamic->glyphs.size() == 1
+            && beforeDynamic->glyphs[0].codepoint == U'?',
+        "single-face missing glyph did not use the lightweight replacement path");
+    const std::uint64_t layoutIdentityBeforeDynamic = beforeDynamic->identity;
+    DynamicGlyphAtlas dynamic(textures, fonts, latin, {
+        .pageWidth = 4,
+        .pageHeight = 4,
+        .padding = 0,
+        .maximumPages = 2,
+    });
+    const std::array<std::byte, 4> cjkPixels{
+        std::byte{0xFF}, std::byte{0xC0}, std::byte{0xC0}, std::byte{0xFF}};
+    const std::uint64_t revisionBefore = fonts.find(latin)->revision();
+    require(dynamic.add({
+            .codepoint = U'\u4E2D',
+            .width = 2,
+            .height = 2,
+            .rowPitch = 2,
+            .bearing = {0.0F, 2.0F},
+            .advance = 2.0F,
+            .pixels = cjkPixels,
+        }),
+        "dynamic CJK glyph insertion failed");
+    require(cache.renderLayout(*beforeDynamic) == nullptr,
+        "a stale layout resolved new atlas data after its face revision changed");
+    const std::array<std::byte, 9> kanaPixels{
+        std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF},
+        std::byte{0xFF}, std::byte{0x80}, std::byte{0xFF},
+        std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
+    require(dynamic.add({
+            .codepoint = U'\u3042',
+            .width = 3,
+            .height = 3,
+            .rowPitch = 3,
+            .bearing = {0.0F, 3.0F},
+            .advance = 3.0F,
+            .pixels = kanaPixels,
+        }),
+        "dynamic atlas did not grow to a stable second page");
+    require(dynamic.add({
+            .codepoint = U'\u3000',
+            .advance = 4.0F,
+        }),
+        "dynamic atlas rejected an advance-only CJK space glyph");
+    const DynamicGlyphAtlasStatistics atlasStatistics = dynamic.statistics();
+    const GlyphMetrics* ideographicSpace = fonts.find(latin)->glyph(U'\u3000');
+    require(fonts.find(latin)->revision() == revisionBefore + 3
+            && atlasStatistics.pages == 2 && atlasStatistics.glyphsAdded == 3
+            && atlasStatistics.uploadedBytes == 13,
+        "dynamic atlas revisions or page statistics are incorrect");
+    require(ideographicSpace != nullptr && ideographicSpace->size == Vec2{}
+            && fonts.find(latin)->atlasFor(*ideographicSpace) == fonts.find(latin)->atlas(),
+        "advance-only glyph did not retain the face atlas without allocating a page");
+    const TextLayoutResult* dynamicLayout = painter.layout(dynamicChain, 10.0F, "\xE4\xB8\xAD");
+    const GlyphMetrics* dynamicGlyph = fonts.find(latin)->glyph(U'\u4E2D');
+    require(dynamicLayout != nullptr && dynamicLayout->glyphs.size() == 1
+            && dynamicLayout->identity != layoutIdentityBeforeDynamic
+            && dynamicLayout->glyphs[0].codepoint == U'\u4E2D'
+            && dynamicGlyph != nullptr
+            && fonts.find(latin)->atlasFor(*dynamicGlyph) == dynamic.pages()[0],
+        "font revision did not invalidate fallback layout for a new atlas glyph");
+}
+
+void testUtf8EditorCompositionClipboardAndHistory() {
+    TextEditorState editor("A\xE4\xB8\xAD");
+    require(editor.selection().caret == 4 && editor.moveLeft()
+            && editor.selection().caret == 1,
+        "UTF-8 cursor movement split a CJK codepoint");
+    require(editor.setSelection(1, 4) && editor.selectedText() == "\xE4\xB8\xAD",
+        "UTF-8 selection did not preserve byte boundaries");
+    MemoryTextClipboard clipboard;
+    require(editor.copy(clipboard) && editor.cut(clipboard) && editor.text() == "A"
+            && editor.paste(clipboard) && editor.text() == "A\xE4\xB8\xAD",
+        "copy/cut/paste did not preserve UTF-8 text");
+    require(editor.undo() && editor.text() == "A" && editor.redo()
+            && editor.text() == "A\xE4\xB8\xAD",
+        "UTF-8 editor undo/redo history is incorrect");
+
+    editor.setText("abc");
+    require(editor.setSelection(1, 2) && editor.beginComposition()
+            && editor.updateComposition("\xE4\xB8\xAD\xE6\x96\x87", 3)
+            && editor.text() == "abc"
+            && editor.displayText() == "a\xE4\xB8\xAD\xE6\x96\x87" "c"
+            && editor.displayCaret() == 4,
+        "IME preedit mutated committed text or lost its UTF-8 caret");
+    require(editor.commitComposition("\xE4\xB8\xAD\xE6\x96\x87")
+            && editor.text() == "a\xE4\xB8\xAD\xE6\x96\x87" "c"
+            && editor.undo() && editor.text() == "abc",
+        "IME commit was not one undoable editor transaction");
+    require(editor.beginComposition()
+            && editor.updateComposition("\xE3\x81\x82", 3)
+            && editor.cancelComposition() && editor.text() == "abc",
+        "IME cancellation changed committed UTF-8 storage");
+}
+
 void testResourceLifetimeAndTextureBackingPolicies() {
     TextureStore textures;
     std::array<std::byte, 64> rgba{};
@@ -909,6 +1104,8 @@ int main() {
     testPacketSnapshotsSupportConcurrentConsumption();
     testUtf8Validation();
     testTextRunsAreCachedAndBatched();
+    testFallbackShapingAndDynamicGlyphPages();
+    testUtf8EditorCompositionClipboardAndHistory();
     testResourceLifetimeAndTextureBackingPolicies();
     std::cout << "HeniaUI core tests passed\n";
     return EXIT_SUCCESS;

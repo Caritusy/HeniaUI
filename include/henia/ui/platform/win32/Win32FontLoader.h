@@ -1,6 +1,7 @@
 #pragma once
 
 #include "henia/ui/resource/TextureStore.h"
+#include "henia/ui/text/DynamicGlyphAtlas.h"
 #include "henia/ui/text/FontStore.h"
 
 #include <cstdint>
@@ -28,6 +29,12 @@ public:
         TextureStore& textures,
         FontStore& fonts,
         const Win32FontRequest& request);
+    // Rasterizes additional BMP glyphs into stable DynamicGlyphAtlas pages.
+    // Existing packet UVs remain valid because pages never resize.
+    [[nodiscard]] static bool appendGlyphs(
+        DynamicGlyphAtlas& atlas,
+        const Win32FontRequest& request,
+        std::span<const char32_t> codepoints);
 };
 
 } // namespace henia::ui

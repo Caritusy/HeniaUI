@@ -85,7 +85,9 @@ add_library(HeniaUI STATIC
     src/Frame.cpp
     src/RenderPacket.cpp
     src/resource/TextureStore.cpp
+    src/text/DynamicGlyphAtlas.cpp
     src/text/FontStore.cpp
+    src/text/TextEditor.cpp
     src/text/TextLayout.cpp
     src/text/Utf8.cpp
     src/widget/UiDocument.cpp
@@ -94,6 +96,7 @@ add_library(HeniaUI STATIC
     src/widget/controls/Label.cpp
     src/widget/controls/NumericInput.cpp
     src/widget/controls/Panel.cpp
+    src/widget/controls/TextInput.cpp
 )
 add_library(HeniaUI::Core ALIAS HeniaUI)
 
@@ -147,6 +150,7 @@ set_target_properties(HeniaUIGfx PROPERTIES
 
 if(WIN32)
     add_library(HeniaUIWin32 STATIC
+        src/platform/win32/Win32Clipboard.cpp
         src/platform/win32/Win32FontLoader.cpp
         src/platform/win32/Win32InputAdapter.cpp
     )
@@ -158,7 +162,7 @@ if(WIN32)
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     )
-    target_link_libraries(HeniaUIWin32 PUBLIC HeniaUI::Core PRIVATE gdi32)
+    target_link_libraries(HeniaUIWin32 PUBLIC HeniaUI::Core PRIVATE gdi32 imm32 user32)
     if(MSVC)
         target_compile_options(HeniaUIWin32 PRIVATE /W4 /permissive- /utf-8 /GR-)
     endif()

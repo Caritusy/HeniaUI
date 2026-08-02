@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
@@ -37,6 +38,19 @@ public:
             case InputEventKind::TextInput:
                 text.push_back(event.text);
                 return true;
+            case InputEventKind::CompositionStart:
+                ++compositionStarts;
+                return true;
+            case InputEventKind::CompositionUpdate:
+                composition.assign(event.textUtf8);
+                return true;
+            case InputEventKind::CompositionCommit:
+                composition.assign(event.textUtf8);
+                ++compositionCommits;
+                return true;
+            case InputEventKind::CompositionCancel:
+                ++compositionCancels;
+                return true;
             case InputEventKind::FocusLost:
                 ++focusLostCalls;
                 return true;
@@ -46,7 +60,11 @@ public:
     }
 
     std::vector<char32_t> text;
+    std::string composition;
     int focusLostCalls = 0;
+    int compositionStarts = 0;
+    int compositionCommits = 0;
+    int compositionCancels = 0;
     bool throwOnPointerUp = false;
 };
 
@@ -206,6 +224,12 @@ void verifyWin32InputAdapter(TextPainter& painter) {
         fail("WM_UNICHAR scalar validation is incorrect");
     }
 
+    if (!adapter.handleMessage(window, WM_IME_STARTCOMPOSITION, 0, 0)
+        || !adapter.handleMessage(window, WM_IME_ENDCOMPOSITION, 0, 0)
+        || probe.compositionStarts != 1 || probe.compositionCancels != 1) {
+        fail("Win32 IME lifecycle did not reach the focused widget");
+    }
+
     static_cast<void>(adapter.handleMessage(window, WM_CHAR, 0xD83D, 0));
     pointerDown(adapter, window, WM_LBUTTONDOWN, MK_LBUTTON);
     const int focusLostBefore = probe.focusLostCalls;
@@ -256,11 +280,30 @@ int main() {
         return EXIT_FAILURE;
     }
 
+    DynamicGlyphAtlas dynamic(textures, fonts, font, {
+        .pageWidth = 64,
+        .pageHeight = 64,
+        .padding = 1,
+        .maximumPages = 2,
+    });
+    constexpr std::array dynamicCodepoints{U'\u00E9'};
+    if (!Win32FontLoader::appendGlyphs(
+            dynamic,
+            {.family = L"Segoe UI", .pixelHeight = 24},
+            dynamicCodepoints)
+        || fonts.find(font)->glyph(U'\u00E9') == nullptr
+        || dynamic.statistics().glyphsAdded != 1) {
+        std::cerr << "Win32 dynamic glyph atlas growth failed\n";
+        return EXIT_FAILURE;
+    }
+
     TextRunCache cache(fonts);
     cache.reserve(16, 64);
     TextPainter painter(cache);
     const TextMetrics metrics = painter.measure(font, 18.0F, "HeniaUI 0123456789");
-    if (metrics.width <= 0.0F || metrics.height <= 0.0F) {
+    const TextMetrics dynamicMetrics = painter.measure(font, 18.0F, "caf\xC3\xA9");
+    if (metrics.width <= 0.0F || metrics.height <= 0.0F
+        || dynamicMetrics.width <= 0.0F) {
         std::cerr << "Win32 font text metrics are invalid\n";
         return EXIT_FAILURE;
     }

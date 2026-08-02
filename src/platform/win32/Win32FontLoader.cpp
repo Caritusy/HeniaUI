@@ -164,6 +164,17 @@ FontHandle Win32FontLoader::load(
                 }
             }
 
+            WCHAR character = static_cast<WCHAR>(codepoint);
+            WORD glyphIndex = 0;
+            if (GetGlyphIndicesW(
+                    gdi.context,
+                    &character,
+                    1,
+                    &glyphIndex,
+                    GGI_MARK_NONEXISTING_GLYPHS) == GDI_ERROR
+                || glyphIndex == 0xFFFFU) {
+                glyphIndex = 0;
+            }
             glyphs.push_back({
                 .codepoint = codepoint,
                 .uv = {
@@ -182,6 +193,7 @@ FontHandle Win32FontLoader::load(
                     static_cast<float>(metrics.gmptGlyphOrigin.y),
                 },
                 .advance = static_cast<float>(metrics.gmCellIncX),
+                .glyphId = glyphIndex,
             });
 
             penX += packedWidth + 1;
@@ -235,6 +247,106 @@ FontHandle Win32FontLoader::load(
         .glyphs = std::move(glyphs),
         .kerning = std::move(kerning),
     });
+}
+
+bool Win32FontLoader::appendGlyphs(
+    DynamicGlyphAtlas& atlas,
+    const Win32FontRequest& request,
+    std::span<const char32_t> codepoints) {
+    if (request.family.empty() || request.pixelHeight == 0 || codepoints.empty()) return false;
+
+    GdiObjects gdi{};
+    gdi.context = CreateCompatibleDC(nullptr);
+    if (gdi.context == nullptr) return false;
+    const std::wstring family(request.family);
+    gdi.font = CreateFontW(
+        -static_cast<int>(request.pixelHeight),
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_TT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        ANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        family.c_str());
+    if (gdi.font == nullptr) return false;
+    gdi.previous = SelectObject(gdi.context, gdi.font);
+    if (gdi.previous == nullptr || gdi.previous == HGDI_ERROR) return false;
+
+    const MAT2 matrix = identityMatrix();
+    std::vector<std::vector<std::byte>> pixelStorage;
+    std::vector<RasterizedGlyph> rasterized;
+    pixelStorage.reserve(codepoints.size());
+    rasterized.reserve(codepoints.size());
+    for (char32_t codepoint : codepoints) {
+        if (codepoint == U'\0' || codepoint > 0xFFFFU
+            || (codepoint >= 0xD800U && codepoint <= 0xDFFFU)) {
+            return false;
+        }
+        GLYPHMETRICS metrics{};
+        const DWORD bitmapBytes = GetGlyphOutlineW(
+            gdi.context,
+            static_cast<UINT>(codepoint),
+            GGO_GRAY8_BITMAP,
+            &metrics,
+            0,
+            nullptr,
+            &matrix);
+        if (bitmapBytes == GDI_ERROR || bitmapBytes == 0
+            || metrics.gmBlackBoxX == 0 || metrics.gmBlackBoxY == 0) {
+            return false;
+        }
+        std::vector<std::byte> source(bitmapBytes);
+        if (GetGlyphOutlineW(
+                gdi.context,
+                static_cast<UINT>(codepoint),
+                GGO_GRAY8_BITMAP,
+                &metrics,
+                bitmapBytes,
+                source.data(),
+                &matrix) == GDI_ERROR) {
+            return false;
+        }
+        const std::uint32_t width = metrics.gmBlackBoxX;
+        const std::uint32_t height = metrics.gmBlackBoxY;
+        const std::uint32_t sourcePitch = (width + 3U) & ~3U;
+        std::vector<std::byte> pixels(static_cast<std::size_t>(width) * height);
+        for (std::uint32_t row = 0; row < height; ++row) {
+            for (std::uint32_t column = 0; column < width; ++column) {
+                const auto coverage = static_cast<unsigned char>(source[
+                    static_cast<std::size_t>(row) * sourcePitch + column]);
+                pixels[static_cast<std::size_t>(row) * width + column] = static_cast<std::byte>(
+                    std::min(coverage, static_cast<unsigned char>(64U)) * 255U / 64U);
+            }
+        }
+        WCHAR character = static_cast<WCHAR>(codepoint);
+        WORD glyphIndex = 0;
+        if (GetGlyphIndicesW(gdi.context, &character, 1, &glyphIndex, GGI_MARK_NONEXISTING_GLYPHS)
+                == GDI_ERROR
+            || glyphIndex == 0xFFFFU) {
+            return false;
+        }
+        pixelStorage.push_back(std::move(pixels));
+        rasterized.push_back({
+            .codepoint = codepoint,
+            .glyphId = glyphIndex,
+            .width = width,
+            .height = height,
+            .rowPitch = width,
+            .bearing = {
+                static_cast<float>(metrics.gmptGlyphOrigin.x),
+                static_cast<float>(metrics.gmptGlyphOrigin.y),
+            },
+            .advance = static_cast<float>(metrics.gmCellIncX),
+            .pixels = pixelStorage.back(),
+        });
+    }
+    return atlas.add(rasterized);
 }
 
 } // namespace henia::ui

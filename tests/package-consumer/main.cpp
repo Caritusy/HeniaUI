@@ -3,9 +3,12 @@
 #include <henia/gfx/ShapeBatch3D.h>
 #include <henia/gfx/Validation.h>
 #include <henia/ui/Frame.h>
+#include <henia/ui/text/TextEditor.h>
 #include <henia/ui/Validation.h>
+#include <henia/ui/widget/controls/TextInput.h>
 
 #include <cstdlib>
+#include <string>
 
 int main() {
     std::size_t bytes = 0;
@@ -21,12 +24,17 @@ int main() {
     canvas.border({{0.0F, 0.0F}, {8.0F, 8.0F}}, {}, {1.0F, 2.0F, 3.0F, 4.0F}, 1.0F);
     const henia::ui::RenderPacket packet = frame.finish();
 
+    henia::ui::TextEditorState editor("A");
+    static_cast<void>(editor.insert(U'\u4E2D'));
+    henia::ui::TextInput textInput(std::string(editor.text()));
+
     henia::gfx::ShapeBatch3D shapes;
     static_cast<void>(shapes.addBox({}));
     const henia::gfx::InstanceBatch boxes = shapes.snapshot();
     henia::gfx::Mat4 projection{};
     henia::ui::ScissorRect scissor{};
     return packet.instances().size() == 4 && boxes.boxes().size() == 1
+        && textInput.text() == "A\xE4\xB8\xAD"
         && henia::gfx::tryPerspective(1.0F, 1.0F, 0.1F, 100.0F, projection)
         && henia::gfx::finite(projection)
         && henia::ui::makeScissorRect({{0.25F, 0.25F}, {7.25F, 7.25F}}, 8, 8, scissor)

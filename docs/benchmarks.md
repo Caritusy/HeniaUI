@@ -266,3 +266,20 @@ zero measured steady-state allocations. The harness verifies the deterministic
 instance, batch, and byte counts and requires the CPU geometry upload to remain
 at least four times larger; elapsed time remains observational rather than a
 cross-machine pass/fail threshold.
+
+## Text architecture capture (#3)
+
+Recorded on the same MSVC Release/x64 workstation on 2026-08-03, with 25
+measured iterations after 5 warmups. The candidate was compared with the
+immediately preceding #2 capture using `tools/compare_benchmarks.py`.
+
+| Scenario | Before / after median | Allocations | Upload before / after | Glyph instances | Draws |
+|---|---:|---:|---:|---:|---:|
+| 160-row / 4,270-glyph text UI | 625.2 / 582.8 us | 0 / 0 | 256,200 / 256,200 B | 4,270 / 4,270 | 1 / 1 |
+
+The separated layout/render caches, font revision checks, and fallback-capable
+run segmentation reduced this short cached ASCII producer sample by 6.8%.
+Packet work, upload bytes, instance count, draw count, and steady-state
+allocations are unchanged. CJK fallback, a synthetic
+Indic ligature backend, two-page dynamic atlas growth, and editor/IME behavior
+are correctness tests rather than fabricated portable GPU-time claims.

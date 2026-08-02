@@ -305,7 +305,11 @@ bool UiDocument::dispatchEvent(const InputEvent& event) {
         }
         case InputEventKind::KeyDown:
         case InputEventKind::KeyUp:
-        case InputEventKind::TextInput: {
+        case InputEventKind::TextInput:
+        case InputEventKind::CompositionStart:
+        case InputEventKind::CompositionUpdate:
+        case InputEventKind::CompositionCommit:
+        case InputEventKind::CompositionCancel: {
             Widget* focused = resolve(mFocusedIdentity);
             return focused != nullptr && interactive(*focused)
                 && focused->acceptsKeyboardFocus() && focused->handleInput(event);
