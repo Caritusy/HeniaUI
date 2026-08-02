@@ -65,7 +65,7 @@ namespace henia::ui {
 
 [[nodiscard]] inline std::string_view validateDrawCommand(const DrawCommand& command) noexcept {
     if (static_cast<std::uint8_t>(command.kind)
-        > static_cast<std::uint8_t>(PrimitiveKind::NinePatch)) {
+        > static_cast<std::uint8_t>(PrimitiveKind::SdfIcon)) {
         return "kind";
     }
     if (static_cast<std::uint8_t>(command.blend) > static_cast<std::uint8_t>(BlendMode::Additive)) {
@@ -85,7 +85,15 @@ namespace henia::ui {
     if (static_cast<std::uint8_t>(command.lineJoin) > static_cast<std::uint8_t>(LineJoin::Round)) {
         return "line.join";
     }
-    if ((command.lineFlags & ~(kLineHasPrevious | kLineHasNext)) != 0) return "line.flags";
+    if (command.kind == PrimitiveKind::Line
+        && (command.lineFlags & ~(kLineHasPrevious | kLineHasNext)) != 0) {
+        return "line.flags";
+    }
+    if (command.kind != PrimitiveKind::Line
+        && command.kind != PrimitiveKind::AnimatedGradientRect
+        && command.lineFlags != 0) {
+        return "shader.parameter";
+    }
     if (command.clip.enabled) {
         if (const std::string_view issue = validateRect(command.clip.area, "clip.area"); !issue.empty()) {
             return issue;
@@ -125,7 +133,8 @@ namespace henia::ui {
         }
         if (command.thickness <= 0.0F) return "thickness";
     }
-    if (command.kind == PrimitiveKind::GradientRect) {
+    if (command.kind == PrimitiveKind::GradientRect
+        || command.kind == PrimitiveKind::AnimatedGradientRect) {
         const Color finish{
             command.uv.min.x,
             command.uv.min.y,
@@ -142,6 +151,12 @@ namespace henia::ui {
         if (!std::isfinite(command.uv.min.y)) return "shadow.offset.y";
         if (command.thickness <= 0.0F) return "shadow.blurRadius";
     }
+    if (command.kind == PrimitiveKind::RoundedGlow && command.thickness <= 0.0F) {
+        return "glow.radius";
+    }
+    if (command.kind == PrimitiveKind::RoundedOutline && command.thickness <= 0.0F) {
+        return "thickness";
+    }
     if (command.kind == PrimitiveKind::BorderRadii) {
         const std::array radii{
             command.uv.min.x,
@@ -155,7 +170,7 @@ namespace henia::ui {
         if (command.thickness <= 0.0F) return "thickness";
     }
     if (command.kind == PrimitiveKind::Image || command.kind == PrimitiveKind::Glyph
-        || command.kind == PrimitiveKind::NinePatch) {
+        || command.kind == PrimitiveKind::NinePatch || command.kind == PrimitiveKind::SdfIcon) {
         if (!command.texture.valid()) return "texture";
         if (const std::string_view issue = validateRect(command.uv, "uv"); !issue.empty()) return issue;
     }
@@ -163,6 +178,11 @@ namespace henia::ui {
         && (command.radius <= 0.0F || command.thickness <= 0.0F
             || command.thickness >= 0.5F)) {
         return "ninePatch.border";
+    }
+    if (command.kind == PrimitiveKind::SdfIcon
+        && (command.radius > 1.0F || command.thickness <= 0.0F
+            || command.thickness > 0.5F)) {
+        return "sdf.parameters";
     }
     return {};
 }
@@ -215,9 +235,14 @@ namespace henia::ui {
             || command.kind == PrimitiveKind::Arc
             || command.kind == PrimitiveKind::Capsule
             || command.kind == PrimitiveKind::GradientRect
-            || command.kind == PrimitiveKind::BorderRadii;
+            || command.kind == PrimitiveKind::BorderRadii
+            || command.kind == PrimitiveKind::TintRect
+            || command.kind == PrimitiveKind::AnimatedGradientRect
+            || command.kind == PrimitiveKind::RoundedOutline;
         const double fringe = analytic ? static_cast<double>(kAnalyticAaFringe) : 0.0;
-        const double shadowExtent = command.kind == PrimitiveKind::RoundedShadow
+        const bool spread = command.kind == PrimitiveKind::RoundedShadow
+            || command.kind == PrimitiveKind::RoundedGlow;
+        const double shadowExtent = spread
             ? static_cast<double>(command.thickness) * 3.0 + kAnalyticAaFringe
             : 0.0;
         const double offsetX = command.kind == PrimitiveKind::RoundedShadow

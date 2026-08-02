@@ -19,6 +19,7 @@
 #include <henia/ui/widget/controls/TreeView.h>
 
 #include <cstdlib>
+#include <array>
 #include <memory>
 #include <string>
 
@@ -49,12 +50,26 @@ int main() {
         return EXIT_FAILURE;
     }
     henia::ui::Frame frame;
-    frame.reserve(4, 4);
+    frame.reserve(8, 8);
     henia::ui::Canvas& canvas = frame.begin();
     canvas.fillRect({{0.0F, 0.0F}, {8.0F, 8.0F}}, {});
     canvas.circle({4.0F, 4.0F}, 2.0F, {});
     canvas.arc({{1.0F, 1.0F}, {7.0F, 7.0F}}, 0.0F, 3.14F, {}, 1.0F);
     canvas.border({{0.0F, 0.0F}, {8.0F, 8.0F}}, {}, {1.0F, 2.0F, 3.0F, 4.0F}, 1.0F);
+    const std::array effects{
+        henia::ui::EffectLayer{
+            .kind = henia::ui::EffectLayerKind::AnimatedGradient,
+            .color = {0.2F, 0.6F, 1.0F, 1.0F},
+            .secondaryColor = {0.8F, 0.2F, 0.7F, 1.0F},
+            .phase = 0.25F,
+        },
+        henia::ui::EffectLayer{
+            .kind = henia::ui::EffectLayerKind::Outline,
+            .amount = 1.0F,
+        },
+        henia::ui::EffectLayer{.enabled = false},
+    };
+    canvas.effectRect({{10.0F, 0.0F}, {18.0F, 8.0F}}, 2.0F, effects);
     const henia::ui::RenderPacket packet = frame.finish();
 
     henia::ui::TextEditorState editor("A");
@@ -93,7 +108,8 @@ int main() {
     const henia::gfx::InstanceBatch boxes = shapes.snapshot();
     henia::gfx::Mat4 projection{};
     henia::ui::ScissorRect scissor{};
-    return packet.instances().size() == 4 && boxes.boxes().size() == 1
+    return packet.instances().size() == 6 && packet.statistics().effectInstances == 2
+        && boxes.boxes().size() == 1
         && textInput.text() == "A\xE4\xB8\xAD"
         && checkbox.checked() && toggle.checked() && slider.value() == 0.5
         && combo.itemCount() == 2 && tabs.tabCount() == 2 && list.itemCount() == 2

@@ -393,6 +393,159 @@ void Canvas::gradientRect(
     append(command);
 }
 
+void Canvas::tintRect(Rect rect, Color color, float rounding) noexcept {
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) {
+        return rejectInvalid(issue);
+    }
+    if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
+    if (!std::isfinite(rounding)) return rejectInvalid("rounding");
+    if (!visible(color)) return rejectInvalid("color.alpha");
+    DrawCommand command{};
+    command.kind = PrimitiveKind::TintRect;
+    command.bounds = rect;
+    command.color = color;
+    command.radius = std::clamp(rounding, 0.0F, std::min(rect.width(), rect.height()) * 0.5F);
+    append(command);
+}
+
+void Canvas::animatedGradientRect(
+    Rect rect,
+    Color start,
+    Color finish,
+    Vec2 direction,
+    float phase,
+    float rounding) noexcept {
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) {
+        return rejectInvalid(issue);
+    }
+    if (const std::string_view issue = validateColor(start); !issue.empty()) return rejectInvalid(issue);
+    if (const std::string_view issue = validateColor(finish); !issue.empty()) {
+        return rejectInvalid("gradient.finish");
+    }
+    if (!std::isfinite(direction.x)) return rejectInvalid("gradient.direction.x");
+    if (!std::isfinite(direction.y)) return rejectInvalid("gradient.direction.y");
+    if (direction == Vec2{}) return rejectInvalid("gradient.direction");
+    if (!std::isfinite(phase)) return rejectInvalid("gradient.phase");
+    if (!std::isfinite(rounding)) return rejectInvalid("rounding");
+    if (!visible(start) && !visible(finish)) return rejectInvalid("color.alpha");
+    float angle = std::atan2(direction.y, direction.x);
+    if (angle < 0.0F) angle += kTau;
+    float normalizedPhase = phase - std::floor(phase);
+    const auto parameter = static_cast<std::uint8_t>(
+        std::clamp(std::lround(normalizedPhase * 255.0F), 0L, 255L));
+    DrawCommand command{};
+    command.kind = PrimitiveKind::AnimatedGradientRect;
+    command.bounds = rect;
+    command.uv = packed(finish);
+    command.color = start;
+    command.radius = std::clamp(rounding, 0.0F, std::min(rect.width(), rect.height()) * 0.5F);
+    command.thickness = angle;
+    command.lineFlags = parameter;
+    append(command);
+}
+
+void Canvas::roundedGlow(
+    Rect rect,
+    Color color,
+    float rounding,
+    float glowRadius) noexcept {
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) {
+        return rejectInvalid(issue);
+    }
+    if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
+    if (!std::isfinite(rounding)) return rejectInvalid("rounding");
+    if (!std::isfinite(glowRadius) || glowRadius <= 0.0F) return rejectInvalid("glow.radius");
+    if (!visible(color)) return rejectInvalid("color.alpha");
+    DrawCommand command{};
+    command.kind = PrimitiveKind::RoundedGlow;
+    command.bounds = rect;
+    command.color = color;
+    command.radius = std::clamp(rounding, 0.0F, std::min(rect.width(), rect.height()) * 0.5F);
+    command.thickness = glowRadius;
+    append(command);
+}
+
+void Canvas::roundedOutline(
+    Rect rect,
+    Color color,
+    float rounding,
+    float thickness) noexcept {
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) {
+        return rejectInvalid(issue);
+    }
+    if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
+    if (!std::isfinite(rounding)) return rejectInvalid("rounding");
+    if (!std::isfinite(thickness) || thickness <= 0.0F) return rejectInvalid("thickness");
+    if (!visible(color)) return rejectInvalid("color.alpha");
+    DrawCommand command{};
+    command.kind = PrimitiveKind::RoundedOutline;
+    command.bounds = rect;
+    command.color = color;
+    command.radius = std::clamp(rounding, 0.0F, std::min(rect.width(), rect.height()) * 0.5F);
+    command.thickness = std::min(thickness, std::min(rect.width(), rect.height()) * 0.5F);
+    append(command);
+}
+
+void Canvas::sdfIcon(
+    TextureHandle texture,
+    Rect rect,
+    Rect sourceUv,
+    Color tint,
+    float edge,
+    float softness) noexcept {
+    if (!texture.valid()) return rejectInvalid("texture");
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) return rejectInvalid(issue);
+    if (const std::string_view issue = validateRect(sourceUv, "uv"); !issue.empty()) return rejectInvalid(issue);
+    if (const std::string_view issue = validateColor(tint); !issue.empty()) return rejectInvalid(issue);
+    if (!std::isfinite(edge) || edge < 0.0F || edge > 1.0F) return rejectInvalid("sdf.edge");
+    if (!std::isfinite(softness) || softness <= 0.0F || softness > 0.5F) {
+        return rejectInvalid("sdf.softness");
+    }
+    if (!visible(tint)) return rejectInvalid("color.alpha");
+    DrawCommand command{};
+    command.kind = PrimitiveKind::SdfIcon;
+    command.texture = texture;
+    command.bounds = rect;
+    command.uv = sourceUv;
+    command.color = tint;
+    command.radius = edge;
+    command.thickness = softness;
+    append(command);
+}
+
+void Canvas::effectRect(
+    Rect rect,
+    float rounding,
+    std::span<const EffectLayer> layers) noexcept {
+    for (const EffectLayer& layer : layers) {
+        if (!layer.enabled) continue;
+        switch (layer.kind) {
+        case EffectLayerKind::Tint:
+            tintRect(rect, layer.color, rounding);
+            break;
+        case EffectLayerKind::Gradient:
+            gradientRect(rect, layer.color, layer.secondaryColor, layer.vector, rounding);
+            break;
+        case EffectLayerKind::AnimatedGradient:
+            animatedGradientRect(
+                rect, layer.color, layer.secondaryColor, layer.vector, layer.phase, rounding);
+            break;
+        case EffectLayerKind::Glow:
+            roundedGlow(rect, layer.color, rounding, layer.amount);
+            break;
+        case EffectLayerKind::SoftShadow:
+            roundedShadow(rect, layer.color, rounding, layer.amount, layer.vector);
+            break;
+        case EffectLayerKind::Outline:
+            roundedOutline(rect, layer.color, rounding, layer.amount);
+            break;
+        default:
+            rejectInvalid("effect.kind");
+            break;
+        }
+    }
+}
+
 void Canvas::roundedShadow(
     Rect rect,
     Color color,

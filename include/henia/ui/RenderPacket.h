@@ -38,6 +38,12 @@ struct DrawInstance final {
         lineStyle = static_cast<std::uint8_t>(
             (static_cast<std::uint8_t>(join) & 0x1U) | ((flags & 0x3U) << 1U));
     }
+    [[nodiscard]] constexpr std::uint8_t shaderParameter() const noexcept {
+        return lineStyle;
+    }
+    constexpr void setShaderParameter(std::uint8_t parameter) noexcept {
+        lineStyle = parameter;
+    }
 };
 
 static_assert(sizeof(DrawInstance) == 60, "DrawInstance layout is the GPU upload contract");
@@ -77,6 +83,11 @@ struct PacketStatistics final {
     // Conservative pixel-space quad area before viewport/scissor clipping.
     // This tracks fragment-work bounds; it is not a hardware occlusion query.
     std::uint64_t estimatedFragmentArea = 0;
+    // Effect-only observability. Variant transitions count adjacent instance
+    // kind changes without forcing a batch or pipeline split.
+    std::uint64_t effectInstances = 0;
+    std::uint64_t shaderVariantTransitions = 0;
+    std::uint64_t effectEstimatedFragmentArea = 0;
     std::uint64_t rejectedCommands = 0;
     std::uint64_t invalidInputCommands = 0;
     std::uint64_t capacityRejectedCommands = 0;
@@ -162,6 +173,7 @@ private:
     [[nodiscard]] bool appendInstance(const DrawInstance& instance) noexcept;
     [[nodiscard]] DrawBatch* appendBatch(const DrawBatch& batch) noexcept;
     void addEstimatedFragmentArea(std::uint64_t area) noexcept;
+    void addEffectEstimatedFragmentArea(std::uint64_t area) noexcept;
     void setSourceCommands(std::size_t count) noexcept;
     [[nodiscard]] bool rejectPacket(bool invalidInput = false) noexcept;
     void completePacket() noexcept;

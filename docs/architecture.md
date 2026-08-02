@@ -71,6 +71,10 @@ Maximum instances per batch, texture slots used across textured batches,
 clip/blend/texture-capacity boundary counts, and cold full-instance-upload bytes
 make batch efficiency explicit. Actual backend upload bytes remain separate
 because a stable immutable packet can be submitted without another upload.
+`effectInstances`, `shaderVariantTransitions`, and
+`effectEstimatedFragmentArea` expose effect density, adjacent shader-branch
+changes, and the conservative effect-only fragment bound without splitting a
+batch merely because its primitive kind changes.
 
 ### Analytic 2D geometry
 
@@ -107,6 +111,33 @@ the generated quads. Tracking is opt-in because its producer-side arithmetic is
 measurable. It makes fragment-work regressions observable alongside draw/instance
 counts; it is deliberately not presented as a hardware occlusion or timestamp
 query.
+
+### Composable overlay effects
+
+`Canvas::effectRect` records enabled `EffectLayer` entries in caller order.
+Tint, static or host-phased animated gradient, analytic glow, soft shadow, and
+rounded outline are ordinary tagged instances in the existing ordered stream.
+`Canvas::sdfIcon` adds a texture-backed red-channel distance-field variant;
+`Canvas::scopedClip` remains the rectangular masking primitive. Image tinting
+continues to use the regular image instance. The layer list is therefore a
+small deterministic paint recipe, not a retained GPU effect graph.
+
+No effect allocates an intermediate render target or introduces an arbitrary
+full-screen pass. Gradient/tint/outline geometry expands only by the analytic
+AA fringe. Shadow and glow expand by three configured radii plus that fringe,
+which makes their bounded fill-rate cost visible through
+`effectEstimatedFragmentArea`. A rounded outline uses one composable quad and
+shades its interior; `strokeRect` remains the lower-fragment alternative that
+compiles to as many as eight tight regions. SDF icons consume an existing batch
+texture slot. Disabling a layer emits no command, instance, upload, or fragment
+work.
+
+Animated gradients have no hidden renderer clock. The host supplies phase in
+cycles; recording normalizes and quantizes it into the existing final instance
+byte. Both GLSL and HLSL decode the identical 60-byte payload and select effects
+inside the same uber-shader used by simple UI. Primitive-kind changes are
+observable as shader-variant transitions but do not create batch or pipeline
+state boundaries.
 
 ### Text shaping, fallback, and atlas growth
 

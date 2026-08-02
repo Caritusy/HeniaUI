@@ -23,7 +23,9 @@ HeniaUI is designed to avoid several common scaling traps in game overlays and n
 Shapes, images, and glyphs use one ordered UI pipeline. In addition to
 rectangles and lines, the same compact instance stream supports analytic
 circle/ellipse, arc, capsule, linear-gradient, rounded-shadow,
-independent-corner border, and single-instance nine-patch primitives. Each
+independent-corner border, single-instance nine-patch, and ordered local effect
+layers. Tint, animated gradient, analytic glow/shadow/outline, rectangular
+masking, and SDF icons stay in the same instance stream. Each
 batch carries a small texture table, so alternating widget backgrounds and font
 glyphs can remain in one draw batch while preserving paint order. A batch
 boundary is introduced only for a clip, blend, pipeline, or texture-table
@@ -47,6 +49,26 @@ canvas.gradientRect(
     {{40.0F, 40.0F}, {260.0F, 68.0F}},
     {0.12F, 0.65F, 0.95F, 1.0F},
     {0.70F, 0.20F, 0.95F, 1.0F});
+const float hostAnimationPhase = 0.25F;
+const std::array effects{
+    henia::ui::EffectLayer{
+        .kind = henia::ui::EffectLayerKind::Glow,
+        .color = {0.15F, 0.55F, 1.0F, 0.45F},
+        .amount = 5.0F,
+    },
+    henia::ui::EffectLayer{
+        .kind = henia::ui::EffectLayerKind::AnimatedGradient,
+        .color = {0.12F, 0.65F, 0.95F, 1.0F},
+        .secondaryColor = {0.70F, 0.20F, 0.95F, 1.0F},
+        .phase = hostAnimationPhase,
+    },
+    henia::ui::EffectLayer{
+        .kind = henia::ui::EffectLayerKind::Outline,
+        .color = {0.85F, 0.95F, 1.0F, 0.9F},
+        .amount = 1.5F,
+    },
+};
+canvas.effectRect({{40.0F, 100.0F}, {260.0F, 148.0F}}, 10.0F, effects);
 canvas.arc(
     {{320.0F, 72.0F}, {392.0F, 144.0F}},
     -1.5707963F,
@@ -91,6 +113,15 @@ slot count, growth, and rejected builds are observable through `Frame`.
 The overload taking separate command and instance capacities is useful for
 fixed-capacity analytic scenes: one `StrokeRect` command compiles to at most
 eight tight edge/corner instances.
+
+`effectRect` emits enabled layers in caller order; setting `enabled=false`
+removes a costly layer without changing the layer array. Animation is explicit:
+the host advances `phase`, and the packed packet remains deterministic. Use
+`scopedClip` as the rectangular mask and `sdfIcon` for an R8/RGBA distance-field
+texture. Effects do not allocate an intermediate target or run a full-screen
+post-process. Shadow/glow and the single-instance outline deliberately trade
+extra fragment area for composability; opt-in packet statistics expose that
+cost separately.
 
 ## Build
 

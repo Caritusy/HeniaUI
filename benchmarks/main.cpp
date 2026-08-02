@@ -656,6 +656,79 @@ template <typename Operation>
     return result;
 }
 
+[[nodiscard]] ScenarioResult benchmarkShaderEffectLayers(const Options& options) {
+    using namespace henia::ui;
+    constexpr std::size_t rectangleCount = 1024;
+    constexpr std::size_t effectsPerRectangle = 4;
+    constexpr std::size_t instanceCount = rectangleCount * effectsPerRectangle;
+    Frame frame;
+    frame.reserve(instanceCount, instanceCount, 4, CapacityPolicy::Fixed);
+    frame.setFragmentAreaTracking(true);
+    RenderPacket packet;
+    ScenarioResult result = measureScenario(
+        "shader_effect_layers_4096",
+        options,
+        [&](std::size_t iteration) {
+            std::array layers{
+                EffectLayer{
+                    .kind = EffectLayerKind::SoftShadow,
+                    .color = {0.0F, 0.0F, 0.0F, 0.35F},
+                    .vector = {1.0F, 1.0F},
+                    .amount = 2.0F,
+                },
+                EffectLayer{
+                    .kind = EffectLayerKind::Glow,
+                    .color = {0.1F, 0.5F, 1.0F, 0.4F},
+                    .amount = 2.0F,
+                },
+                EffectLayer{
+                    .kind = EffectLayerKind::AnimatedGradient,
+                    .color = {0.15F, 0.45F, 0.95F, 1.0F},
+                    .secondaryColor = {0.85F, 0.20F, 0.70F, 1.0F},
+                    .vector = {1.0F, 0.5F},
+                    .phase = static_cast<float>(iteration % 256U) / 256.0F,
+                },
+                EffectLayer{
+                    .kind = EffectLayerKind::Outline,
+                    .color = {0.85F, 0.95F, 1.0F, 0.9F},
+                    .amount = 1.0F,
+                },
+                EffectLayer{
+                    .kind = EffectLayerKind::Tint,
+                    .color = {1.0F, 0.0F, 0.0F, 1.0F},
+                    .enabled = false,
+                },
+            };
+            const auto paintStarted = Clock::now();
+            Canvas& canvas = frame.begin();
+            for (std::size_t rectangle = 0; rectangle < rectangleCount; ++rectangle) {
+                const float x = static_cast<float>(rectangle % 64U) * 14.0F;
+                const float y = static_cast<float>(rectangle / 64U) * 14.0F;
+                canvas.effectRect({{x, y}, {x + 10.0F, y + 10.0F}}, 3.0F, layers);
+            }
+            const std::uint64_t paint = nanosecondsSince(paintStarted);
+            const auto packetStarted = Clock::now();
+            packet = frame.finish();
+            const std::uint64_t compile = nanosecondsSince(packetStarted);
+            return IterationPhases{
+                .paintBuildNanoseconds = paint,
+                .packetCompileNanoseconds = compile,
+                .checksum = packet.statistics().effectEstimatedFragmentArea ^ iteration,
+            };
+        });
+    result.drawCalls = packet.batches().size();
+    result.submittedInstances = packet.instances().size();
+    capturePacketStatistics(result, packet);
+    result.uploadBytes = packet.instances().size() * sizeof(DrawInstance);
+    result.coldUploadBytes = result.uploadBytes;
+    result.estimatedFragmentArea = packet.statistics().estimatedFragmentArea;
+    result.cpuResidentBytes = frame.displayList().capacity() * sizeof(DrawCommand)
+        + packet.instanceCapacity() * sizeof(DrawInstance)
+        + packet.batchCapacity() * sizeof(DrawBatch);
+    result.gpuBufferBytes = packet.instanceCapacity() * sizeof(DrawInstance);
+    return result;
+}
+
 [[nodiscard]] ScenarioResult benchmarkStaticRetained(const Options& options) {
     using namespace henia::ui;
     FontStore fonts;
@@ -1201,6 +1274,7 @@ template <typename Operation>
     const ScenarioResult* shaderEllipses = findScenario(results, "shader_analytic_ellipses");
     const ScenarioResult* primitives = findScenario(results, "henia_many_primitives");
     const ScenarioResult* analytic = findScenario(results, "analytic_2d_fragment_bounds");
+    const ScenarioResult* effects = findScenario(results, "shader_effect_layers_4096");
     const ScenarioResult* retained = findScenario(results, "retained_static_ui");
     const ScenarioResult* fullDynamic = findScenario(results, "full_repaint_dynamic_ui");
     const ScenarioResult* dynamic = findScenario(results, "retained_dynamic_dirty_ui");
@@ -1214,7 +1288,7 @@ template <typename Operation>
     const ScenarioResult* pagedClustered = findScenario(results, "paged_3d_clustered_edits_100k");
     const ScenarioResult* pagedSparse = findScenario(results, "paged_3d_sparse_edits_100k");
     bool valid = tessellation != nullptr && shaderEllipses != nullptr
-        && primitives != nullptr && analytic != nullptr
+        && primitives != nullptr && analytic != nullptr && effects != nullptr
         && retained != nullptr && fullDynamic != nullptr && dynamic != nullptr && text != nullptr
         && virtualList != nullptr && recycledList != nullptr
         && full3d != nullptr && dirty3d != nullptr && pagedStable != nullptr
@@ -1247,6 +1321,15 @@ template <typename Operation>
         && analytic->packetStatistics.batchedInstancesBeyondFirst == 8
         && analytic->estimatedFragmentArea > 0
         && analytic->estimatedFragmentArea < (1925U * 1085U + 1724U * 884U) / 8U
+        && effects->allocationsMedian == 0
+        && effects->submittedInstances == kPrimitiveCount
+        && effects->drawCalls == 1
+        && effects->packetStatistics.effectInstances == kPrimitiveCount
+        && effects->packetStatistics.shaderVariantTransitions == kPrimitiveCount - 1U
+        && effects->packetStatistics.effectEstimatedFragmentArea > 0
+        && effects->packetStatistics.effectEstimatedFragmentArea
+            == effects->packetStatistics.estimatedFragmentArea
+        && effects->uploadBytes == kPrimitiveCount * sizeof(henia::ui::DrawInstance)
         && retained->allocationsMedian == 0
         && retained->uploadBytes == 0
         && retained->cacheHits >= retained->iterations
@@ -1394,7 +1477,12 @@ void writeJson(
                << "        \"texture_table_capacity_boundaries\": "
                << batching.textureTableCapacityBoundaries << ",\n"
                << "        \"full_instance_upload_bytes\": "
-               << batching.fullInstanceUploadBytes << "\n"
+               << batching.fullInstanceUploadBytes << ",\n"
+               << "        \"effect_instances\": " << batching.effectInstances << ",\n"
+               << "        \"shader_variant_transitions\": "
+               << batching.shaderVariantTransitions << ",\n"
+               << "        \"effect_estimated_fragment_area_px\": "
+               << batching.effectEstimatedFragmentArea << "\n"
                << "      },\n"
                << "      \"gpu\": {\n"
                << "        \"measurement_scope\": \"per_iteration\",\n"
@@ -1505,11 +1593,12 @@ int main(int argc, char** argv) {
     }
     try {
         std::vector<ScenarioResult> results;
-        results.reserve(16);
+        results.reserve(17);
         results.push_back(benchmarkTessellation(options));
         results.push_back(benchmarkShaderEllipses(options));
         results.push_back(benchmarkManyPrimitives(options));
         results.push_back(benchmarkAnalyticFragmentBounds(options));
+        results.push_back(benchmarkShaderEffectLayers(options));
         results.push_back(benchmarkStaticRetained(options));
         results.push_back(benchmarkDynamicFullRepaint(options));
         results.push_back(benchmarkDynamicDirty(options));

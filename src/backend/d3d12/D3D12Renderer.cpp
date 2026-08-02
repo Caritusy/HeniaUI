@@ -62,6 +62,7 @@ struct PixelInput {
     nointerpolation uint lineCap : LINE_CAP;
     nointerpolation uint lineJoin : LINE_JOIN;
     nointerpolation uint lineFlags : LINE_FLAGS;
+    nointerpolation uint shaderParameter : SHADER_PARAMETER;
 };
 
 static const float2 corners[6] = {
@@ -94,14 +95,16 @@ PixelInput vertexMain(VertexInput input) {
         float along = lerp(-startExtension, segmentLength + endExtension, corner.x);
         float across = lerp(-halfWidth - 2.0, halfWidth + 2.0, corner.y);
         pixel = start + direction * along + normal * across;
-    } else if (kind == 9) {
+    } else if (kind == 9 || kind == 14) {
         float extent = input.metrics.y * 3.0 + 2.0;
+        float2 offset = kind == 9 ? input.uv.xy : 0.0;
         pixel = lerp(
-            input.bounds.xy + input.uv.xy - extent,
-            input.bounds.zw + input.uv.xy + extent,
+            input.bounds.xy + offset - extent,
+            input.bounds.zw + offset + extent,
             corner);
     } else if (kind == 0 || kind == 5 || kind == 6 || kind == 7
-        || kind == 8 || kind == 10) {
+        || kind == 8 || kind == 10 || kind == 12 || kind == 13
+        || kind == 15) {
         pixel = lerp(input.bounds.xy - 2.0, input.bounds.zw + 2.0, corner);
     } else {
         pixel = lerp(input.bounds.xy, input.bounds.zw, corner);
@@ -119,6 +122,7 @@ PixelInput vertexMain(VertexInput input) {
     output.lineCap = input.style.z;
     output.lineJoin = decodedLineJoin;
     output.lineFlags = decodedLineFlags;
+    output.shaderParameter = input.style.w;
     return output;
 }
 
@@ -267,7 +271,8 @@ float4 pixelMain(PixelInput input) : SV_Target {
     float coverage = 1.0;
     float4 color = input.tintColor;
 
-    if (input.primitiveKind == 0 || input.primitiveKind == 1) {
+    if (input.primitiveKind == 0 || input.primitiveKind == 1
+        || input.primitiveKind == 12 || input.primitiveKind == 15) {
         float2 primitiveSize = input.linePoints.zw - input.linePoints.xy;
         float2 centered = input.pixelPosition - (input.linePoints.xy + input.linePoints.zw) * 0.5;
         float distanceToEdge = roundedBoxDistance(
@@ -276,7 +281,7 @@ float4 pixelMain(PixelInput input) : SV_Target {
             min(input.shapeMetrics.x, min(primitiveSize.x, primitiveSize.y) * 0.5));
         float antiAlias = max(fwidth(distanceToEdge), 0.75);
         float outer = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
-        if (input.primitiveKind == 1) {
+        if (input.primitiveKind == 1 || input.primitiveKind == 15) {
             float innerDistance = distanceToEdge + max(input.shapeMetrics.y, 0.0);
             float inner = 1.0 - smoothstep(-antiAlias, antiAlias, innerDistance);
             coverage = max(outer - inner, 0.0);
@@ -368,7 +373,7 @@ float4 pixelMain(PixelInput input) : SV_Target {
             min(primitiveSize.x, primitiveSize.y) * 0.5);
         float antiAlias = max(fwidth(distanceToEdge), 0.75);
         coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
-    } else if (input.primitiveKind == 8) {
+    } else if (input.primitiveKind == 8 || input.primitiveKind == 13) {
         float2 primitiveSize = input.linePoints.zw - input.linePoints.xy;
         float2 halfSize = primitiveSize * 0.5;
         float2 centered = input.pixelPosition
@@ -381,11 +386,16 @@ float4 pixelMain(PixelInput input) : SV_Target {
         coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
         float2 direction = float2(cos(input.shapeMetrics.y), sin(input.shapeMetrics.y));
         float extent = max(dot(abs(direction), halfSize), 0.0001);
-        float amount = saturate(0.5 + dot(centered, direction) / (extent * 2.0));
+        float phaseShift = input.primitiveKind == 13
+            ? sin(float(input.shaderParameter) / 255.0 * 6.28318530718) * 0.25
+            : 0.0;
+        float amount = saturate(
+            0.5 + dot(centered, direction) / (extent * 2.0) + phaseShift);
         color = lerp(input.tintColor, input.lineNeighbors, amount);
-    } else if (input.primitiveKind == 9) {
+    } else if (input.primitiveKind == 9 || input.primitiveKind == 14) {
+        float2 offset = input.primitiveKind == 9 ? input.lineNeighbors.xy : 0.0;
         float2 center = (input.linePoints.xy + input.linePoints.zw) * 0.5
-            + input.lineNeighbors.xy;
+            + offset;
         float2 halfSize = (input.linePoints.zw - input.linePoints.xy) * 0.5;
         float distanceToEdge = roundedBoxDistance(
             input.pixelPosition - center,
@@ -430,6 +440,12 @@ float4 pixelMain(PixelInput input) : SV_Target {
             ninePatchCoordinate(local.y, destinationBorder.y, input.shapeMetrics.y));
         float2 uv = lerp(input.lineNeighbors.xy, input.lineNeighbors.zw, mapped);
         color *= sampleTexture(input.textureSlot, uv);
+    } else if (input.primitiveKind == 16) {
+        float distanceValue = sampleTexture(input.textureSlot, input.textureUv).r;
+        coverage = smoothstep(
+            input.shapeMetrics.x - input.shapeMetrics.y,
+            input.shapeMetrics.x + input.shapeMetrics.y,
+            distanceValue);
     }
 
     color.a *= coverage;

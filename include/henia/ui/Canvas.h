@@ -15,6 +15,27 @@ struct GlyphQuad final {
     Rect uv{};
 };
 
+enum class EffectLayerKind : std::uint8_t {
+    Tint,
+    Gradient,
+    AnimatedGradient,
+    Glow,
+    SoftShadow,
+    Outline,
+};
+
+// Compact, ordered effect description. The host owns animation time and passes
+// phase in cycles, keeping rendering deterministic and free of hidden clocks.
+struct EffectLayer final {
+    EffectLayerKind kind = EffectLayerKind::Tint;
+    Color color{};
+    Color secondaryColor{};
+    Vec2 vector{1.0F, 0.0F};
+    float amount = 0.0F;
+    float phase = 0.0F;
+    bool enabled = true;
+};
+
 class Canvas final {
 public:
     static constexpr std::size_t kMaximumClipDepth = 32;
@@ -80,6 +101,41 @@ public:
         Color finish,
         Vec2 direction = {1.0F, 0.0F},
         float rounding = 0.0F) noexcept;
+    void tintRect(Rect rect, Color color, float rounding = 0.0F) noexcept;
+    void animatedGradientRect(
+        Rect rect,
+        Color start,
+        Color finish,
+        Vec2 direction,
+        float phase,
+        float rounding = 0.0F) noexcept;
+    void roundedGlow(
+        Rect rect,
+        Color color,
+        float rounding,
+        float glowRadius) noexcept;
+    // One analytic instance, unlike strokeRect's fragment-minimizing eight
+    // regions. Prefer this when composability matters more than fill rate.
+    void roundedOutline(
+        Rect rect,
+        Color color,
+        float rounding,
+        float thickness) noexcept;
+    // R8/RGBA textures are interpreted as a signed-distance coverage field in
+    // the red channel. edge and softness are normalized texture values.
+    void sdfIcon(
+        TextureHandle texture,
+        Rect rect,
+        Rect sourceUv,
+        Color tint = {},
+        float edge = 0.5F,
+        float softness = 0.05F) noexcept;
+    // Emits enabled layers in caller order. This is a local overlay pipeline:
+    // no full-screen pass or intermediate render target is introduced.
+    void effectRect(
+        Rect rect,
+        float rounding,
+        std::span<const EffectLayer> layers) noexcept;
     // A compact analytic approximation: blurRadius controls a Gaussian-like
     // falloff without allocating an intermediate blur target.
     void roundedShadow(
