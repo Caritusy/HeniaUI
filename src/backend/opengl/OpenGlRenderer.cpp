@@ -1,6 +1,7 @@
 #include "henia/ui/backend/opengl/OpenGlRenderer.h"
 
 #include "../FixedError.h"
+#include "OpenGlUploadRing.h"
 
 #define NOMINMAX
 #include <Windows.h>
@@ -24,6 +25,8 @@ namespace {
 using GlChar = char;
 using GlSize = std::ptrdiff_t;
 using GlIntPtr = std::ptrdiff_t;
+struct GlSyncObject;
+using GlSync = GlSyncObject*;
 
 constexpr GLenum kArrayBuffer = 0x8892;
 constexpr GLenum kArrayBufferBinding = 0x8894;
@@ -43,8 +46,12 @@ constexpr GLenum kR8 = 0x8229;
 constexpr GLenum kRed = 0x1903;
 constexpr GLenum kRgba8 = 0x8058;
 constexpr GLenum kMapWriteBit = 0x0002;
-constexpr GLenum kMapInvalidateBufferBit = 0x0008;
 constexpr GLenum kMapUnsynchronizedBit = 0x0020;
+constexpr GLenum kSyncGpuCommandsComplete = 0x9117;
+constexpr GLenum kAlreadySignaled = 0x911A;
+constexpr GLenum kTimeoutExpired = 0x911B;
+constexpr GLenum kConditionSatisfied = 0x911C;
+constexpr GLbitfield kSyncFlushCommandsBit = 0x00000001;
 constexpr GLenum kBlendSourceRgb = 0x80C9;
 constexpr GLenum kBlendDestinationRgb = 0x80C8;
 constexpr GLenum kBlendSourceAlpha = 0x80CB;
@@ -77,6 +84,9 @@ using BufferDataFn = void(APIENTRYP)(GLenum, GlSize, const void*, GLenum);
 using MapBufferRangeFn = void*(APIENTRYP)(GLenum, GlIntPtr, GlSize, GLbitfield);
 using UnmapBufferFn = GLboolean(APIENTRYP)(GLenum);
 using DeleteBuffersFn = void(APIENTRYP)(GLsizei, const GLuint*);
+using FenceSyncFn = GlSync(APIENTRYP)(GLenum, GLbitfield);
+using ClientWaitSyncFn = GLenum(APIENTRYP)(GlSync, GLbitfield, std::uint64_t);
+using DeleteSyncFn = void(APIENTRYP)(GlSync);
 using EnableVertexAttribArrayFn = void(APIENTRYP)(GLuint);
 using VertexAttribPointerFn = void(APIENTRYP)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
 using VertexAttribIPointerFn = void(APIENTRYP)(GLuint, GLint, GLenum, GLsizei, const void*);
@@ -111,6 +121,9 @@ struct GlFunctions final {
     MapBufferRangeFn mapBufferRange = nullptr;
     UnmapBufferFn unmapBuffer = nullptr;
     DeleteBuffersFn deleteBuffers = nullptr;
+    FenceSyncFn fenceSync = nullptr;
+    ClientWaitSyncFn clientWaitSync = nullptr;
+    DeleteSyncFn deleteSync = nullptr;
     EnableVertexAttribArrayFn enableVertexAttribArray = nullptr;
     VertexAttribPointerFn vertexAttribPointer = nullptr;
     VertexAttribIPointerFn vertexAttribIPointer = nullptr;
@@ -163,6 +176,9 @@ template <typename Function>
         && load(gl.mapBufferRange, "glMapBufferRange")
         && load(gl.unmapBuffer, "glUnmapBuffer")
         && load(gl.deleteBuffers, "glDeleteBuffers")
+        && load(gl.fenceSync, "glFenceSync")
+        && load(gl.clientWaitSync, "glClientWaitSync")
+        && load(gl.deleteSync, "glDeleteSync")
         && load(gl.enableVertexAttribArray, "glEnableVertexAttribArray")
         && load(gl.vertexAttribPointer, "glVertexAttribPointer")
         && load(gl.vertexAttribIPointer, "glVertexAttribIPointer")
@@ -354,15 +370,19 @@ struct OpenGlRenderer::Implementation final {
         std::uint64_t revision = 0;
     };
 
+    struct UploadSlot final {
+        GLuint buffer = 0;
+        GlSync fence = nullptr;
+    };
+
     GlFunctions gl{};
     GLuint program = 0;
     GLuint vertexArray = 0;
-    GLuint instanceBuffer = 0;
     GLint viewportLocation = -1;
     GLint texturesLocation = -1;
     std::size_t capacity = 0;
-    std::uint64_t uploadedIdentity = 0;
-    std::uint64_t uploadedRevision = 0;
+    std::vector<UploadSlot> uploadSlots;
+    henia::detail::OpenGlUploadRing uploadRing;
     std::vector<GpuTexture> textures;
     OpenGlRenderStatistics statistics{};
     henia::detail::FixedError error;
@@ -370,13 +390,16 @@ struct OpenGlRenderer::Implementation final {
 
     [[nodiscard]] bool initialize(
         std::size_t requestedCapacity,
-        std::size_t requestedTextureCapacity);
+        std::size_t requestedTextureCapacity,
+        std::size_t requestedUploadSlots);
     [[nodiscard]] bool synchronizeTextures(const TextureStore& store) noexcept;
     [[nodiscard]] bool render(
         const RenderPacket& packet,
         std::uint32_t width,
         std::uint32_t height) noexcept;
     void shutdown() noexcept;
+    [[nodiscard]] henia::detail::UploadFenceStatus pollUploadSlot(std::size_t index) noexcept;
+    [[nodiscard]] bool fenceUploadSlot(std::size_t index) noexcept;
     void configureAttributes(std::size_t firstInstance) const noexcept;
     [[nodiscard]] GlState captureState() const noexcept;
     void restoreState(const GlState& state) const noexcept;
@@ -384,17 +407,22 @@ struct OpenGlRenderer::Implementation final {
 
 bool OpenGlRenderer::Implementation::initialize(
     std::size_t requestedCapacity,
-    std::size_t requestedTextureCapacity) {
+    std::size_t requestedTextureCapacity,
+    std::size_t requestedUploadSlots) {
     if (ready) {
         return true;
     }
     if (wglGetCurrentContext() == nullptr || requestedCapacity == 0 || requestedTextureCapacity == 0
+        || requestedUploadSlots == 0
         || requestedCapacity > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())
-        || requestedTextureCapacity > std::numeric_limits<std::uint32_t>::max()) {
-        error = "OpenGL 3.3 context and non-zero instance/texture capacities are required";
+        || requestedTextureCapacity > std::numeric_limits<std::uint32_t>::max()
+        || requestedUploadSlots > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
+        error = "OpenGL 3.3 context and non-zero instance/texture/upload capacities are required";
         return false;
     }
     textures.resize(requestedTextureCapacity);
+    uploadSlots.resize(requestedUploadSlots);
+    uploadRing.reset(requestedUploadSlots);
     if (!loadFunctions(gl)) {
         error = "OpenGL 3.3 entry points are unavailable";
         return false;
@@ -441,20 +469,29 @@ bool OpenGlRenderer::Implementation::initialize(
     }
 
     gl.genVertexArrays(1, &vertexArray);
-    gl.genBuffers(1, &instanceBuffer);
-    if (vertexArray == 0 || instanceBuffer == 0) {
+    for (UploadSlot& slot : uploadSlots) {
+        gl.genBuffers(1, &slot.buffer);
+    }
+    const bool buffersReady = std::all_of(
+        uploadSlots.begin(),
+        uploadSlots.end(),
+        [](const UploadSlot& slot) { return slot.buffer != 0; });
+    if (vertexArray == 0 || !buffersReady) {
         error = "OpenGL failed to allocate renderer buffers";
         shutdown();
         return false;
     }
 
     gl.bindVertexArray(vertexArray);
-    gl.bindBuffer(kArrayBuffer, instanceBuffer);
-    gl.bufferData(
-        kArrayBuffer,
-        static_cast<GlSize>(requestedCapacity * sizeof(DrawInstance)),
-        nullptr,
-        kDynamicDraw);
+    for (const UploadSlot& slot : uploadSlots) {
+        gl.bindBuffer(kArrayBuffer, slot.buffer);
+        gl.bufferData(
+            kArrayBuffer,
+            static_cast<GlSize>(requestedCapacity * sizeof(DrawInstance)),
+            nullptr,
+            kDynamicDraw);
+    }
+    gl.bindBuffer(kArrayBuffer, uploadSlots.front().buffer);
     configureAttributes(0);
     gl.bindBuffer(kArrayBuffer, 0);
     gl.bindVertexArray(0);
@@ -561,6 +598,19 @@ bool OpenGlRenderer::Implementation::render(
         }
     }
 
+    const henia::detail::UploadSelection upload = uploadRing.select(
+        packet.identity(),
+        packet.revision(),
+        false,
+        [this](std::size_t index) noexcept { return pollUploadSlot(index); });
+    if (upload.kind == henia::detail::UploadSelectionKind::Exhausted) {
+        ++statistics.uploadSlotExhaustions;
+        ++statistics.rejectedFrames;
+        error = "OpenGL instance upload ring has no fence-safe slot";
+        return false;
+    }
+    UploadSlot& uploadSlot = uploadSlots[upload.slot];
+
     const GlState previous = captureState();
     glViewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
     glDisable(GL_DEPTH_TEST);
@@ -572,14 +622,14 @@ bool OpenGlRenderer::Implementation::render(
     constexpr std::array<GLint, DrawBatch::kTextureCapacity> textureUnits{0, 1, 2, 3, 4, 5, 6, 7};
     gl.uniform1iv(texturesLocation, static_cast<GLsizei>(textureUnits.size()), textureUnits.data());
     gl.bindVertexArray(vertexArray);
-    gl.bindBuffer(kArrayBuffer, instanceBuffer);
+    gl.bindBuffer(kArrayBuffer, uploadSlot.buffer);
 
-    if (uploadedIdentity != packet.identity() || uploadedRevision != packet.revision()) {
+    if (upload.requiresUpload()) {
         void* mapped = gl.mapBufferRange(
             kArrayBuffer,
             0,
             static_cast<GlSize>(packet.instances().size_bytes()),
-            kMapWriteBit | kMapInvalidateBufferBit | kMapUnsynchronizedBit);
+            kMapWriteBit | kMapUnsynchronizedBit);
         if (mapped == nullptr) {
             restoreState(previous);
             ++statistics.rejectedFrames;
@@ -588,16 +638,18 @@ bool OpenGlRenderer::Implementation::render(
         }
         std::memcpy(mapped, packet.instances().data(), packet.instances().size_bytes());
         if (gl.unmapBuffer(kArrayBuffer) != GL_TRUE) {
+            uploadRing.invalidate(upload.slot);
             restoreState(previous);
             ++statistics.rejectedFrames;
             error = "OpenGL instance upload was corrupted";
             return false;
         }
-        uploadedIdentity = packet.identity();
-        uploadedRevision = packet.revision();
+        uploadRing.markUploaded(upload.slot, packet.identity(), packet.revision());
         ++statistics.instanceUploads;
+        statistics.uploadedInstanceBytes += packet.instances().size_bytes();
     }
 
+    bool submitted = false;
     for (const DrawBatch& batch : packet.batches()) {
         if (batch.instanceCount == 0) {
             continue;
@@ -632,13 +684,62 @@ bool OpenGlRenderer::Implementation::render(
             0,
             6,
             static_cast<GLsizei>(batch.instanceCount));
+        submitted = true;
         ++statistics.drawCalls;
         statistics.submittedInstances += batch.instanceCount;
+    }
+
+    if (submitted && !fenceUploadSlot(upload.slot)) {
+        restoreState(previous);
+        ++statistics.rejectedFrames;
+        return false;
     }
 
     restoreState(previous);
     ++statistics.frames;
     error.clear();
+    return true;
+}
+
+henia::detail::UploadFenceStatus OpenGlRenderer::Implementation::pollUploadSlot(
+    std::size_t index) noexcept {
+    UploadSlot& slot = uploadSlots[index];
+    if (slot.fence == nullptr) {
+        return henia::detail::UploadFenceStatus::Signaled;
+    }
+    const GLenum result = gl.clientWaitSync(slot.fence, kSyncFlushCommandsBit, 0);
+    if (result == kAlreadySignaled || result == kConditionSatisfied) {
+        gl.deleteSync(slot.fence);
+        slot.fence = nullptr;
+        return henia::detail::UploadFenceStatus::Signaled;
+    }
+    if (result == kTimeoutExpired) {
+        return henia::detail::UploadFenceStatus::Busy;
+    }
+    gl.deleteSync(slot.fence);
+    slot.fence = nullptr;
+    ++statistics.uploadFenceFailures;
+    return henia::detail::UploadFenceStatus::Failed;
+}
+
+bool OpenGlRenderer::Implementation::fenceUploadSlot(std::size_t index) noexcept {
+    UploadSlot& slot = uploadSlots[index];
+    GlSync fence = gl.fenceSync(kSyncGpuCommandsComplete, 0);
+    if (fence == nullptr) {
+        if (slot.fence != nullptr) {
+            gl.deleteSync(slot.fence);
+            slot.fence = nullptr;
+        }
+        uploadRing.markFenceFailed(index);
+        ++statistics.uploadFenceFailures;
+        error = "OpenGL failed to fence the submitted instance upload slot";
+        return false;
+    }
+    if (slot.fence != nullptr) {
+        gl.deleteSync(slot.fence);
+    }
+    slot.fence = fence;
+    uploadRing.markSubmitted(index);
     return true;
 }
 
@@ -649,8 +750,14 @@ void OpenGlRenderer::Implementation::shutdown() noexcept {
                 glDeleteTextures(1, &texture.object);
             }
         }
-        if (instanceBuffer != 0 && gl.deleteBuffers != nullptr) {
-            gl.deleteBuffers(1, &instanceBuffer);
+        for (UploadSlot& slot : uploadSlots) {
+            if (slot.fence != nullptr && gl.deleteSync != nullptr) {
+                gl.deleteSync(slot.fence);
+                slot.fence = nullptr;
+            }
+            if (slot.buffer != 0 && gl.deleteBuffers != nullptr) {
+                gl.deleteBuffers(1, &slot.buffer);
+            }
         }
         if (vertexArray != 0 && gl.deleteVertexArrays != nullptr) {
             gl.deleteVertexArrays(1, &vertexArray);
@@ -660,14 +767,13 @@ void OpenGlRenderer::Implementation::shutdown() noexcept {
         }
     }
     textures.clear();
+    uploadSlots.clear();
+    uploadRing.clear();
     program = 0;
     vertexArray = 0;
-    instanceBuffer = 0;
     viewportLocation = -1;
     texturesLocation = -1;
     capacity = 0;
-    uploadedIdentity = 0;
-    uploadedRevision = 0;
     ready = false;
 }
 
@@ -743,9 +849,13 @@ OpenGlRenderer::~OpenGlRenderer() { mImplementation->shutdown(); }
 
 bool OpenGlRenderer::initialize(
     std::size_t instanceCapacity,
-    std::size_t textureCapacityValue) noexcept {
+    std::size_t textureCapacityValue,
+    std::size_t uploadSlotCountValue) noexcept {
     try {
-        const bool initialized = mImplementation->initialize(instanceCapacity, textureCapacityValue);
+        const bool initialized = mImplementation->initialize(
+            instanceCapacity,
+            textureCapacityValue,
+            uploadSlotCountValue);
         if (!initialized) {
             mImplementation->shutdown();
         }
@@ -776,6 +886,10 @@ std::size_t OpenGlRenderer::instanceCapacity() const noexcept { return mImplemen
 
 std::size_t OpenGlRenderer::textureCapacity() const noexcept {
     return mImplementation->textures.size();
+}
+
+std::size_t OpenGlRenderer::uploadSlotCount() const noexcept {
+    return mImplementation->uploadSlots.size();
 }
 
 OpenGlRenderStatistics OpenGlRenderer::statistics() const noexcept { return mImplementation->statistics; }

@@ -1,6 +1,7 @@
 #include "henia/gfx/backend/opengl/OpenGlRenderDevice.h"
 
 #include "../FixedError.h"
+#include "OpenGlUploadRing.h"
 
 #define NOMINMAX
 #include <Windows.h>
@@ -18,6 +19,7 @@
 #include <limits>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace henia::gfx {
 namespace {
@@ -25,6 +27,8 @@ namespace {
 using GlChar = char;
 using GlSize = std::ptrdiff_t;
 using GlIntPtr = std::ptrdiff_t;
+struct GlSyncObject;
+using GlSync = GlSyncObject*;
 
 constexpr GLenum kArrayBuffer = 0x8892;
 constexpr GLenum kArrayBufferBinding = 0x8894;
@@ -37,9 +41,12 @@ constexpr GLenum kInfoLogLength = 0x8B84;
 constexpr GLenum kCurrentProgram = 0x8B8D;
 constexpr GLenum kVertexArrayBinding = 0x85B5;
 constexpr GLenum kMapWriteBit = 0x0002;
-constexpr GLenum kMapInvalidateRangeBit = 0x0004;
-constexpr GLenum kMapInvalidateBufferBit = 0x0008;
 constexpr GLenum kMapUnsynchronizedBit = 0x0020;
+constexpr GLenum kSyncGpuCommandsComplete = 0x9117;
+constexpr GLenum kAlreadySignaled = 0x911A;
+constexpr GLenum kTimeoutExpired = 0x911B;
+constexpr GLenum kConditionSatisfied = 0x911C;
+constexpr GLbitfield kSyncFlushCommandsBit = 0x00000001;
 constexpr GLenum kBlendSourceRgb = 0x80C9;
 constexpr GLenum kBlendDestinationRgb = 0x80C8;
 constexpr GLenum kBlendSourceAlpha = 0x80CB;
@@ -74,6 +81,9 @@ using BufferDataFn = void(APIENTRYP)(GLenum, GlSize, const void*, GLenum);
 using MapBufferRangeFn = void*(APIENTRYP)(GLenum, GlIntPtr, GlSize, GLbitfield);
 using UnmapBufferFn = GLboolean(APIENTRYP)(GLenum);
 using DeleteBuffersFn = void(APIENTRYP)(GLsizei, const GLuint*);
+using FenceSyncFn = GlSync(APIENTRYP)(GLenum, GLbitfield);
+using ClientWaitSyncFn = GLenum(APIENTRYP)(GlSync, GLbitfield, std::uint64_t);
+using DeleteSyncFn = void(APIENTRYP)(GlSync);
 using EnableVertexAttribArrayFn = void(APIENTRYP)(GLuint);
 using VertexAttribPointerFn = void(APIENTRYP)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
 using VertexAttribIPointerFn = void(APIENTRYP)(GLuint, GLint, GLenum, GLsizei, const void*);
@@ -109,6 +119,9 @@ struct GlFunctions final {
     MapBufferRangeFn mapBufferRange = nullptr;
     UnmapBufferFn unmapBuffer = nullptr;
     DeleteBuffersFn deleteBuffers = nullptr;
+    FenceSyncFn fenceSync = nullptr;
+    ClientWaitSyncFn clientWaitSync = nullptr;
+    DeleteSyncFn deleteSync = nullptr;
     EnableVertexAttribArrayFn enableVertexAttribArray = nullptr;
     VertexAttribPointerFn vertexAttribPointer = nullptr;
     VertexAttribIPointerFn vertexAttribIPointer = nullptr;
@@ -151,6 +164,8 @@ template <typename Function>
         && load(gl.genBuffers, "glGenBuffers") && load(gl.bindBuffer, "glBindBuffer")
         && load(gl.bufferData, "glBufferData") && load(gl.mapBufferRange, "glMapBufferRange")
         && load(gl.unmapBuffer, "glUnmapBuffer") && load(gl.deleteBuffers, "glDeleteBuffers")
+        && load(gl.fenceSync, "glFenceSync") && load(gl.clientWaitSync, "glClientWaitSync")
+        && load(gl.deleteSync, "glDeleteSync")
         && load(gl.enableVertexAttribArray, "glEnableVertexAttribArray")
         && load(gl.vertexAttribPointer, "glVertexAttribPointer")
         && load(gl.vertexAttribIPointer, "glVertexAttribIPointer")
@@ -319,38 +334,52 @@ struct GlState final {
 } // namespace
 
 struct OpenGlRenderDevice::Implementation final {
+    struct UploadSlot final {
+        GLuint buffer = 0;
+        GlSync fence = nullptr;
+    };
+
     GlFunctions gl{};
     GLuint program = 0;
     GLuint vertexArray = 0;
-    GLuint instanceBuffer = 0;
     GLint viewProjectionLocation = -1;
     GLint viewportLocation = -1;
     GLint timeLocation = -1;
     GLint depthRangeLocation = -1;
     std::size_t capacity = 0;
-    std::uint64_t uploadedIdentity = 0;
-    std::uint64_t uploadedRevision = 0;
+    std::vector<UploadSlot> uploadSlots;
+    henia::detail::OpenGlUploadRing uploadRing;
     OpenGlGfxStatistics statistics{};
     henia::detail::FixedError error;
     bool ready = false;
 
-    [[nodiscard]] bool initialize(std::size_t requestedCapacity) noexcept;
+    [[nodiscard]] bool initialize(
+        std::size_t requestedCapacity,
+        std::size_t requestedUploadSlots);
     [[nodiscard]] bool render(
         const InstanceBatch& batch,
         const ViewParameters& view,
         bool depthAttachmentAvailable) noexcept;
     void shutdown() noexcept;
+    [[nodiscard]] henia::detail::UploadFenceStatus pollUploadSlot(std::size_t index) noexcept;
+    [[nodiscard]] bool fenceUploadSlot(std::size_t index) noexcept;
+    void configureAttributes() const noexcept;
     [[nodiscard]] GlState captureState() const noexcept;
     void restoreState(const GlState& state) const noexcept;
 };
 
-bool OpenGlRenderDevice::Implementation::initialize(std::size_t requestedCapacity) noexcept {
+bool OpenGlRenderDevice::Implementation::initialize(
+    std::size_t requestedCapacity,
+    std::size_t requestedUploadSlots) {
     if (ready) return true;
-    if (wglGetCurrentContext() == nullptr || requestedCapacity == 0
-        || requestedCapacity > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
-        error = "OpenGL 3.3 context and a non-zero box capacity are required";
+    if (wglGetCurrentContext() == nullptr || requestedCapacity == 0 || requestedUploadSlots == 0
+        || requestedCapacity > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())
+        || requestedUploadSlots > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
+        error = "OpenGL 3.3 context and non-zero box/upload capacities are required";
         return false;
     }
+    uploadSlots.resize(requestedUploadSlots);
+    uploadRing.reset(requestedUploadSlots);
     if (!loadFunctions(gl)) {
         error = "OpenGL 3.3 gfx entry points are unavailable";
         return false;
@@ -391,25 +420,29 @@ bool OpenGlRenderDevice::Implementation::initialize(std::size_t requestedCapacit
         return false;
     }
     gl.genVertexArrays(1, &vertexArray);
-    gl.genBuffers(1, &instanceBuffer);
-    if (vertexArray == 0 || instanceBuffer == 0) {
+    for (UploadSlot& slot : uploadSlots) {
+        gl.genBuffers(1, &slot.buffer);
+    }
+    const bool buffersReady = std::all_of(
+        uploadSlots.begin(),
+        uploadSlots.end(),
+        [](const UploadSlot& slot) { return slot.buffer != 0; });
+    if (vertexArray == 0 || !buffersReady) {
         error = "OpenGL failed to allocate the gfx instance buffer";
         shutdown();
         return false;
     }
     gl.bindVertexArray(vertexArray);
-    gl.bindBuffer(kArrayBuffer, instanceBuffer);
-    gl.bufferData(kArrayBuffer, static_cast<GlSize>(requestedCapacity * sizeof(BoxInstance)), nullptr, kDynamicDraw);
-    constexpr GLsizei stride = static_cast<GLsizei>(sizeof(BoxInstance));
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(0));
-    gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(16));
-    gl.enableVertexAttribArray(2);
-    gl.vertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(32));
-    gl.enableVertexAttribArray(3);
-    gl.vertexAttribIPointer(3, 1, GL_UNSIGNED_INT, stride, reinterpret_cast<const void*>(48));
-    for (GLuint attribute = 0; attribute < 4; ++attribute) gl.vertexAttribDivisor(attribute, 1);
+    for (const UploadSlot& slot : uploadSlots) {
+        gl.bindBuffer(kArrayBuffer, slot.buffer);
+        gl.bufferData(
+            kArrayBuffer,
+            static_cast<GlSize>(requestedCapacity * sizeof(BoxInstance)),
+            nullptr,
+            kDynamicDraw);
+    }
+    gl.bindBuffer(kArrayBuffer, uploadSlots.front().buffer);
+    configureAttributes();
     gl.bindBuffer(kArrayBuffer, 0);
     gl.bindVertexArray(0);
     capacity = requestedCapacity;
@@ -432,6 +465,22 @@ bool OpenGlRenderDevice::Implementation::render(
         return false;
     }
 
+    const bool partialRequested = batch.revision() > 1 && batch.dirtyCount() > 0
+        && batch.dirtyOffset() <= boxes.size()
+        && batch.dirtyCount() <= boxes.size() - batch.dirtyOffset();
+    const henia::detail::UploadSelection upload = uploadRing.select(
+        batch.identity(),
+        batch.revision(),
+        partialRequested,
+        [this](std::size_t index) noexcept { return pollUploadSlot(index); });
+    if (upload.kind == henia::detail::UploadSelectionKind::Exhausted) {
+        ++statistics.uploadSlotExhaustions;
+        ++statistics.rejectedFrames;
+        error = "OpenGL gfx upload ring has no fence-safe slot";
+        return false;
+    }
+    UploadSlot& uploadSlot = uploadSlots[upload.slot];
+
     const GlState state = captureState();
     if (glGetError() != GL_NO_ERROR) {
         ++statistics.rejectedFrames;
@@ -439,18 +488,17 @@ bool OpenGlRenderDevice::Implementation::render(
         return false;
     }
     gl.bindVertexArray(vertexArray);
-    gl.bindBuffer(kArrayBuffer, instanceBuffer);
-    if (uploadedIdentity != batch.identity() || uploadedRevision != batch.revision()) {
+    gl.bindBuffer(kArrayBuffer, uploadSlot.buffer);
+    configureAttributes();
+    bool partialUpload = false;
+    std::size_t uploadedBytes = 0;
+    if (upload.requiresUpload()) {
         const auto uploadStarted = std::chrono::steady_clock::now();
-        const bool partial = uploadedIdentity == batch.identity()
-            && uploadedRevision + 1 == batch.revision()
-            && batch.dirtyCount() > 0
-            && batch.dirtyOffset() + batch.dirtyCount() <= boxes.size();
+        const bool partial = upload.kind == henia::detail::UploadSelectionKind::Partial;
         const std::size_t offset = partial ? batch.dirtyOffset() : 0;
         const std::size_t count = partial ? batch.dirtyCount() : boxes.size();
         if (count > 0) {
-            const GLbitfield flags = kMapWriteBit | kMapUnsynchronizedBit
-                | (partial ? kMapInvalidateRangeBit : kMapInvalidateBufferBit);
+            constexpr GLbitfield flags = kMapWriteBit | kMapUnsynchronizedBit;
             void* destination = gl.mapBufferRange(
                 kArrayBuffer,
                 static_cast<GlIntPtr>(offset * sizeof(BoxInstance)),
@@ -464,25 +512,39 @@ bool OpenGlRenderDevice::Implementation::render(
             }
             std::memcpy(destination, boxes.data() + offset, count * sizeof(BoxInstance));
             if (gl.unmapBuffer(kArrayBuffer) != GL_TRUE) {
+                uploadRing.invalidate(upload.slot);
                 restoreState(state);
                 ++statistics.rejectedFrames;
                 error = "OpenGL reported a corrupted gfx instance buffer";
                 return false;
             }
         }
-        uploadedIdentity = batch.identity();
-        uploadedRevision = batch.revision();
-        if (partial) ++statistics.partialInstanceUploads;
-        else ++statistics.fullInstanceUploads;
+        uploadRing.markUploaded(upload.slot, batch.identity(), batch.revision());
+        partialUpload = partial;
+        uploadedBytes = count * sizeof(BoxInstance);
         statistics.profile.cpuUploadNanoseconds = elapsedNanoseconds(uploadStarted);
     } else {
         statistics.profile.cpuUploadNanoseconds = 0;
     }
     if (glGetError() != GL_NO_ERROR) {
+        if (upload.requiresUpload()) {
+            uploadRing.invalidate(upload.slot);
+        }
         restoreState(state);
         ++statistics.rejectedFrames;
         error = "OpenGL gfx instance upload failed";
         return false;
+    }
+    if (upload.requiresUpload()) {
+        if (partialUpload) {
+            ++statistics.partialInstanceUploads;
+        } else {
+            ++statistics.fullInstanceUploads;
+            if (partialRequested) {
+                ++statistics.fullUploadFallbacks;
+            }
+        }
+        statistics.uploadedInstanceBytes += uploadedBytes;
     }
 
     const auto submitStarted = std::chrono::steady_clock::now();
@@ -528,10 +590,17 @@ bool OpenGlRenderDevice::Implementation::render(
         ++statistics.drawCalls;
         statistics.submittedInstances += boxes.size();
     }
-    if (glGetError() != GL_NO_ERROR) {
+    const GLenum drawError = glGetError();
+    const bool fenced = boxes.empty() || fenceUploadSlot(upload.slot);
+    if (drawError != GL_NO_ERROR) {
         restoreState(state);
         ++statistics.rejectedFrames;
         error = "OpenGL gfx instanced draw failed";
+        return false;
+    }
+    if (!fenced) {
+        restoreState(state);
+        ++statistics.rejectedFrames;
         return false;
     }
     statistics.profile.cpuDrawSubmitNanoseconds = elapsedNanoseconds(submitStarted);
@@ -543,6 +612,63 @@ bool OpenGlRenderDevice::Implementation::render(
     }
     error.clear();
     return true;
+}
+
+henia::detail::UploadFenceStatus OpenGlRenderDevice::Implementation::pollUploadSlot(
+    std::size_t index) noexcept {
+    UploadSlot& slot = uploadSlots[index];
+    if (slot.fence == nullptr) {
+        return henia::detail::UploadFenceStatus::Signaled;
+    }
+    const GLenum result = gl.clientWaitSync(slot.fence, kSyncFlushCommandsBit, 0);
+    if (result == kAlreadySignaled || result == kConditionSatisfied) {
+        gl.deleteSync(slot.fence);
+        slot.fence = nullptr;
+        return henia::detail::UploadFenceStatus::Signaled;
+    }
+    if (result == kTimeoutExpired) {
+        return henia::detail::UploadFenceStatus::Busy;
+    }
+    gl.deleteSync(slot.fence);
+    slot.fence = nullptr;
+    ++statistics.uploadFenceFailures;
+    return henia::detail::UploadFenceStatus::Failed;
+}
+
+bool OpenGlRenderDevice::Implementation::fenceUploadSlot(std::size_t index) noexcept {
+    UploadSlot& slot = uploadSlots[index];
+    GlSync fence = gl.fenceSync(kSyncGpuCommandsComplete, 0);
+    if (fence == nullptr) {
+        if (slot.fence != nullptr) {
+            gl.deleteSync(slot.fence);
+            slot.fence = nullptr;
+        }
+        uploadRing.markFenceFailed(index);
+        ++statistics.uploadFenceFailures;
+        error = "OpenGL failed to fence the submitted gfx upload slot";
+        return false;
+    }
+    if (slot.fence != nullptr) {
+        gl.deleteSync(slot.fence);
+    }
+    slot.fence = fence;
+    uploadRing.markSubmitted(index);
+    return true;
+}
+
+void OpenGlRenderDevice::Implementation::configureAttributes() const noexcept {
+    constexpr GLsizei stride = static_cast<GLsizei>(sizeof(BoxInstance));
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(0));
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(16));
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(32));
+    gl.enableVertexAttribArray(3);
+    gl.vertexAttribIPointer(3, 1, GL_UNSIGNED_INT, stride, reinterpret_cast<const void*>(48));
+    for (GLuint attribute = 0; attribute < 4; ++attribute) {
+        gl.vertexAttribDivisor(attribute, 1);
+    }
 }
 
 GlState OpenGlRenderDevice::Implementation::captureState() const noexcept {
@@ -578,22 +704,43 @@ void OpenGlRenderDevice::Implementation::restoreState(const GlState& state) cons
 
 void OpenGlRenderDevice::Implementation::shutdown() noexcept {
     if (wglGetCurrentContext() != nullptr) {
-        if (instanceBuffer != 0 && gl.deleteBuffers != nullptr) gl.deleteBuffers(1, &instanceBuffer);
+        for (UploadSlot& slot : uploadSlots) {
+            if (slot.fence != nullptr && gl.deleteSync != nullptr) {
+                gl.deleteSync(slot.fence);
+                slot.fence = nullptr;
+            }
+            if (slot.buffer != 0 && gl.deleteBuffers != nullptr) {
+                gl.deleteBuffers(1, &slot.buffer);
+            }
+        }
         if (vertexArray != 0 && gl.deleteVertexArrays != nullptr) gl.deleteVertexArrays(1, &vertexArray);
         if (program != 0 && gl.deleteProgram != nullptr) gl.deleteProgram(program);
     }
     program = 0;
     vertexArray = 0;
-    instanceBuffer = 0;
+    uploadSlots.clear();
+    uploadRing.clear();
     capacity = 0;
-    uploadedIdentity = 0;
-    uploadedRevision = 0;
     ready = false;
 }
 
 OpenGlRenderDevice::OpenGlRenderDevice() : mImplementation(std::make_unique<Implementation>()) {}
 OpenGlRenderDevice::~OpenGlRenderDevice() { shutdown(); }
-bool OpenGlRenderDevice::initialize(std::size_t capacityValue) noexcept { return mImplementation->initialize(capacityValue); }
+bool OpenGlRenderDevice::initialize(
+    std::size_t capacityValue,
+    std::size_t uploadSlotCountValue) noexcept {
+    try {
+        const bool initialized = mImplementation->initialize(capacityValue, uploadSlotCountValue);
+        if (!initialized) {
+            mImplementation->shutdown();
+        }
+        return initialized;
+    } catch (...) {
+        mImplementation->shutdown();
+        mImplementation->error = "OpenGL gfx initialization exhausted upload-ring storage";
+        return false;
+    }
+}
 bool OpenGlRenderDevice::render(
     const InstanceBatch& batch,
     const ViewParameters& view,
@@ -607,6 +754,9 @@ void OpenGlRenderDevice::reportGpuTime(std::uint64_t nanoseconds) noexcept {
 void OpenGlRenderDevice::shutdown() noexcept { if (mImplementation != nullptr) mImplementation->shutdown(); }
 bool OpenGlRenderDevice::initialized() const noexcept { return mImplementation->ready; }
 std::size_t OpenGlRenderDevice::boxCapacity() const noexcept { return mImplementation->capacity; }
+std::size_t OpenGlRenderDevice::uploadSlotCount() const noexcept {
+    return mImplementation->uploadSlots.size();
+}
 OpenGlGfxStatistics OpenGlRenderDevice::statistics() const noexcept { return mImplementation->statistics; }
 std::string_view OpenGlRenderDevice::lastError() const noexcept { return mImplementation->error.view(); }
 

@@ -64,7 +64,24 @@ The box fast path uses twelve fixed edges. Each edge is represented by two trian
 - hue cycling is driven by a frame constant and per-instance offset;
 - camera and time changes do not upload the instance buffer.
 
-The OpenGL backend allocates its maximum instance storage during initialization and maps only changed ranges. It never calls `glBufferData` from the render path. The D3D12 backend permanently maps one upload buffer per fence-owned submission slot. It never waits or allocates from `record()`.
+The OpenGL backends allocate a configurable ring of complete instance buffers
+during initialization and never call `glBufferData` from the render path. Every
+drawn slot receives a `glFenceSync`. Before any later CPU write, the renderer
+polls that fence with a zero timeout; it never waits. A cached revision may be
+drawn again from an in-flight slot because it is read-only. Changed content uses
+only a signaled slot, or the frame is rejected with upload-slot exhaustion
+statistics. Fence failures quarantine their slots from future writes.
+
+Both full 2D uploads and full/partial 3D uploads use this fence-owned model with
+`GL_MAP_UNSYNCHRONIZED_BIT`; the bit is safe because selection has already proven
+that the chosen buffer is no longer referenced by an in-flight draw. A 3D dirty
+range is uploaded partially only when the selected safe slot contains the same
+batch identity at exactly the previous revision. Otherwise the renderer performs
+a full upload and increments `fullUploadFallbacks`. Statistics also expose
+uploaded bytes, slot exhaustion, and fence failures.
+
+The D3D12 backend permanently maps one upload buffer per fence-owned submission
+slot. It never waits or allocates from `record()`.
 
 ## Host ownership
 
