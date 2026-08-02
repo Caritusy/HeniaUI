@@ -1,5 +1,6 @@
 #pragma once
 
+#include "henia/backend/d3d12/D3D12SubmissionReuse.h"
 #include "henia/ui/RenderPacket.h"
 #include "henia/ui/resource/TextureStore.h"
 
@@ -37,6 +38,10 @@ struct D3D12RenderStatistics final {
     std::uint64_t descriptorTableCopies = 0;
     std::uint64_t descriptorTableCacheHits = 0;
     std::uint64_t textureFreeFrames = 0;
+    std::uint64_t submissionFenceChecks = 0;
+    std::uint64_t submissionSlotBusyRejections = 0;
+    std::uint64_t deviceRemovalRejections = 0;
+    std::uint64_t lifecycleRejections = 0;
 };
 
 // The host owns command allocators, back-buffer transitions, render targets,
@@ -44,6 +49,9 @@ struct D3D12RenderStatistics final {
 // host has observed completion of every command list that referenced it. The
 // renderer is not movable because its resources and submission slots remain
 // associated with that host device and fence lifecycle.
+// Pass SubmissionReuse to record() to check a previous slot fence before any
+// mapped upload write or retained-texture release. An empty value declares that
+// the slot is new or that the host synchronized it by another mechanism.
 //
 // Texture synchronization records work on the supplied direct queue without
 // waiting for it to become idle. A successful synchronizeTextures call means
@@ -84,7 +92,8 @@ public:
         ID3D12GraphicsCommandList& commandList,
         std::uint32_t submissionSlot,
         std::uint32_t viewportWidth,
-        std::uint32_t viewportHeight) noexcept;
+        std::uint32_t viewportHeight,
+        henia::backend::d3d12::SubmissionReuse submissionReuse = {}) noexcept;
     void shutdown() noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;

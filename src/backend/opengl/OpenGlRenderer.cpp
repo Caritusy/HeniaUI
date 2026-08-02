@@ -463,6 +463,7 @@ struct OpenGlRenderer::Implementation final {
         std::uint32_t width,
         std::uint32_t height) noexcept;
     [[nodiscard]] bool shutdown() noexcept;
+    void abandon() noexcept;
     [[nodiscard]] henia::detail::UploadFenceStatus pollUploadSlot(std::size_t index) noexcept;
     [[nodiscard]] bool fenceUploadSlot(std::size_t index) noexcept;
     void configureAttributes(std::size_t firstInstance) const noexcept;
@@ -477,7 +478,19 @@ bool OpenGlRenderer::Implementation::initialize(
     std::size_t requestedTextureCapacity,
     std::size_t requestedUploadSlots) {
     if (ready) {
-        return validateOwnerContext("initialize");
+        if (!validateOwnerContext("initialize")) {
+            ++statistics.lifecycleRejections;
+            return false;
+        }
+        if (requestedCapacity != capacity
+            || requestedTextureCapacity != textures.size()
+            || requestedUploadSlots != uploadSlots.size()) {
+            ++statistics.lifecycleRejections;
+            error = "OpenGL renderer is already initialized with a different configuration";
+            return false;
+        }
+        error.clear();
+        return true;
     }
     std::size_t instanceBytes = 0;
     const HGLRC currentContext = wglGetCurrentContext();
@@ -1217,6 +1230,27 @@ bool OpenGlRenderer::Implementation::shutdown() noexcept {
     return true;
 }
 
+void OpenGlRenderer::Implementation::abandon() noexcept {
+    const bool hadOwner = ownerContext != nullptr;
+    textures.clear();
+    uploadSlots.clear();
+    uploadRing.clear();
+    program = 0;
+    vertexArray = 0;
+    viewportLocation = -1;
+    texturesLocation = -1;
+    maximumTextureSize = 0;
+    capacity = 0;
+    instanceBufferBytes = 0;
+    ownerContext = nullptr;
+    immutableTextureStorage = false;
+    ready = false;
+    if (hadOwner) {
+        ++statistics.abandonedContexts;
+    }
+    error.clear();
+}
+
 bool OpenGlRenderer::Implementation::validateOwnerContext(const char* operation) noexcept {
     static_cast<void>(operation);
     if (ownerContext != nullptr && wglGetCurrentContext() == ownerContext) {
@@ -1349,11 +1383,12 @@ bool OpenGlRenderer::initialize(
     std::size_t textureCapacityValue,
     std::size_t uploadSlotCountValue) noexcept {
     try {
+        const bool wasReady = mImplementation->ready;
         const bool initialized = mImplementation->initialize(
             instanceCapacity,
             textureCapacityValue,
             uploadSlotCountValue);
-        if (!initialized) {
+        if (!initialized && !wasReady) {
             ++mImplementation->statistics.initializationFailures;
             const henia::detail::FixedError diagnostic = mImplementation->error;
             static_cast<void>(mImplementation->shutdown());
@@ -1380,6 +1415,8 @@ bool OpenGlRenderer::render(
 }
 
 bool OpenGlRenderer::shutdown() noexcept { return mImplementation->shutdown(); }
+
+void OpenGlRenderer::abandon() noexcept { mImplementation->abandon(); }
 
 bool OpenGlRenderer::initialized() const noexcept { return mImplementation->ready; }
 

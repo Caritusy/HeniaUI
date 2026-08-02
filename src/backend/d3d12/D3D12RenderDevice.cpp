@@ -265,14 +265,46 @@ struct D3D12RenderDevice::Implementation final {
         const InstanceBatch& batch,
         const ViewParameters& view,
         ID3D12GraphicsCommandList& commandList,
-        std::uint32_t submissionSlot) noexcept;
+        std::uint32_t submissionSlot,
+        henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept;
     [[nodiscard]] bool validateCommandList(ID3D12GraphicsCommandList& commandList) noexcept;
+    [[nodiscard]] bool validateDeviceChild(
+        ID3D12DeviceChild& child,
+        const char* diagnostic) noexcept;
+    [[nodiscard]] bool validateSubmissionReuse(
+        henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept;
     void shutdown() noexcept;
 };
 
 bool D3D12RenderDevice::Implementation::initialize(
     ID3D12Device& device, D3D12GfxConfiguration value) {
-    if (ready) return true;
+    if (ready) {
+        ComPtr<IUnknown> configuredIdentity;
+        ComPtr<IUnknown> requestedIdentity;
+        if (FAILED(ownerDevice.As(&configuredIdentity))
+            || FAILED(device.QueryInterface(IID_PPV_ARGS(&requestedIdentity)))
+            || configuredIdentity.Get() != requestedIdentity.Get()) {
+            ++statistics.lifecycleRejections;
+            error = "D3D12 gfx renderer is already initialized with a different device";
+            return false;
+        }
+        if (value.boxCapacity != configuration.boxCapacity
+            || value.submissionCapacity != configuration.submissionCapacity
+            || value.renderTargetFormat != configuration.renderTargetFormat
+            || value.depthStencilFormat != configuration.depthStencilFormat
+            || value.sampleCount != configuration.sampleCount) {
+            ++statistics.lifecycleRejections;
+            error = "D3D12 gfx renderer is already initialized with a different configuration";
+            return false;
+        }
+        if (FAILED(ownerDevice->GetDeviceRemovedReason())) {
+            ++statistics.deviceRemovalRejections;
+            error = "D3D12 gfx device has been removed; shutdown and recreate the renderer";
+            return false;
+        }
+        error.clear();
+        return true;
+    }
     std::size_t instanceBytes = 0;
     if (value.boxCapacity == 0 || value.submissionCapacity == 0 || value.sampleCount == 0
         || value.renderTargetFormat == DXGI_FORMAT_UNKNOWN
@@ -389,6 +421,7 @@ bool D3D12RenderDevice::Implementation::initialize(
         }
         submission.mapped = static_cast<std::byte*>(mapped);
     }
+    statistics = {};
     ready = true;
     error.clear();
     return true;
@@ -427,7 +460,8 @@ bool D3D12RenderDevice::Implementation::record(
     const InstanceBatch& batch,
     const ViewParameters& view,
     ID3D12GraphicsCommandList& commandList,
-    std::uint32_t submissionSlot) noexcept {
+    std::uint32_t submissionSlot,
+    henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
     ++statistics.recordedFrames;
     statistics.profile.cpuBuildNanoseconds = batch.cpuBuildNanoseconds();
     const std::span<const BoxInstance> boxes = batch.boxes();
@@ -466,6 +500,10 @@ bool D3D12RenderDevice::Implementation::record(
             error.assign(issue.data(), issue.size());
             return false;
         }
+    }
+    if (!validateSubmissionReuse(submissionReuse)) {
+        ++statistics.rejectedFrames;
+        return false;
     }
     Submission& submission = submissions[submissionSlot];
     if (submission.uploadedIdentity != batch.identity() || submission.uploadedRevision != batch.revision()) {
@@ -554,20 +592,67 @@ bool D3D12RenderDevice::Implementation::record(
 
 bool D3D12RenderDevice::Implementation::validateCommandList(
     ID3D12GraphicsCommandList& commandList) noexcept {
+    if (FAILED(ownerDevice->GetDeviceRemovedReason())) {
+        ++statistics.deviceRemovalRejections;
+        error = "D3D12 gfx device has been removed; shutdown and recreate the renderer";
+        return false;
+    }
     if (commandList.GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
         ++statistics.commandListValidationFailures;
         error = "D3D12 gfx recording requires a DIRECT command list";
         return false;
     }
-    ComPtr<ID3D12Device> commandListDevice;
-    ComPtr<IUnknown> configuredIdentity;
-    ComPtr<IUnknown> commandListIdentity;
-    if (FAILED(commandList.GetDevice(IID_PPV_ARGS(&commandListDevice)))
-        || FAILED(ownerDevice.As(&configuredIdentity))
-        || FAILED(commandListDevice.As(&commandListIdentity))
-        || configuredIdentity.Get() != commandListIdentity.Get()) {
+    if (!validateDeviceChild(
+            commandList,
+            "D3D12 gfx command list belongs to a different device")) {
         ++statistics.commandListValidationFailures;
-        error = "D3D12 gfx command list belongs to a different device";
+        return false;
+    }
+    return true;
+}
+
+bool D3D12RenderDevice::Implementation::validateDeviceChild(
+    ID3D12DeviceChild& child,
+    const char* diagnostic) noexcept {
+    ComPtr<ID3D12Device> childDevice;
+    ComPtr<IUnknown> configuredIdentity;
+    ComPtr<IUnknown> childIdentity;
+    if (FAILED(child.GetDevice(IID_PPV_ARGS(&childDevice)))
+        || FAILED(ownerDevice.As(&configuredIdentity))
+        || FAILED(childDevice.As(&childIdentity))
+        || configuredIdentity.Get() != childIdentity.Get()) {
+        ++statistics.lifecycleRejections;
+        error = diagnostic;
+        return false;
+    }
+    return true;
+}
+
+bool D3D12RenderDevice::Implementation::validateSubmissionReuse(
+    henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
+    if (submissionReuse.completionFence == nullptr && submissionReuse.completionValue == 0) {
+        return true;
+    }
+    if (submissionReuse.completionFence == nullptr || submissionReuse.completionValue == 0) {
+        ++statistics.lifecycleRejections;
+        error = "D3D12 gfx submission reuse requires both a fence and non-zero completion value";
+        return false;
+    }
+    ++statistics.submissionFenceChecks;
+    if (!validateDeviceChild(
+            *submissionReuse.completionFence,
+            "D3D12 gfx submission reuse fence belongs to a different device")) {
+        return false;
+    }
+    const std::uint64_t completed = submissionReuse.completionFence->GetCompletedValue();
+    if (completed == std::numeric_limits<std::uint64_t>::max()) {
+        ++statistics.deviceRemovalRejections;
+        error = "D3D12 gfx submission reuse fence reported device removal";
+        return false;
+    }
+    if (completed < submissionReuse.completionValue) {
+        ++statistics.submissionSlotBusyRejections;
+        error = "D3D12 gfx submission slot is still referenced by the GPU";
         return false;
     }
     return true;
@@ -591,8 +676,9 @@ D3D12RenderDevice::D3D12RenderDevice() : mImplementation(std::make_unique<Implem
 D3D12RenderDevice::~D3D12RenderDevice() { shutdown(); }
 bool D3D12RenderDevice::initialize(ID3D12Device& device, D3D12GfxConfiguration configuration) noexcept {
     try {
+        const bool wasReady = mImplementation->ready;
         const bool initialized = mImplementation->initialize(device, configuration);
-        if (!initialized) {
+        if (!initialized && !wasReady) {
             mImplementation->shutdown();
         }
         return initialized;
@@ -604,8 +690,9 @@ bool D3D12RenderDevice::initialize(ID3D12Device& device, D3D12GfxConfiguration c
 }
 bool D3D12RenderDevice::record(
     const InstanceBatch& batch, const ViewParameters& view,
-    ID3D12GraphicsCommandList& commandList, std::uint32_t slot) noexcept {
-    return mImplementation->record(batch, view, commandList, slot);
+    ID3D12GraphicsCommandList& commandList, std::uint32_t slot,
+    henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
+    return mImplementation->record(batch, view, commandList, slot, submissionReuse);
 }
 void D3D12RenderDevice::reportGpuTime(std::uint64_t nanoseconds) noexcept {
     mImplementation->statistics.profile.gpuNanoseconds = nanoseconds;

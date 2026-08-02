@@ -518,8 +518,31 @@ int main() {
         || renderer.synchronizeTextures(textures) || renderer.shutdown() || !renderer.initialized()) {
         fail("OpenGL UI wrong-context calls were not rejected with resources preserved");
     }
+    OpenGlRenderer secondaryRenderer;
+    Frame secondaryFrame;
+    Canvas& secondaryCanvas = secondaryFrame.begin();
+    secondaryCanvas.fillRect({{8.0F, 8.0F}, {24.0F, 24.0F}}, {1.0F, 1.0F, 1.0F, 1.0F});
+    const RenderPacket secondaryPacket = secondaryFrame.finish();
+    if (!secondaryRenderer.initialize(4, 2, 1)
+        || !secondaryRenderer.initialize(4, 2, 1)
+        || secondaryRenderer.initialize(5, 2, 1)
+        || secondaryRenderer.lastError()
+            != "OpenGL renderer is already initialized with a different configuration"
+        || !secondaryRenderer.initialized()
+        || !secondaryRenderer.render(secondaryPacket, 32, 32)) {
+        fail("OpenGL independent-context renderer lifecycle failed");
+    }
     if (!context.makeCurrent()) {
         fail("Unable to restore the OpenGL owner context");
+    }
+    if (secondaryRenderer.render(secondaryPacket, 32, 32)
+        || secondaryRenderer.lastError()
+            != "OpenGL UI call requires the exact context used by initialize()") {
+        fail("OpenGL renderer lost its independent owner-context identity");
+    }
+    if (!wrongContext.makeCurrent() || !secondaryRenderer.shutdown()
+        || secondaryRenderer.initialized() || !context.makeCurrent()) {
+        fail("OpenGL independent-context renderer shutdown failed");
     }
 
     glViewport(0, 0, henia::test::kVisualWidth, henia::test::kVisualHeight);
@@ -748,8 +771,27 @@ int main() {
     if (gfx.render(boxBatch, validView) || gfx.shutdown() || !gfx.initialized()) {
         fail("OpenGL gfx wrong-context calls were not rejected with resources preserved");
     }
+    OpenGlRenderDevice secondaryGfx;
+    if (!secondaryGfx.initialize(1, 1)
+        || !secondaryGfx.initialize(1, 1)
+        || secondaryGfx.initialize(2, 1)
+        || secondaryGfx.lastError()
+            != "OpenGL gfx renderer is already initialized with a different configuration"
+        || !secondaryGfx.initialized()
+        || !secondaryGfx.render(boxBatch, validView)) {
+        fail("OpenGL independent-context gfx lifecycle failed");
+    }
     if (!context.makeCurrent()) {
         fail("Unable to return to the OpenGL owner context");
+    }
+    if (secondaryGfx.render(boxBatch, validView)
+        || secondaryGfx.lastError()
+            != "OpenGL gfx call requires the exact context used by initialize()") {
+        fail("OpenGL gfx renderer lost its independent owner-context identity");
+    }
+    if (!wrongContext.makeCurrent() || !secondaryGfx.shutdown()
+        || secondaryGfx.initialized() || !context.makeCurrent()) {
+        fail("OpenGL independent-context gfx shutdown failed");
     }
 
     const OpenGlGfxStatistics gfxStatistics = gfx.statistics();
@@ -783,6 +825,33 @@ int main() {
     if (!context.makeCurrent() || !gfx.shutdown() || !renderer.shutdown()
         || gfx.initialized() || renderer.initialized()) {
         fail("OpenGL deferred destruction did not complete on the owner context");
+    }
+    if (!renderer.initialize(64, 8, 3) || !gfx.initialize(1, 1)
+        || !renderer.initialized() || !gfx.initialized()
+        || !gfx.shutdown() || !renderer.shutdown()) {
+        fail("OpenGL renderers did not recreate after orderly shutdown");
+    }
+
+    OpenGlRenderer abandonedRenderer;
+    OpenGlRenderDevice abandonedGfx;
+    {
+        HiddenOpenGlContext lostContext;
+        if (!lostContext.ready()
+            || !abandonedRenderer.initialize(4, 2, 1)
+            || !abandonedGfx.initialize(1, 1)) {
+            fail("Unable to create OpenGL context-loss validation resources");
+        }
+    }
+    abandonedRenderer.abandon();
+    abandonedGfx.abandon();
+    if (abandonedRenderer.initialized() || abandonedGfx.initialized()
+        || abandonedRenderer.statistics().abandonedContexts != 1
+        || abandonedGfx.statistics().abandonedContexts != 1
+        || !context.makeCurrent()
+        || !abandonedRenderer.initialize(4, 2, 1)
+        || !abandonedGfx.initialize(1, 1)
+        || !abandonedGfx.shutdown() || !abandonedRenderer.shutdown()) {
+        fail("OpenGL context-loss abandon/recreation lifecycle failed");
     }
     std::cout << "HeniaUI OpenGL hidden-window output test passed (" << version << ")\n";
     return EXIT_SUCCESS;

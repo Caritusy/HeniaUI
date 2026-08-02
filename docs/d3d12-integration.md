@@ -18,6 +18,11 @@ DS target is available, it must match `depthStencilFormat` and the same sample
 count. The host still passes availability through its normal depth policy;
 HeniaUI never queries OM bindings or transitions attachments.
 
+Pass `backend::d3d12::SubmissionReuse` when the renderer should verify a slot's
+previous fence before touching its mapped upload buffer or retained textures.
+The detailed lifetime and device-reset flow is in
+[Renderer ownership and recreation](resource-lifetime.md).
+
 Initialization verifies that the configured device supports the RT/DS formats
 and sample counts. D3D12 exposes no query for the command list's current OM
 formats, so the final attachment match remains an explicit host obligation.
