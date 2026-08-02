@@ -47,7 +47,17 @@ void NumericInput::setPrecision(std::size_t valueValue) noexcept {
 
 void NumericInput::setOnValueChanged(Callback<double> callback) noexcept { mOnValueChanged = callback; }
 
+bool NumericInput::acceptsPointerInput() const noexcept { return true; }
+
+bool NumericInput::acceptsKeyboardFocus() const noexcept { return true; }
+
 bool NumericInput::handleInput(const InputEvent& event) {
+    // Focus invalidation commits an in-progress value even when the operation
+    // that caused it has already hidden or disabled this widget.
+    if (event.kind == InputEventKind::FocusLost) {
+        commitEditing();
+        return true;
+    }
     if (!enabled()) {
         return false;
     }
@@ -81,10 +91,6 @@ bool NumericInput::handleInput(const InputEvent& event) {
     }
     if (event.kind == InputEventKind::PointerScroll && contains(event.position) && event.scrollY != 0.0F) {
         adjust(event.scrollY > 0.0F ? mStep : -mStep);
-        return true;
-    }
-    if (event.kind == InputEventKind::FocusLost) {
-        commitEditing();
         return true;
     }
     if (!focused()) {

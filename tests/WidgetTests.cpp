@@ -89,6 +89,8 @@ struct RemoveOnValueChange final {
 static_assert(!noexcept(std::declval<Button&>().handleInput(std::declval<const InputEvent&>())));
 static_assert(!noexcept(std::declval<NumericInput&>().handleInput(std::declval<const InputEvent&>())));
 static_assert(!noexcept(std::declval<UiDocument&>().dispatch(std::declval<const InputEvent&>())));
+static_assert(!noexcept(std::declval<Widget&>().setVisible(false)));
+static_assert(!noexcept(std::declval<Widget&>().setEnabled(false)));
 
 [[nodiscard]] Vec2 rectCenter(Rect rect) noexcept {
     return {
@@ -158,6 +160,27 @@ protected:
 
 private:
     Vec2 mPreferred{};
+};
+
+class InteractionProbe final : public Widget {
+public:
+    [[nodiscard]] bool acceptsPointerInput() const noexcept override { return true; }
+    [[nodiscard]] bool acceptsKeyboardFocus() const noexcept override { return true; }
+
+    [[nodiscard]] bool handleInput(const InputEvent& event) override {
+        if (event.kind == InputEventKind::FocusLost) {
+            ++focusLostCalls;
+            if (disableOnFocusLost != nullptr) {
+                disableOnFocusLost->setEnabled(false);
+            }
+            return true;
+        }
+        return event.kind == InputEventKind::PointerDown
+            && event.button == PointerButton::Primary;
+    }
+
+    Widget* disableOnFocusLost = nullptr;
+    int focusLostCalls = 0;
 };
 
 void verifyConstraintSensitiveLayout(TextPainter& painter) {
@@ -270,6 +293,225 @@ void verifyConstraintSensitiveLayout(TextPainter& painter) {
     }
 }
 
+void verifyInteractionCapabilities(TextPainter& painter, FontHandle font) {
+    UiDocument passiveDocument(painter);
+    passiveDocument.reserve(32, 4);
+    passiveDocument.setViewport({120.0F, 60.0F});
+    auto passiveRoot = std::make_unique<Panel>();
+    Panel* passivePanel = passiveRoot.get();
+    Label& passiveLabel = passiveRoot->emplaceChild<Label>(
+        "Passive", LabelStyle{font, 14.0F, {1.0F, 1.0F, 1.0F, 1.0F}});
+    passiveDocument.setRoot(std::move(passiveRoot));
+    const RenderPacket passiveBefore = passiveDocument.compose();
+    const std::uint64_t paintPasses = passiveDocument.statistics().paintPasses;
+    const Vec2 passivePosition = rectCenter(passiveLabel.frame());
+    const bool passiveMove = passiveDocument.dispatch({
+        .kind = InputEventKind::PointerMove,
+        .position = passivePosition,
+    });
+    const bool passiveDown = passiveDocument.dispatch({
+        .kind = InputEventKind::PointerDown,
+        .position = passivePosition,
+        .button = PointerButton::Primary,
+    });
+    const bool passiveUp = passiveDocument.dispatch({
+        .kind = InputEventKind::PointerUp,
+        .position = passivePosition,
+        .button = PointerButton::Primary,
+    });
+    const RenderPacket passiveAfter = passiveDocument.compose();
+    if (passiveMove || passiveDown || passiveUp
+        || passiveLabel.hovered() || passiveLabel.pressed() || passiveLabel.focused()
+        || passivePanel->hovered() || passivePanel->pressed() || passivePanel->focused()
+        || passiveDocument.statistics().paintPasses != paintPasses
+        || passiveAfter.identity() != passiveBefore.identity()
+        || passiveAfter.revision() != passiveBefore.revision()) {
+        fail("Passive label/panel input changed interaction state or repainted the document");
+    }
+
+    UiDocument focusDocument(painter);
+    focusDocument.reserve(64, 8);
+    focusDocument.setViewport({220.0F, 70.0F});
+    auto focusRoot = std::make_unique<Panel>();
+    NumericInput& numeric = focusRoot->emplaceChild<NumericInput>(
+        7.0, NumericInputStyle{.font = font});
+    ValueRecorder commits;
+    numeric.setOnValueChanged(
+        Callback<double>::bind<ValueRecorder, &ValueRecorder::changed>(commits));
+    focusDocument.setRoot(std::move(focusRoot));
+    static_cast<void>(focusDocument.compose());
+    click(focusDocument, rectCenter(numeric.frame()));
+    static_cast<void>(focusDocument.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::Backspace,
+    }));
+    static_cast<void>(focusDocument.dispatch({
+        .kind = InputEventKind::TextInput,
+        .text = U'4',
+    }));
+    static_cast<void>(focusDocument.dispatch({
+        .kind = InputEventKind::TextInput,
+        .text = U'2',
+    }));
+    numeric.setVisible(false);
+    if (numeric.value() != 42.0 || commits.calls != 1
+        || numeric.hovered() || numeric.pressed() || numeric.focused()
+        || focusDocument.dispatch({.kind = InputEventKind::KeyDown, .key = KeyCode::Right})) {
+        fail("Hiding a focused numeric input did not commit and invalidate interaction exactly once");
+    }
+
+    numeric.setVisible(true);
+    static_cast<void>(focusDocument.compose());
+    click(focusDocument, rectCenter(numeric.frame()));
+    static_cast<void>(focusDocument.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::Backspace,
+    }));
+    static_cast<void>(focusDocument.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::Backspace,
+    }));
+    static_cast<void>(focusDocument.dispatch({
+        .kind = InputEventKind::TextInput,
+        .text = U'9',
+    }));
+    numeric.setEnabled(false);
+    if (numeric.value() != 9.0 || commits.calls != 2
+        || numeric.hovered() || numeric.pressed() || numeric.focused()
+        || focusDocument.dispatch({.kind = InputEventKind::KeyDown, .key = KeyCode::Right})) {
+        fail("Disabling a focused numeric input did not commit and stop keyboard input");
+    }
+
+    UiDocument captureDocument(painter);
+    captureDocument.reserve(32, 4);
+    captureDocument.setViewport({160.0F, 60.0F});
+    auto captureRoot = std::make_unique<Panel>();
+    Button& captured = captureRoot->emplaceChild<Button>(
+        "Capture", ButtonStyle{.font = font});
+    ClickCounter clicks;
+    captured.setOnClick(Callback<>::bind<ClickCounter, &ClickCounter::clicked>(clicks));
+    captureDocument.setRoot(std::move(captureRoot));
+    static_cast<void>(captureDocument.compose());
+    Vec2 capturePosition = rectCenter(captured.frame());
+    static_cast<void>(captureDocument.dispatch({
+        .kind = InputEventKind::PointerDown,
+        .position = {159.0F, 59.0F},
+        .button = PointerButton::Primary,
+    }));
+    const bool retargetedRelease = captureDocument.dispatch({
+        .kind = InputEventKind::PointerUp,
+        .position = capturePosition,
+        .button = PointerButton::Primary,
+    });
+    if (retargetedRelease || clicks.count != 0 || captured.pressed() || captured.focused()) {
+        fail("A passive pointer-down sequence retargeted its release to a control");
+    }
+    static_cast<void>(captureDocument.dispatch({
+        .kind = InputEventKind::PointerMove,
+        .position = capturePosition,
+    }));
+    static_cast<void>(captureDocument.dispatch({
+        .kind = InputEventKind::PointerDown,
+        .position = capturePosition,
+        .button = PointerButton::Primary,
+    }));
+    if (!captured.pressed() || !captured.focused()) {
+        fail("Interactive pointer down did not establish capture and focus");
+    }
+    captured.setVisible(false);
+    const bool hiddenRelease = captureDocument.dispatch({
+        .kind = InputEventKind::PointerUp,
+        .position = capturePosition,
+        .button = PointerButton::Primary,
+    });
+    if (hiddenRelease || clicks.count != 0
+        || captured.hovered() || captured.pressed() || captured.focused()) {
+        fail("Hiding a captured widget left a pressed state or retargeted pointer up");
+    }
+
+    captured.setVisible(true);
+    static_cast<void>(captureDocument.compose());
+    capturePosition = rectCenter(captured.frame());
+    static_cast<void>(captureDocument.dispatch({
+        .kind = InputEventKind::PointerDown,
+        .position = capturePosition,
+        .button = PointerButton::Primary,
+    }));
+    captured.setEnabled(false);
+    const bool disabledRelease = captureDocument.dispatch({
+        .kind = InputEventKind::PointerUp,
+        .position = capturePosition,
+        .button = PointerButton::Primary,
+    });
+    if (disabledRelease || clicks.count != 0
+        || captured.hovered() || captured.pressed() || captured.focused()) {
+        fail("Disabling a captured widget left a pressed state or delivered pointer up");
+    }
+
+    UiDocument nestedInvalidationDocument(painter);
+    nestedInvalidationDocument.reserve(32, 4);
+    nestedInvalidationDocument.setViewport({160.0F, 80.0F});
+    auto nestedRoot = std::make_unique<Panel>(
+        PanelStyle{.direction = LayoutDirection::Column});
+    InteractionProbe& firstProbe = nestedRoot->emplaceChild<InteractionProbe>();
+    InteractionProbe& secondProbe = nestedRoot->emplaceChild<InteractionProbe>();
+    firstProbe.setLayoutParameters({.height = 40.0F});
+    secondProbe.setLayoutParameters({.height = 40.0F});
+    nestedInvalidationDocument.setRoot(std::move(nestedRoot));
+    static_cast<void>(nestedInvalidationDocument.compose());
+    static_cast<void>(nestedInvalidationDocument.dispatch({
+        .kind = InputEventKind::PointerDown,
+        .position = rectCenter(firstProbe.frame()),
+        .button = PointerButton::Primary,
+    }));
+    static_cast<void>(nestedInvalidationDocument.dispatch({
+        .kind = InputEventKind::PointerMove,
+        .position = rectCenter(secondProbe.frame()),
+    }));
+    if (!firstProbe.focused() || !firstProbe.pressed() || !secondProbe.hovered()) {
+        fail("Nested interaction invalidation test did not establish its initial state");
+    }
+    firstProbe.disableOnFocusLost = &secondProbe;
+    firstProbe.setVisible(false);
+    firstProbe.setVisible(false);
+    if (firstProbe.focusLostCalls != 1 || firstProbe.focused() || firstProbe.pressed()
+        || secondProbe.enabled() || secondProbe.hovered() || secondProbe.pressed()
+        || secondProbe.focused()) {
+        fail("Nested interaction invalidation left stale state or repeated FocusLost");
+    }
+
+    UiDocument removalDocument(painter);
+    removalDocument.reserve(32, 4);
+    removalDocument.setViewport({180.0F, 60.0F});
+    auto removalRoot = std::make_unique<Panel>();
+    Panel* removalRootPointer = removalRoot.get();
+    NumericInput& removingNumeric = removalRoot->emplaceChild<NumericInput>(
+        1.0, NumericInputStyle{.font = font});
+    RemoveOnValueChange removalCallback{
+        .document = &removalDocument,
+        .widget = &removingNumeric,
+    };
+    removingNumeric.setOnValueChanged(
+        Callback<double>::bind<RemoveOnValueChange, &RemoveOnValueChange::changed>(
+            removalCallback));
+    removalDocument.setRoot(std::move(removalRoot));
+    static_cast<void>(removalDocument.compose());
+    click(removalDocument, rectCenter(removingNumeric.frame()));
+    static_cast<void>(removalDocument.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::Backspace,
+    }));
+    static_cast<void>(removalDocument.dispatch({
+        .kind = InputEventKind::TextInput,
+        .text = U'2',
+    }));
+    removingNumeric.setVisible(false);
+    if (!removalCallback.accepted || removalCallback.calls != 1
+        || !removalRootPointer->children().empty()) {
+        fail("Focus-loss removal during visibility invalidation was not deferred safely");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -284,6 +526,7 @@ int main() {
     cache.reserve(32, 64);
     TextPainter painter(cache);
     verifyConstraintSensitiveLayout(painter);
+    verifyInteractionCapabilities(painter, font);
     UiDocument document(painter);
     document.reserve(512, 32);
     document.setViewport({320.0F, 200.0F});

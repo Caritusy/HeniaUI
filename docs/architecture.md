@@ -115,6 +115,29 @@ before arranging nested content. On the cross axis, an explicit child width
 children stretch to the available size. Oversized content is constrained to
 the panel content rectangle instead of pushing later siblings beyond it.
 
+### Input capability and invalidation
+
+Hit testing always descends visible, enabled containers, but returns a widget
+itself only when `acceptsPointerInput()` opts it in. The base widget, `Panel`,
+and `Label` are passive; `Button` and `NumericInput` explicitly accept pointer
+input and keyboard focus. Custom controls make the same capability choice
+instead of relying on a speculative `handleInput()` call. A pointer down first
+has to be handled successfully; only then may the document focus, capture, and
+press the still-attached interactive target. A down sequence without a
+surviving capture consumes its later pointer-up instead of retargeting it to an
+unrelated widget.
+
+Every attached widget knows its owning document. Hiding or disabling a widget
+therefore synchronously clears hover/capture/focus for its whole subtree;
+detaching and root replacement use the same path. Focus identity and the local
+focused flag are cleared before exactly one `FocusLost` callback is delivered,
+so callbacks may safely request deferred tree mutations. `NumericInput`
+commits a valid in-progress edit on every focus loss, including hide/disable;
+that callback can propagate, so `setVisible()` and `setEnabled()` are not
+`noexcept`. Hidden/disabled controls receive no later pointer or keyboard input.
+Clicks on a passive background clear an existing focus but otherwise do not
+dirty paint or publish a replacement packet.
+
 ### Widget mutation and callback ordering
 
 `UiDocument` identifies hovered, captured, and focused widgets by stable widget
@@ -125,12 +148,13 @@ returns. Invalidated requests become no-ops when the queue is drained. If a
 callback throws, its queued structural changes are discarded and interaction
 state is cancelled before the exception propagates.
 
-Pointer-down establishes capture and then changes focus before delivering the
-pointer event. Focus cancellation clears the document's focus identity and the
-widget's focused flag before delivering `FocusLost`. Pointer-up delivers to the
-captured widget, releases its pressed/captured state, updates hover, and only
-then applies deferred mutations. Removing a subtree clears hover, capture, and
-focus flags before delivering `FocusLost` and destroying the subtree.
+Pointer-down asks the hit target to handle the event, changes focus, and then
+establishes capture/pressed state. Focus cancellation clears the document's
+focus identity and the widget's focused flag before delivering `FocusLost`.
+Pointer-up delivers to the captured widget, releases its pressed/captured state,
+updates hover, and only then applies deferred mutations. Removing a subtree
+clears hover, capture, and focus flags before delivering `FocusLost` and
+destroying the subtree.
 
 Recursive `dispatch()` calls are rejected deterministically, return `false`,
 and increment `UiDocumentStatistics::rejectedNestedDispatches`. `compose()` is

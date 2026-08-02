@@ -66,6 +66,8 @@ public:
     [[nodiscard]] UiDocumentStatistics statistics() const noexcept;
 
 private:
+    friend class Widget;
+
     enum class MutationKind : std::uint8_t {
         SetRoot,
         Remove,
@@ -87,10 +89,11 @@ private:
     [[nodiscard]] static Widget* findInSubtree(Widget* root, std::uint64_t identity) noexcept;
     [[nodiscard]] static bool subtreeContains(const Widget& root, std::uint64_t identity) noexcept;
     [[nodiscard]] static bool interactive(const Widget& widget) noexcept;
+    void widgetBecameNonInteractive(Widget& subtree);
     void clearInteractionImpl();
     void clearInteractionForSubtree(Widget& subtree);
     void resetInteractionWithoutCallbacks() noexcept;
-    void sanitizeInteraction() noexcept;
+    void sanitizeInteraction();
     void updateHover(Vec2 position) noexcept;
     void setFocus(std::uint64_t identity);
     void rebuildPaintSegment(Widget& widget);
@@ -111,6 +114,7 @@ private:
     bool mDispatching = false;
     bool mApplyingMutations = false;
     bool mClearingInteraction = false;
+    bool mPointerSequenceActive = false;
     bool mHasPublishedPacket = false;
     bool mPacketRepresentsEmptyDocument = false;
 };

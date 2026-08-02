@@ -29,6 +29,8 @@ public:
     [[nodiscard]] std::string_view text() const noexcept;
     void setStyle(ButtonStyle style) noexcept;
     void setOnClick(Callback<> callback) noexcept;
+    [[nodiscard]] bool acceptsPointerInput() const noexcept override;
+    [[nodiscard]] bool acceptsKeyboardFocus() const noexcept override;
     [[nodiscard]] bool handleInput(const InputEvent& event) override;
 
 protected:
