@@ -349,8 +349,14 @@ struct D3D12Renderer::Implementation final {
         ID3D12GraphicsCommandList& commandList,
         std::uint32_t submissionSlot,
         std::uint32_t width,
-        std::uint32_t height) noexcept;
+        std::uint32_t height,
+        henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept;
     [[nodiscard]] bool validateCommandList(ID3D12GraphicsCommandList& commandList) noexcept;
+    [[nodiscard]] bool validateDeviceChild(
+        ID3D12DeviceChild& child,
+        const char* diagnostic) noexcept;
+    [[nodiscard]] bool validateSubmissionReuse(
+        henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept;
     void shutdown() noexcept;
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE cpuDescriptor(std::uint32_t index) const noexcept;
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE gpuCpuDescriptor(std::uint32_t index) const noexcept;
@@ -362,6 +368,31 @@ bool D3D12Renderer::Implementation::initialize(
     DXGI_FORMAT format,
     D3D12RendererConfiguration requested) {
     if (ready) {
+        ComPtr<IUnknown> configuredIdentity;
+        ComPtr<IUnknown> requestedIdentity;
+        if (FAILED(device.As(&configuredIdentity))
+            || FAILED(nativeDevice.QueryInterface(IID_PPV_ARGS(&requestedIdentity)))
+            || configuredIdentity.Get() != requestedIdentity.Get()) {
+            ++statistics.lifecycleRejections;
+            error = "D3D12 renderer is already initialized with a different device";
+            return false;
+        }
+        if (format != renderTargetFormat
+            || requested.instanceCapacity != configuration.instanceCapacity
+            || requested.submissionCapacity != configuration.submissionCapacity
+            || requested.batchCapacity != configuration.batchCapacity
+            || requested.textureCapacity != configuration.textureCapacity
+            || requested.textureUploadBatchCapacity != configuration.textureUploadBatchCapacity) {
+            ++statistics.lifecycleRejections;
+            error = "D3D12 renderer is already initialized with a different configuration";
+            return false;
+        }
+        if (FAILED(device->GetDeviceRemovedReason())) {
+            ++statistics.deviceRemovalRejections;
+            error = "D3D12 renderer device has been removed; shutdown and recreate the renderer";
+            return false;
+        }
+        error.clear();
         return true;
     }
     std::size_t instanceBytes = 0;
@@ -688,6 +719,11 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
         error = "D3D12 renderer is not initialized";
         return false;
     }
+    if (!validateDeviceChild(
+            queue,
+            "D3D12 texture synchronization queue belongs to a different device")) {
+        return false;
+    }
     if (!pollTextureUploads()) {
         return false;
     }
@@ -713,9 +749,15 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
     }
     if (textureUploadQueue == nullptr) {
         textureUploadQueue = &queue;
-    } else if (textureUploadQueue.Get() != &queue) {
-        error = "D3D12 texture synchronization must use one direct command queue";
-        return false;
+    } else {
+        ComPtr<IUnknown> configuredQueueIdentity;
+        ComPtr<IUnknown> requestedQueueIdentity;
+        if (FAILED(textureUploadQueue.As(&configuredQueueIdentity))
+            || FAILED(queue.QueryInterface(IID_PPV_ARGS(&requestedQueueIdentity)))
+            || configuredQueueIdentity.Get() != requestedQueueIdentity.Get()) {
+            error = "D3D12 texture synchronization must use one direct command queue";
+            return false;
+        }
     }
 
     TextureUploadBatch* uploadBatch = nullptr;
@@ -913,7 +955,8 @@ bool D3D12Renderer::Implementation::record(
     ID3D12GraphicsCommandList& commandList,
     std::uint32_t submissionSlot,
     std::uint32_t width,
-    std::uint32_t height) noexcept {
+    std::uint32_t height,
+    henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
     if (!ready || submissionSlot >= submissions.size()) {
         ++statistics.rejectedFrames;
         error = "D3D12 renderer or submissionSlot is unavailable";
@@ -969,6 +1012,10 @@ bool D3D12Renderer::Implementation::record(
         }
     }
     if (!pollTextureUploads()) {
+        ++statistics.rejectedFrames;
+        return false;
+    }
+    if (!validateSubmissionReuse(submissionReuse)) {
         ++statistics.rejectedFrames;
         return false;
     }
@@ -1114,20 +1161,67 @@ bool D3D12Renderer::Implementation::record(
 
 bool D3D12Renderer::Implementation::validateCommandList(
     ID3D12GraphicsCommandList& commandList) noexcept {
+    if (FAILED(device->GetDeviceRemovedReason())) {
+        ++statistics.deviceRemovalRejections;
+        error = "D3D12 renderer device has been removed; shutdown and recreate the renderer";
+        return false;
+    }
     if (commandList.GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
         ++statistics.commandListValidationFailures;
         error = "D3D12 UI recording requires a DIRECT command list";
         return false;
     }
-    ComPtr<ID3D12Device> commandListDevice;
-    ComPtr<IUnknown> configuredIdentity;
-    ComPtr<IUnknown> commandListIdentity;
-    if (FAILED(commandList.GetDevice(IID_PPV_ARGS(&commandListDevice)))
-        || FAILED(device.As(&configuredIdentity))
-        || FAILED(commandListDevice.As(&commandListIdentity))
-        || configuredIdentity.Get() != commandListIdentity.Get()) {
+    if (!validateDeviceChild(
+            commandList,
+            "D3D12 UI command list belongs to a different device")) {
         ++statistics.commandListValidationFailures;
-        error = "D3D12 UI command list belongs to a different device";
+        return false;
+    }
+    return true;
+}
+
+bool D3D12Renderer::Implementation::validateDeviceChild(
+    ID3D12DeviceChild& child,
+    const char* diagnostic) noexcept {
+    ComPtr<ID3D12Device> childDevice;
+    ComPtr<IUnknown> configuredIdentity;
+    ComPtr<IUnknown> childIdentity;
+    if (FAILED(child.GetDevice(IID_PPV_ARGS(&childDevice)))
+        || FAILED(device.As(&configuredIdentity))
+        || FAILED(childDevice.As(&childIdentity))
+        || configuredIdentity.Get() != childIdentity.Get()) {
+        ++statistics.lifecycleRejections;
+        error = diagnostic;
+        return false;
+    }
+    return true;
+}
+
+bool D3D12Renderer::Implementation::validateSubmissionReuse(
+    henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
+    if (submissionReuse.completionFence == nullptr && submissionReuse.completionValue == 0) {
+        return true;
+    }
+    if (submissionReuse.completionFence == nullptr || submissionReuse.completionValue == 0) {
+        ++statistics.lifecycleRejections;
+        error = "D3D12 submission reuse requires both a fence and non-zero completion value";
+        return false;
+    }
+    ++statistics.submissionFenceChecks;
+    if (!validateDeviceChild(
+            *submissionReuse.completionFence,
+            "D3D12 submission reuse fence belongs to a different device")) {
+        return false;
+    }
+    const std::uint64_t completed = submissionReuse.completionFence->GetCompletedValue();
+    if (completed == std::numeric_limits<std::uint64_t>::max()) {
+        ++statistics.deviceRemovalRejections;
+        error = "D3D12 submission reuse fence reported device removal";
+        return false;
+    }
+    if (completed < submissionReuse.completionValue) {
+        ++statistics.submissionSlotBusyRejections;
+        error = "D3D12 submission slot is still referenced by the GPU";
         return false;
     }
     return true;
@@ -1225,13 +1319,15 @@ bool D3D12Renderer::record(
     ID3D12GraphicsCommandList& commandList,
     std::uint32_t submissionSlot,
     std::uint32_t viewportWidth,
-    std::uint32_t viewportHeight) noexcept {
+    std::uint32_t viewportHeight,
+    henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
     return mImplementation->record(
         packet,
         commandList,
         submissionSlot,
         viewportWidth,
-        viewportHeight);
+        viewportHeight,
+        submissionReuse);
 }
 
 void D3D12Renderer::shutdown() noexcept { mImplementation->shutdown(); }

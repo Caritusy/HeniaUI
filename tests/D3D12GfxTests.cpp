@@ -170,14 +170,32 @@ int main() {
         fail("D3D12 gfx accepted an unsupported target sample count");
     }
     D3D12RenderDevice renderer;
-    if (!renderer.initialize(*device.Get(), {
+    const D3D12GfxConfiguration rendererConfiguration{
             .boxCapacity = boxes.size(),
             .submissionCapacity = 2,
             .renderTargetFormat = DXGI_FORMAT_R8G8B8A8_UNORM,
-        })) {
+    };
+    if (!renderer.initialize(*device.Get(), rendererConfiguration)) {
         std::cerr << renderer.lastError() << '\n';
         return EXIT_FAILURE;
     }
+    D3D12RenderDevice peerRenderer;
+    D3D12GfxConfiguration changedConfiguration = rendererConfiguration;
+    changedConfiguration.submissionCapacity = 1;
+    if (!peerRenderer.initialize(*device.Get(), rendererConfiguration)
+        || !peerRenderer.initialize(*device.Get(), rendererConfiguration)
+        || peerRenderer.initialize(*device.Get(), changedConfiguration)
+        || peerRenderer.lastError()
+            != "D3D12 gfx renderer is already initialized with a different configuration"
+        || !peerRenderer.initialized()) {
+        fail("D3D12 gfx lifecycle/configuration validation failed");
+    }
+    peerRenderer.shutdown();
+    if (!peerRenderer.initialize(*device.Get(), rendererConfiguration)
+        || !peerRenderer.initialized()) {
+        fail("D3D12 gfx renderer could not be recreated beside another live instance");
+    }
+    peerRenderer.shutdown();
 
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> commandList;
@@ -214,6 +232,32 @@ int main() {
         || invalidStatistics.drawCalls != 0 || invalidStatistics.fullInstanceUploads != 0) {
         fail("D3D12 gfx invalid-input rejection issued GPU work");
     }
+    ComPtr<ID3D12Fence> submissionReuseFence;
+    if (FAILED(device->CreateFence(
+            0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&submissionReuseFence)))) {
+        fail("Unable to create the D3D12 gfx submission-reuse fence");
+    }
+    const henia::backend::d3d12::SubmissionReuse submissionReuse{
+        .completionFence = submissionReuseFence.Get(),
+        .completionValue = 1,
+    };
+    const ViewParameters fenceValidationView{
+        .viewport = {static_cast<float>(width), static_cast<float>(height)},
+    };
+    if (renderer.record(
+            batch, fenceValidationView, *commandList.Get(), 0, submissionReuse)
+        || renderer.lastError() != "D3D12 gfx submission slot is still referenced by the GPU") {
+        fail("D3D12 gfx renderer overwrote a fence-busy submission slot");
+    }
+    if (renderer.statistics().fullInstanceUploads != 0
+        || renderer.statistics().partialInstanceUploads != 0
+        || renderer.statistics().drawCalls != 0) {
+        fail("D3D12 gfx fence-busy rejection touched submission resources");
+    }
+    if (FAILED(queue->Signal(submissionReuseFence.Get(), 1))
+        || !waitForQueue(*device.Get(), *queue.Get())) {
+        fail("D3D12 gfx submission-reuse fence did not complete");
+    }
     constexpr std::array<float, 4> black{0.0F, 0.0F, 0.0F, 1.0F};
     commandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);
     commandList->ClearRenderTargetView(renderTarget, black.data(), 0, nullptr);
@@ -222,7 +266,7 @@ int main() {
         {0.0F, 0.0F, 4.0F, 4.0F},
         {1.0F, 0.0F, 0.0F, 1.0F});
     ViewParameters view{.viewport = {static_cast<float>(width), static_cast<float>(height)}};
-    if (!renderer.record(batch, view, *commandList.Get(), 0)) {
+    if (!renderer.record(batch, view, *commandList.Get(), 0, submissionReuse)) {
         std::cerr << renderer.lastError() << '\n';
         return EXIT_FAILURE;
     }
@@ -297,7 +341,10 @@ int main() {
     D3D12GfxStatistics statistics = renderer.statistics();
     if (statistics.drawCalls != 2 || statistics.submittedInstances != boxes.size() * 2U
         || statistics.fullInstanceUploads != 1 || statistics.partialInstanceUploads != 0
-        || statistics.viewUpdates != 2 || statistics.commandListValidationFailures != 1) {
+        || statistics.viewUpdates != 2 || statistics.commandListValidationFailures != 1
+        || statistics.submissionFenceChecks != 2
+        || statistics.submissionSlotBusyRejections != 1
+        || statistics.deviceRemovalRejections != 0) {
         fail("D3D12 gfx stable-frame statistics are incorrect");
     }
 
@@ -326,6 +373,10 @@ int main() {
         fail("D3D12 gfx validation reported an error");
     }
 
+    renderer.shutdown();
+    if (!renderer.initialize(*device.Get(), rendererConfiguration) || !renderer.initialized()) {
+        fail("D3D12 gfx renderer did not initialize after an orderly shutdown");
+    }
     renderer.shutdown();
     std::cout << "HeniaUI D3D12 gfx WARP test passed\n";
     return EXIT_SUCCESS;

@@ -28,6 +28,8 @@ struct OpenGlGfxStatistics final {
     std::uint64_t ignoredHostErrors = 0;
     std::uint64_t stateRestoreFailures = 0;
     std::uint64_t initializationFailures = 0;
+    std::uint64_t lifecycleRejections = 0;
+    std::uint64_t abandonedContexts = 0;
     RenderProfile profile{};
 };
 
@@ -38,6 +40,8 @@ struct OpenGlGfxStatistics final {
 // WGL cannot portably validate membership of a different shared context.
 // Instance upload slots are fence-owned and polled with zero timeout; render()
 // returns false rather than waiting when changed content has no safe slot.
+// Repeated initialize() is idempotent only for the exact owner/configuration;
+// use shutdown() for an orderly rebuild or abandon() after permanent context loss.
 class OpenGlRenderDevice final {
 public:
     OpenGlRenderDevice();
@@ -59,6 +63,9 @@ public:
     // Returns false and preserves every GL object when the owner context is not
     // current, allowing the host to make it current and retry destruction.
     [[nodiscard]] bool shutdown() noexcept;
+    // Use only after the initialize() context has been permanently destroyed.
+    // Drops stale object names without issuing GL calls and permits recreation.
+    void abandon() noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;
     [[nodiscard]] std::size_t boxCapacity() const noexcept;

@@ -87,6 +87,10 @@ slot. It never waits or allocates from `record()`.
 
 HeniaUI does not own hooks, windows, OpenGL contexts, swap chains, back buffers, command allocators, resource transitions, queues, or fences.
 
+The complete initialization, multi-instance, context/device-loss, destruction,
+submission-fence, resize, and recreation rules are documented in
+[Renderer ownership and recreation](resource-lifetime.md).
+
 For OpenGL, the host keeps the exact context passed to `initialize()` current for
 every renderer call that can access GL objects. HeniaUI deliberately validates
 the `HGLRC` rather than assuming that another context belongs to the same share
@@ -94,7 +98,9 @@ group, because WGL provides no portable share-group identity query. Calls on a
 different or missing context fail before issuing GL work. `shutdown()` returns
 `false` and preserves the GL objects in that case, so the host can make the owner
 context current and retry. The destructor cannot perform that retry; hosts must
-therefore call and check `shutdown()` before destroying a live renderer.
+therefore call and check `shutdown()` before destroying a live renderer. If the
+context is permanently lost first, `abandon()` clears stale names without GL
+calls and permits initialization on a replacement context.
 
 Each render submission uses a full state-isolation contract. The 2D and 3D
 backends capture and restore the current program (or bind zero when a captured,

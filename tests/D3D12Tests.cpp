@@ -125,20 +125,42 @@ int main() {
         fail("D3D12 renderer accepted a buffer-view byte capacity above UINT");
     }
     D3D12Renderer renderer;
+    const D3D12RendererConfiguration rendererConfiguration{
+        .instanceCapacity = 128,
+        .submissionCapacity = 2,
+        .batchCapacity = 8,
+        .textureCapacity = 1,
+        .textureUploadBatchCapacity = 3,
+    };
     if (!renderer.initialize(
             *device.Get(),
             DXGI_FORMAT_R8G8B8A8_UNORM,
-            {
-                .instanceCapacity = 128,
-                .submissionCapacity = 2,
-                .batchCapacity = 8,
-                .textureCapacity = 1,
-                .textureUploadBatchCapacity = 3,
-            })
+            rendererConfiguration)
         || !renderer.synchronizeTextures(textures, *queue.Get())) {
         std::cerr << renderer.lastError() << '\n';
         return EXIT_FAILURE;
     }
+    D3D12Renderer peerRenderer;
+    D3D12RendererConfiguration changedConfiguration = rendererConfiguration;
+    changedConfiguration.batchCapacity = 7;
+    if (!peerRenderer.initialize(
+            *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, rendererConfiguration)
+        || !peerRenderer.initialize(
+            *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, rendererConfiguration)
+        || peerRenderer.initialize(
+            *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, changedConfiguration)
+        || peerRenderer.lastError()
+            != "D3D12 renderer is already initialized with a different configuration"
+        || !peerRenderer.initialized()) {
+        fail("D3D12 renderer lifecycle/configuration validation failed");
+    }
+    peerRenderer.shutdown();
+    if (!peerRenderer.initialize(
+            *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, rendererConfiguration)
+        || !peerRenderer.initialized()) {
+        fail("D3D12 renderer could not be recreated beside another live instance");
+    }
+    peerRenderer.shutdown();
     if (renderer.pendingTextureUploadBatches() != 1
         || renderer.statistics().textureUploads != 0) {
         fail("D3D12 texture upload was committed before fence completion");
@@ -295,6 +317,28 @@ int main() {
         fail("D3D12 invalid-input rejection issued work or used capacity statistics");
     }
 
+    ComPtr<ID3D12Fence> submissionReuseFence;
+    if (FAILED(device->CreateFence(
+            0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&submissionReuseFence)))) {
+        fail("Unable to create the D3D12 submission-reuse fence");
+    }
+    const henia::backend::d3d12::SubmissionReuse submissionReuse{
+        .completionFence = submissionReuseFence.Get(),
+        .completionValue = 1,
+    };
+    if (renderer.record(packet, *commandList.Get(), 0, width, height, submissionReuse)
+        || renderer.lastError() != "D3D12 submission slot is still referenced by the GPU") {
+        fail("D3D12 renderer overwrote a fence-busy submission slot");
+    }
+    if (renderer.statistics().instanceUploads != 0
+        || renderer.statistics().drawCalls != 0) {
+        fail("D3D12 fence-busy rejection touched submission resources");
+    }
+    if (FAILED(queue->Signal(submissionReuseFence.Get(), 1))
+        || !waitForQueue(*device.Get(), *queue.Get())) {
+        fail("D3D12 submission-reuse fence did not complete");
+    }
+
     constexpr std::array<float, 4> clearColor{0.0F, 0.0F, 0.0F, 1.0F};
     commandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);
     commandList->ClearRenderTargetView(renderTarget, clearColor.data(), 0, nullptr);
@@ -302,7 +346,7 @@ int main() {
         *commandList.Get(), width, height,
         {0.0F, 0.0F, 4.0F, 4.0F},
         {1.0F, 0.0F, 0.0F, 1.0F});
-    if (!renderer.record(packet, *commandList.Get(), 0, width, height)) {
+    if (!renderer.record(packet, *commandList.Get(), 0, width, height, submissionReuse)) {
         std::cerr << renderer.lastError() << '\n';
         return EXIT_FAILURE;
     }
@@ -413,6 +457,9 @@ int main() {
         || statistics.descriptorTableCopies != packet.batches().size()
         || statistics.descriptorTableCacheHits != packet.batches().size()
         || statistics.textureFreeFrames != 1
+        || statistics.submissionFenceChecks != 2
+        || statistics.submissionSlotBusyRejections != 1
+        || statistics.deviceRemovalRejections != 0
         || statistics.commandListValidationFailures != expectedCommandListValidationFailures) {
         fail("D3D12 renderer statistics are incorrect");
     }
@@ -479,6 +526,12 @@ int main() {
         fail("D3D12 validation reported an error");
     }
 
+    renderer.shutdown();
+    if (!renderer.initialize(
+            *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, rendererConfiguration)
+        || !renderer.initialized()) {
+        fail("D3D12 renderer did not initialize after an orderly shutdown");
+    }
     renderer.shutdown();
     std::cout << "HeniaUI D3D12 WARP test passed\n";
     return EXIT_SUCCESS;

@@ -418,6 +418,7 @@ struct OpenGlRenderDevice::Implementation final {
         const ViewParameters& view,
         bool depthAttachmentAvailable) noexcept;
     [[nodiscard]] bool shutdown() noexcept;
+    void abandon() noexcept;
     [[nodiscard]] henia::detail::UploadFenceStatus pollUploadSlot(std::size_t index) noexcept;
     [[nodiscard]] bool fenceUploadSlot(std::size_t index) noexcept;
     void configureAttributes() const noexcept;
@@ -430,7 +431,19 @@ struct OpenGlRenderDevice::Implementation final {
 bool OpenGlRenderDevice::Implementation::initialize(
     std::size_t requestedCapacity,
     std::size_t requestedUploadSlots) {
-    if (ready) return validateOwnerContext("initialize");
+    if (ready) {
+        if (!validateOwnerContext("initialize")) {
+            ++statistics.lifecycleRejections;
+            return false;
+        }
+        if (requestedCapacity != capacity || requestedUploadSlots != uploadSlots.size()) {
+            ++statistics.lifecycleRejections;
+            error = "OpenGL gfx renderer is already initialized with a different configuration";
+            return false;
+        }
+        error.clear();
+        return true;
+    }
     std::size_t instanceBytes = 0;
     const HGLRC currentContext = wglGetCurrentContext();
     if (currentContext == nullptr || requestedCapacity == 0 || requestedUploadSlots == 0
@@ -942,6 +955,10 @@ bool OpenGlRenderDevice::Implementation::shutdown() noexcept {
     }
     program = 0;
     vertexArray = 0;
+    viewProjectionLocation = -1;
+    viewportLocation = -1;
+    timeLocation = -1;
+    depthRangeLocation = -1;
     uploadSlots.clear();
     uploadRing.clear();
     capacity = 0;
@@ -953,6 +970,25 @@ bool OpenGlRenderDevice::Implementation::shutdown() noexcept {
     }
     error.clear();
     return true;
+}
+
+void OpenGlRenderDevice::Implementation::abandon() noexcept {
+    const bool hadOwner = ownerContext != nullptr;
+    program = 0;
+    vertexArray = 0;
+    viewProjectionLocation = -1;
+    viewportLocation = -1;
+    timeLocation = -1;
+    depthRangeLocation = -1;
+    uploadSlots.clear();
+    uploadRing.clear();
+    capacity = 0;
+    ownerContext = nullptr;
+    ready = false;
+    if (hadOwner) {
+        ++statistics.abandonedContexts;
+    }
+    error.clear();
 }
 
 bool OpenGlRenderDevice::Implementation::validateOwnerContext(const char* operation) noexcept {
@@ -979,8 +1015,9 @@ bool OpenGlRenderDevice::initialize(
     std::size_t capacityValue,
     std::size_t uploadSlotCountValue) noexcept {
     try {
+        const bool wasReady = mImplementation->ready;
         const bool initialized = mImplementation->initialize(capacityValue, uploadSlotCountValue);
-        if (!initialized) {
+        if (!initialized && !wasReady) {
             ++mImplementation->statistics.initializationFailures;
             const henia::detail::FixedError diagnostic = mImplementation->error;
             static_cast<void>(mImplementation->shutdown());
@@ -1006,6 +1043,9 @@ void OpenGlRenderDevice::reportGpuTime(std::uint64_t nanoseconds) noexcept {
 }
 bool OpenGlRenderDevice::shutdown() noexcept {
     return mImplementation == nullptr || mImplementation->shutdown();
+}
+void OpenGlRenderDevice::abandon() noexcept {
+    if (mImplementation != nullptr) mImplementation->abandon();
 }
 bool OpenGlRenderDevice::initialized() const noexcept { return mImplementation->ready; }
 std::size_t OpenGlRenderDevice::boxCapacity() const noexcept { return mImplementation->capacity; }

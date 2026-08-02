@@ -1,5 +1,6 @@
 #pragma once
 
+#include "henia/backend/d3d12/D3D12SubmissionReuse.h"
 #include "henia/gfx/InstanceBatch.h"
 
 #include <d3d12.h>
@@ -32,6 +33,10 @@ struct D3D12GfxStatistics final {
     std::uint64_t invalidInputFrames = 0;
     std::uint64_t capacityRejectedFrames = 0;
     std::uint64_t commandListValidationFailures = 0;
+    std::uint64_t submissionFenceChecks = 0;
+    std::uint64_t submissionSlotBusyRejections = 0;
+    std::uint64_t deviceRemovalRejections = 0;
+    std::uint64_t lifecycleRejections = 0;
     RenderProfile profile{};
 };
 
@@ -39,6 +44,8 @@ struct D3D12GfxStatistics final {
 // submission and fences. A slot is reusable only after its host fence completes.
 // The device is not movable because its resources and submission slots remain
 // associated with that host device and fence lifecycle.
+// Pass SubmissionReuse to record() to check a previous slot fence before any
+// mapped upload write. An empty value declares independent host synchronization.
 // record() requires an open DIRECT list from the initialize() device and host-
 // bound RT/optional DS targets matching the configured formats/sample count. It
 // overwrites graphics root signature/constants, PSO, IA topology/VB slot 0,
@@ -59,7 +66,8 @@ public:
         const InstanceBatch& batch,
         const ViewParameters& view,
         ID3D12GraphicsCommandList& commandList,
-        std::uint32_t submissionSlot) noexcept;
+        std::uint32_t submissionSlot,
+        henia::backend::d3d12::SubmissionReuse submissionReuse = {}) noexcept;
     void reportGpuTime(std::uint64_t nanoseconds) noexcept;
     void shutdown() noexcept;
 
