@@ -35,15 +35,22 @@ struct GoldenProbe final {
 inline constexpr std::uint32_t kVisualWidth = 128;
 inline constexpr std::uint32_t kVisualHeight = 128;
 
-// Stable interior probes form a compact golden image. Analytic edge pixels are
-// deliberately excluded so WARP and desktop OpenGL may differ by rasterization
-// precision while still sharing the same bounded visual contract.
+// Stable interior probes plus a few explicitly tolerant AA-fringe/cap probes
+// form a compact golden image. The latter catch clipped analytic geometry while
+// allowing small WARP/OpenGL rasterization differences.
 inline constexpr std::array kUiGolden{
     GoldenProbe{2, 2, {0, 0, 0, 255}, 2},
+    GoldenProbe{7, 32, {34, 5, 7, 255}, 6},
     GoldenProbe{32, 32, {217, 31, 46, 255}, 8},
+    GoldenProbe{71, 32, {5, 34, 10, 255}, 6},
     GoldenProbe{96, 10, {31, 217, 64, 255}, 16},
     GoldenProbe{40, 70, {145, 145, 153, 255}, 12},
-    GoldenProbe{32, 100, {31, 89, 230, 255}, 14},
+    GoldenProbe{86, 64, {51, 179, 230, 255}, 10},
+    GoldenProbe{99, 64, {0, 0, 0, 255}, 2},
+    GoldenProbe{97, 74, {157, 44, 122, 255}, 15},
+    GoldenProbe{32, 88, {15, 45, 115, 255}, 12},
+    GoldenProbe{22, 100, {15, 45, 115, 255}, 12},
+    GoldenProbe{66, 91, {82, 18, 64, 255}, 10},
     GoldenProbe{96, 96, {230, 184, 31, 255}, 8},
     GoldenProbe{76, 96, {0, 0, 0, 255}, 2},
     GoldenProbe{116, 96, {0, 0, 0, 255}, 2},
@@ -78,7 +85,42 @@ inline constexpr std::array kUiGolden{
     TextRunCache cache(fonts);
     TextPainter text(cache);
     text.draw(canvas, font, 16.0F, {24.0F, 64.0F}, {0.95F, 0.95F, 1.0F, 0.6F}, "A");
-    canvas.line({12.0F, 88.0F}, {52.0F, 112.0F}, {0.12F, 0.35F, 0.90F, 1.0F}, 6.0F);
+    canvas.line(
+        {76.0F, 64.0F},
+        {96.0F, 64.0F},
+        {0.20F, 0.70F, 0.90F, 1.0F},
+        4.0F,
+        LineCap::Butt);
+    canvas.line(
+        {76.0F, 74.0F},
+        {96.0F, 74.0F},
+        {0.90F, 0.25F, 0.70F, 1.0F},
+        4.0F,
+        LineCap::Square);
+    const std::array polyline{
+        Vec2{12.0F, 112.0F},
+        Vec2{32.0F, 88.0F},
+        Vec2{52.0F, 112.0F},
+    };
+    canvas.polyline(
+        polyline,
+        {0.12F, 0.35F, 0.90F, 0.5F},
+        6.0F,
+        false,
+        LineCap::Round,
+        LineJoin::Round);
+    const std::array bevelPolyline{
+        Vec2{56.0F, 112.0F},
+        Vec2{66.0F, 92.0F},
+        Vec2{76.0F, 112.0F},
+    };
+    canvas.polyline(
+        bevelPolyline,
+        {0.90F, 0.20F, 0.70F, 0.5F},
+        6.0F,
+        false,
+        LineCap::Butt,
+        LineJoin::Bevel);
     static_cast<void>(canvas.pushClip({{80.0F, 80.0F}, {112.0F, 112.0F}}));
     canvas.fillRect({{72.0F, 72.0F}, {120.0F, 120.0F}}, {0.90F, 0.72F, 0.12F, 1.0F});
     static_cast<void>(canvas.popClip());

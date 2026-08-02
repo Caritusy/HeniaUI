@@ -25,6 +25,7 @@ using Microsoft::WRL::ComPtr;
 static_assert(std::is_standard_layout_v<DrawInstance>);
 static_assert(offsetof(DrawInstance, pointB) == offsetof(DrawInstance, pointA) + sizeof(Vec2));
 static_assert(offsetof(DrawInstance, thickness) == offsetof(DrawInstance, radius) + sizeof(float));
+static_assert(offsetof(DrawInstance, lineFlags) == offsetof(DrawInstance, kind) + 3U);
 
 constexpr const char* kShaderSource = R"hlsl(
 cbuffer FrameConstants : register(b0) {
@@ -43,21 +44,23 @@ struct VertexInput {
     float4 color : INSTANCE_COLOR;
     float2 metrics : INSTANCE_METRICS;
     uint textureSlot : INSTANCE_TEXTURE_SLOT;
-    uint kind : INSTANCE_KIND;
+    uint4 style : INSTANCE_STYLE;
     uint vertexId : SV_VertexID;
 };
 
 struct PixelInput {
     float4 position : SV_Position;
     float2 pixelPosition : PIXEL_POSITION;
-    float2 localPosition : LOCAL_POSITION;
-    float2 primitiveSize : PRIMITIVE_SIZE;
     float2 textureUv : TEXTURE_UV;
     float4 tintColor : TINT_COLOR;
     float4 linePoints : LINE_POINTS;
+    nointerpolation float4 lineNeighbors : LINE_NEIGHBORS;
     float2 shapeMetrics : SHAPE_METRICS;
     nointerpolation uint textureSlot : TEXTURE_SLOT;
     nointerpolation uint primitiveKind : PRIMITIVE_KIND;
+    nointerpolation uint lineCap : LINE_CAP;
+    nointerpolation uint lineJoin : LINE_JOIN;
+    nointerpolation uint lineFlags : LINE_FLAGS;
 };
 
 static const float2 corners[6] = {
@@ -68,18 +71,44 @@ static const float2 corners[6] = {
 PixelInput vertexMain(VertexInput input) {
     PixelInput output;
     float2 corner = corners[input.vertexId];
-    float2 pixel = lerp(input.bounds.xy, input.bounds.zw, corner);
+    uint kind = input.style.x;
+    float2 pixel;
+    if (kind == 2) {
+        float2 start = input.points.xy;
+        float2 finish = input.points.zw;
+        float2 segment = finish - start;
+        float segmentLength = length(segment);
+        float2 direction = segment / segmentLength;
+        float2 normal = float2(-direction.y, direction.x);
+        float halfWidth = input.metrics.y * 0.5;
+        uint joinMode = input.style.z == 0 ? 0 : 2;
+        uint startMode = (input.style.w & 1) != 0 ? joinMode : input.style.y;
+        uint endMode = (input.style.w & 2) != 0 ? joinMode : input.style.y;
+        float startExtension = (((input.style.w & 1) != 0 || startMode != 0)
+            ? halfWidth : 0.0) + 2.0;
+        float endExtension = (((input.style.w & 2) != 0 || endMode != 0)
+            ? halfWidth : 0.0) + 2.0;
+        float along = lerp(-startExtension, segmentLength + endExtension, corner.x);
+        float across = lerp(-halfWidth - 2.0, halfWidth + 2.0, corner.y);
+        pixel = start + direction * along + normal * across;
+    } else if (kind == 0) {
+        pixel = lerp(input.bounds.xy - 2.0, input.bounds.zw + 2.0, corner);
+    } else {
+        pixel = lerp(input.bounds.xy, input.bounds.zw, corner);
+    }
     float2 normalized = pixel / viewportSize;
     output.position = float4(normalized.x * 2.0 - 1.0, 1.0 - normalized.y * 2.0, 0.0, 1.0);
     output.pixelPosition = pixel;
-    output.localPosition = corner;
-    output.primitiveSize = input.bounds.zw - input.bounds.xy;
     output.textureUv = lerp(input.uv.xy, input.uv.zw, corner);
     output.tintColor = input.color;
-    output.linePoints = input.points;
+    output.linePoints = kind == 0 ? input.bounds : input.points;
+    output.lineNeighbors = input.uv;
     output.shapeMetrics = input.metrics;
     output.textureSlot = input.textureSlot;
-    output.primitiveKind = input.kind;
+    output.primitiveKind = kind;
+    output.lineCap = input.style.y;
+    output.lineJoin = input.style.z;
+    output.lineFlags = input.style.w;
     return output;
 }
 
@@ -103,11 +132,73 @@ float roundedBoxDistance(float2 positionValue, float2 halfSize, float radius) {
     return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - radius;
 }
 
-float segmentDistance(float2 positionValue, float2 start, float2 finish) {
+float boxDistance(float2 positionValue, float2 halfSize) {
+    float2 q = abs(positionValue) - halfSize;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+}
+
+float cappedSegmentDistance(
+    float2 positionValue,
+    float2 start,
+    float2 finish,
+    uint startMode,
+    uint endMode,
+    float halfWidth) {
     float2 segment = finish - start;
-    float denominator = max(dot(segment, segment), 0.0001);
-    float projection = saturate(dot(positionValue - start, segment) / denominator);
-    return length(positionValue - (start + projection * segment));
+    float segmentLength = length(segment);
+    float2 direction = segment / segmentLength;
+    float2 normal = float2(-direction.y, direction.x);
+    float startExtension = startMode == 1 ? halfWidth : 0.0;
+    float endExtension = endMode == 1 ? halfWidth : 0.0;
+    float center = (segmentLength + endExtension - startExtension) * 0.5;
+    float2 local = float2(
+        dot(positionValue - start, direction) - center,
+        dot(positionValue - start, normal));
+    float distanceValue = boxDistance(
+        local,
+        float2((segmentLength + startExtension + endExtension) * 0.5, halfWidth));
+    if (startMode == 2) distanceValue = min(distanceValue, length(positionValue - start) - halfWidth);
+    if (endMode == 2) distanceValue = min(distanceValue, length(positionValue - finish) - halfWidth);
+    return distanceValue;
+}
+
+float triangleDistance(float2 positionValue, float2 a, float2 b, float2 c) {
+    float2 e0 = b - a;
+    float2 e1 = c - b;
+    float2 e2 = a - c;
+    float2 v0 = positionValue - a;
+    float2 v1 = positionValue - b;
+    float2 v2 = positionValue - c;
+    float2 pq0 = v0 - e0 * saturate(dot(v0, e0) / dot(e0, e0));
+    float2 pq1 = v1 - e1 * saturate(dot(v1, e1) / dot(e1, e1));
+    float2 pq2 = v2 - e2 * saturate(dot(v2, e2) / dot(e2, e2));
+    float orientation = sign(e0.x * e2.y - e0.y * e2.x);
+    float2 distanceValue = min(
+        min(
+            float2(dot(pq0, pq0), orientation * (v0.x * e0.y - v0.y * e0.x)),
+            float2(dot(pq1, pq1), orientation * (v1.x * e1.y - v1.y * e1.x))),
+        float2(dot(pq2, pq2), orientation * (v2.x * e2.y - v2.y * e2.x)));
+    return -sqrt(distanceValue.x) * sign(distanceValue.y);
+}
+
+float bevelJoinDistance(
+    float2 positionValue,
+    float2 before,
+    float2 joint,
+    float2 after,
+    float halfWidth) {
+    float2 incoming = normalize(joint - before);
+    float2 outgoing = normalize(after - joint);
+    float turn = incoming.x * outgoing.y - incoming.y * outgoing.x;
+    if (abs(turn) < 0.0001) return 1e20;
+    float outside = turn > 0.0 ? -1.0 : 1.0;
+    float2 incomingNormal = float2(-incoming.y, incoming.x) * outside;
+    float2 outgoingNormal = float2(-outgoing.y, outgoing.x) * outside;
+    return triangleDistance(
+        positionValue,
+        joint,
+        joint + incomingNormal * halfWidth,
+        joint + outgoingNormal * halfWidth);
 }
 
 float4 pixelMain(PixelInput input) : SV_Target {
@@ -115,11 +206,12 @@ float4 pixelMain(PixelInput input) : SV_Target {
     float4 color = input.tintColor;
 
     if (input.primitiveKind == 0 || input.primitiveKind == 1) {
-        float2 centered = (input.localPosition - 0.5) * input.primitiveSize;
+        float2 primitiveSize = input.linePoints.zw - input.linePoints.xy;
+        float2 centered = input.pixelPosition - (input.linePoints.xy + input.linePoints.zw) * 0.5;
         float distanceToEdge = roundedBoxDistance(
             centered,
-            input.primitiveSize * 0.5,
-            min(input.shapeMetrics.x, min(input.primitiveSize.x, input.primitiveSize.y) * 0.5));
+            primitiveSize * 0.5,
+            min(input.shapeMetrics.x, min(primitiveSize.x, primitiveSize.y) * 0.5));
         float antiAlias = max(fwidth(distanceToEdge), 0.75);
         float outer = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
         if (input.primitiveKind == 1) {
@@ -130,12 +222,61 @@ float4 pixelMain(PixelInput input) : SV_Target {
             coverage = outer;
         }
     } else if (input.primitiveKind == 2) {
-        float distanceToLine = segmentDistance(input.pixelPosition, input.linePoints.xy, input.linePoints.zw);
+        uint joinMode = input.lineJoin == 0 ? 0 : 2;
+        bool hasPrevious = (input.lineFlags & 1) != 0;
+        bool hasNext = (input.lineFlags & 2) != 0;
+        uint startMode = hasPrevious ? joinMode : input.lineCap;
+        uint endMode = hasNext ? joinMode : input.lineCap;
+        float halfWidth = input.shapeMetrics.y * 0.5;
+        float distanceToLine = cappedSegmentDistance(
+            input.pixelPosition,
+            input.linePoints.xy,
+            input.linePoints.zw,
+            startMode,
+            endMode,
+            halfWidth);
+        if (hasNext && input.lineJoin == 0) {
+            distanceToLine = min(
+                distanceToLine,
+                bevelJoinDistance(
+                    input.pixelPosition,
+                    input.linePoints.xy,
+                    input.linePoints.zw,
+                    input.lineNeighbors.zw,
+                    halfWidth));
+        }
         float antiAlias = max(fwidth(distanceToLine), 0.75);
-        coverage = 1.0 - smoothstep(
-            input.shapeMetrics.y * 0.5 - antiAlias,
-            input.shapeMetrics.y * 0.5 + antiAlias,
-            distanceToLine);
+        if (hasPrevious) {
+            float previousDistance = cappedSegmentDistance(
+                input.pixelPosition,
+                input.lineNeighbors.xy,
+                input.linePoints.xy,
+                0,
+                joinMode,
+                halfWidth);
+            if (input.lineJoin == 0) {
+                previousDistance = min(
+                    previousDistance,
+                    bevelJoinDistance(
+                        input.pixelPosition,
+                        input.lineNeighbors.xy,
+                        input.linePoints.xy,
+                        input.linePoints.zw,
+                        halfWidth));
+            }
+            if (previousDistance <= distanceToLine) discard;
+        }
+        if (hasNext) {
+            float nextDistance = cappedSegmentDistance(
+                input.pixelPosition,
+                input.linePoints.zw,
+                input.lineNeighbors.zw,
+                joinMode,
+                0,
+                halfWidth);
+            if (nextDistance < distanceToLine) discard;
+        }
+        coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToLine);
     } else if (input.primitiveKind == 3) {
         color *= sampleTexture(input.textureSlot, input.textureUv);
     } else if (input.primitiveKind == 4) {
@@ -582,7 +723,7 @@ bool D3D12Renderer::Implementation::createPipelines() noexcept {
         D3D12_INPUT_ELEMENT_DESC{"INSTANCE_COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, static_cast<UINT>(offsetof(DrawInstance, color)), D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
         D3D12_INPUT_ELEMENT_DESC{"INSTANCE_METRICS", 0, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(DrawInstance, radius)), D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
         D3D12_INPUT_ELEMENT_DESC{"INSTANCE_TEXTURE_SLOT", 0, DXGI_FORMAT_R32_UINT, 0, static_cast<UINT>(offsetof(DrawInstance, textureSlot)), D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
-        D3D12_INPUT_ELEMENT_DESC{"INSTANCE_KIND", 0, DXGI_FORMAT_R8_UINT, 0, static_cast<UINT>(offsetof(DrawInstance, kind)), D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
+        D3D12_INPUT_ELEMENT_DESC{"INSTANCE_STYLE", 0, DXGI_FORMAT_R8G8B8A8_UINT, 0, static_cast<UINT>(offsetof(DrawInstance, kind)), D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};

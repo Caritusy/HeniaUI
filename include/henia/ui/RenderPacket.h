@@ -20,6 +20,9 @@ struct DrawInstance final {
     float thickness = 0.0F;
     std::uint32_t textureSlot = 0;
     PrimitiveKind kind = PrimitiveKind::SolidRect;
+    LineCap lineCap = LineCap::Round;
+    LineJoin lineJoin = LineJoin::Round;
+    std::uint8_t lineFlags = 0;
 };
 
 struct DrawBatch final {
@@ -38,6 +41,9 @@ struct PacketStatistics final {
     std::uint64_t instances = 0;
     std::uint64_t batches = 0;
     std::uint64_t mergedCommands = 0;
+    // Conservative pixel-space quad area before viewport/scissor clipping.
+    // This tracks fragment-work bounds; it is not a hardware occlusion query.
+    std::uint64_t estimatedFragmentArea = 0;
     std::uint64_t rejectedCommands = 0;
     std::uint64_t invalidInputCommands = 0;
     std::uint64_t capacityRejectedCommands = 0;
@@ -121,6 +127,7 @@ private:
     [[nodiscard]] std::size_t instanceCount() const noexcept;
     [[nodiscard]] bool appendInstance(const DrawInstance& instance) noexcept;
     [[nodiscard]] DrawBatch* appendBatch(const DrawBatch& batch) noexcept;
+    void addEstimatedFragmentArea(std::uint64_t area) noexcept;
     void setSourceCommands(std::size_t count) noexcept;
     [[nodiscard]] bool rejectPacket(bool invalidInput = false) noexcept;
     void completePacket() noexcept;

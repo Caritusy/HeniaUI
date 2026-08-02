@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -344,6 +345,15 @@ DrawBatch* RenderPacketBuilder::appendBatch(const DrawBatch& batch) noexcept {
         ++mStorage->statistics.batchCapacityGrowths;
     }
     return &mStorage->batches.back();
+}
+
+void RenderPacketBuilder::addEstimatedFragmentArea(std::uint64_t area) noexcept {
+    assert(mStorage != nullptr);
+    const std::uint64_t current = mStorage->statistics.estimatedFragmentArea;
+    mStorage->statistics.estimatedFragmentArea =
+        area > std::numeric_limits<std::uint64_t>::max() - current
+        ? std::numeric_limits<std::uint64_t>::max()
+        : current + area;
 }
 
 void RenderPacketBuilder::setSourceCommands(std::size_t count) noexcept {

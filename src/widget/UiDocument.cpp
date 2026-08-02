@@ -11,7 +11,26 @@ void UiDocument::reserve(
     std::size_t batchCapacity,
     CapacityPolicy capacityPolicy,
     std::size_t snapshotSlots) {
-    mFrame.reserve(commandCapacity, batchCapacity, capacityPolicy, snapshotSlots);
+    reserve(
+        commandCapacity,
+        commandCapacity,
+        batchCapacity,
+        capacityPolicy,
+        snapshotSlots);
+}
+
+void UiDocument::reserve(
+    std::size_t commandCapacity,
+    std::size_t instanceCapacity,
+    std::size_t batchCapacity,
+    CapacityPolicy capacityPolicy,
+    std::size_t snapshotSlots) {
+    mFrame.reserve(
+        commandCapacity,
+        instanceCapacity,
+        batchCapacity,
+        capacityPolicy,
+        snapshotSlots);
     mRetainedSegments.reserve(commandCapacity);
 }
 
@@ -81,6 +100,14 @@ void UiDocument::setTheme(Theme themeValue) noexcept {
 }
 
 const Theme& UiDocument::theme() const noexcept { return mTheme; }
+
+void UiDocument::setFragmentAreaTracking(bool enabled) noexcept {
+    mFrame.setFragmentAreaTracking(enabled);
+}
+
+bool UiDocument::fragmentAreaTracking() const noexcept {
+    return mFrame.fragmentAreaTracking();
+}
 
 RenderPacket UiDocument::compose() {
     if (mRoot == nullptr || mViewport.x <= 0.0F || mViewport.y <= 0.0F) {

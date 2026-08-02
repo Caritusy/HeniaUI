@@ -25,6 +25,7 @@ Shapes, images, and glyphs use one ordered UI pipeline. Each batch carries a sma
 ## Current example
 
 ```cpp
+#include <array>
 #include <henia/ui/Frame.h>
 
 henia::ui::Frame frame;
@@ -35,6 +36,25 @@ canvas.fillRect(
     {{20.0F, 20.0F}, {420.0F, 240.0F}},
     {0.03F, 0.05F, 0.08F, 1.0F},
     12.0F);
+canvas.line(
+    {40.0F, 80.0F},
+    {300.0F, 180.0F},
+    {0.20F, 0.70F, 0.95F, 1.0F},
+    2.0F,
+    henia::ui::LineCap::Round);
+
+const std::array path{
+    henia::ui::Vec2{40.0F, 200.0F},
+    henia::ui::Vec2{160.0F, 120.0F},
+    henia::ui::Vec2{300.0F, 200.0F},
+};
+canvas.polyline(
+    path,
+    {0.95F, 0.55F, 0.20F, 0.7F},
+    4.0F,
+    false,
+    henia::ui::LineCap::Square,
+    henia::ui::LineJoin::Bevel);
 
 henia::ui::RenderPacket packet = frame.finish();
 ```
@@ -48,6 +68,9 @@ contents without releasing memory, and `finish` publishes a cheap `RenderPacket`
 snapshot handle while coalescing compatible commands. Rejected command and
 packet-overflow counts are observable through the canvas and packet statistics;
 slot count, growth, and rejected builds are observable through `Frame`.
+The overload taking separate command and instance capacities is useful for
+fixed-capacity analytic scenes: one `StrokeRect` command compiles to at most
+eight tight edge/corner instances.
 
 ## Build
 

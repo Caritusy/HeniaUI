@@ -9,8 +9,22 @@ void Frame::reserve(
     std::size_t batchCapacity,
     CapacityPolicy capacityPolicy,
     std::size_t snapshotSlots) {
+    reserve(
+        commandCapacity,
+        commandCapacity,
+        batchCapacity,
+        capacityPolicy,
+        snapshotSlots);
+}
+
+void Frame::reserve(
+    std::size_t commandCapacity,
+    std::size_t instanceCapacity,
+    std::size_t batchCapacity,
+    CapacityPolicy capacityPolicy,
+    std::size_t snapshotSlots) {
     mDisplayList.reserve(commandCapacity, capacityPolicy);
-    mPacketBuilder.reserve(commandCapacity, batchCapacity, capacityPolicy, snapshotSlots);
+    mPacketBuilder.reserve(instanceCapacity, batchCapacity, capacityPolicy, snapshotSlots);
 }
 
 Canvas& Frame::begin() noexcept {
@@ -18,6 +32,14 @@ Canvas& Frame::begin() noexcept {
     mCanvas.reset();
     mRecording = true;
     return mCanvas;
+}
+
+void Frame::setFragmentAreaTracking(bool enabled) noexcept {
+    mCompiler.setFragmentAreaTracking(enabled);
+}
+
+bool Frame::fragmentAreaTracking() const noexcept {
+    return mCompiler.fragmentAreaTracking();
 }
 
 RenderPacket Frame::finish() {

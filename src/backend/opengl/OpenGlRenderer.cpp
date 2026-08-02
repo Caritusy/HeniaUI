@@ -79,6 +79,7 @@ constexpr GLenum kUnpackRowLength = 0x0CF2;
 static_assert(std::is_standard_layout_v<DrawInstance>);
 static_assert(offsetof(DrawInstance, pointB) == offsetof(DrawInstance, pointA) + sizeof(Vec2));
 static_assert(offsetof(DrawInstance, thickness) == offsetof(DrawInstance, radius) + sizeof(float));
+static_assert(offsetof(DrawInstance, lineFlags) == offsetof(DrawInstance, kind) + 3U);
 
 using CreateShaderFn = GLuint(APIENTRYP)(GLenum);
 using ShaderSourceFn = void(APIENTRYP)(GLuint, GLsizei, const GlChar* const*, const GLint*);
@@ -246,19 +247,21 @@ layout(location = 2) in vec4 instancePoints;
 layout(location = 3) in vec4 instanceColor;
 layout(location = 4) in vec2 instanceMetrics;
 layout(location = 5) in uint instanceTextureSlot;
-layout(location = 6) in uint instanceKind;
+layout(location = 6) in uvec4 instanceStyle;
 
 uniform vec2 viewportSize;
 
 out vec2 pixelPosition;
-out vec2 localPosition;
-out vec2 primitiveSize;
 out vec2 textureUv;
 out vec4 tintColor;
 out vec4 linePoints;
+flat out vec4 lineNeighbors;
 out vec2 shapeMetrics;
 flat out uint textureSlot;
 flat out uint primitiveKind;
+flat out uint lineCap;
+flat out uint lineJoin;
+flat out uint lineFlags;
 
 const vec2 corners[6] = vec2[6](
     vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
@@ -266,33 +269,64 @@ const vec2 corners[6] = vec2[6](
 
 void main() {
     vec2 corner = corners[gl_VertexID];
-    vec2 pixel = mix(instanceBounds.xy, instanceBounds.zw, corner);
+    uint kind = instanceStyle.x;
+    vec2 pixel;
+    if (kind == 2u) {
+        vec2 start = instancePoints.xy;
+        vec2 finish = instancePoints.zw;
+        vec2 segment = finish - start;
+        float segmentLength = length(segment);
+        vec2 direction = segment / segmentLength;
+        vec2 normal = vec2(-direction.y, direction.x);
+        float halfWidth = instanceMetrics.y * 0.5;
+        uint joinMode = instanceStyle.z == 0u ? 0u : 2u;
+        uint startMode = (instanceStyle.w & 1u) != 0u ? joinMode : instanceStyle.y;
+        uint endMode = (instanceStyle.w & 2u) != 0u ? joinMode : instanceStyle.y;
+        float startExtension = (((instanceStyle.w & 1u) != 0u || startMode != 0u)
+            ? halfWidth : 0.0) + 2.0;
+        float endExtension = (((instanceStyle.w & 2u) != 0u || endMode != 0u)
+            ? halfWidth : 0.0) + 2.0;
+        float along = mix(-startExtension, segmentLength + endExtension, corner.x);
+        float across = mix(-halfWidth - 2.0, halfWidth + 2.0, corner.y);
+        pixel = start + direction * along + normal * across;
+    } else if (kind == 0u) {
+        pixel = mix(
+            instanceBounds.xy - vec2(2.0),
+            instanceBounds.zw + vec2(2.0),
+            corner);
+    } else {
+        pixel = mix(instanceBounds.xy, instanceBounds.zw, corner);
+    }
     vec2 normalized = pixel / viewportSize;
     gl_Position = vec4(normalized.x * 2.0 - 1.0, 1.0 - normalized.y * 2.0, 0.0, 1.0);
 
     pixelPosition = pixel;
-    localPosition = corner;
-    primitiveSize = instanceBounds.zw - instanceBounds.xy;
     textureUv = mix(instanceUv.xy, instanceUv.zw, corner);
     tintColor = instanceColor;
-    linePoints = instancePoints;
+    linePoints = kind == 0u ? instanceBounds : instancePoints;
+    lineNeighbors = instanceUv;
     shapeMetrics = instanceMetrics;
     textureSlot = instanceTextureSlot;
-    primitiveKind = instanceKind;
+    primitiveKind = kind;
+    lineCap = instanceStyle.y;
+    lineJoin = instanceStyle.z;
+    lineFlags = instanceStyle.w;
 }
 )glsl";
 
 constexpr const char* kFragmentShaderSource = R"glsl(
 #version 330 core
 in vec2 pixelPosition;
-in vec2 localPosition;
-in vec2 primitiveSize;
 in vec2 textureUv;
 in vec4 tintColor;
 in vec4 linePoints;
+flat in vec4 lineNeighbors;
 in vec2 shapeMetrics;
 flat in uint textureSlot;
 flat in uint primitiveKind;
+flat in uint lineCap;
+flat in uint lineJoin;
+flat in uint lineFlags;
 
 uniform sampler2D textures[8];
 out vec4 outputColor;
@@ -313,11 +347,66 @@ float roundedBoxDistance(vec2 point, vec2 halfSize, float radius) {
     return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - radius;
 }
 
-float segmentDistance(vec2 point, vec2 start, vec2 finish) {
+float boxDistance(vec2 point, vec2 halfSize) {
+    vec2 q = abs(point) - halfSize;
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
+}
+
+float cappedSegmentDistance(
+    vec2 point,
+    vec2 start,
+    vec2 finish,
+    uint startMode,
+    uint endMode,
+    float halfWidth) {
     vec2 segment = finish - start;
-    float denominator = max(dot(segment, segment), 0.0001);
-    float projection = clamp(dot(point - start, segment) / denominator, 0.0, 1.0);
-    return length(point - (start + projection * segment));
+    float segmentLength = length(segment);
+    vec2 direction = segment / segmentLength;
+    vec2 normal = vec2(-direction.y, direction.x);
+    float startExtension = startMode == 1u ? halfWidth : 0.0;
+    float endExtension = endMode == 1u ? halfWidth : 0.0;
+    float center = (segmentLength + endExtension - startExtension) * 0.5;
+    vec2 local = vec2(dot(point - start, direction) - center, dot(point - start, normal));
+    float distanceValue = boxDistance(
+        local,
+        vec2((segmentLength + startExtension + endExtension) * 0.5, halfWidth));
+    if (startMode == 2u) distanceValue = min(distanceValue, length(point - start) - halfWidth);
+    if (endMode == 2u) distanceValue = min(distanceValue, length(point - finish) - halfWidth);
+    return distanceValue;
+}
+
+float triangleDistance(vec2 point, vec2 a, vec2 b, vec2 c) {
+    vec2 e0 = b - a;
+    vec2 e1 = c - b;
+    vec2 e2 = a - c;
+    vec2 v0 = point - a;
+    vec2 v1 = point - b;
+    vec2 v2 = point - c;
+    vec2 pq0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
+    vec2 pq1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
+    vec2 pq2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
+    float orientation = sign(e0.x * e2.y - e0.y * e2.x);
+    vec2 distanceValue = min(
+        min(
+            vec2(dot(pq0, pq0), orientation * (v0.x * e0.y - v0.y * e0.x)),
+            vec2(dot(pq1, pq1), orientation * (v1.x * e1.y - v1.y * e1.x))),
+        vec2(dot(pq2, pq2), orientation * (v2.x * e2.y - v2.y * e2.x)));
+    return -sqrt(distanceValue.x) * sign(distanceValue.y);
+}
+
+float bevelJoinDistance(vec2 point, vec2 before, vec2 joint, vec2 after, float halfWidth) {
+    vec2 incoming = normalize(joint - before);
+    vec2 outgoing = normalize(after - joint);
+    float turn = incoming.x * outgoing.y - incoming.y * outgoing.x;
+    if (abs(turn) < 0.0001) return 1e20;
+    float outside = turn > 0.0 ? -1.0 : 1.0;
+    vec2 incomingNormal = vec2(-incoming.y, incoming.x) * outside;
+    vec2 outgoingNormal = vec2(-outgoing.y, outgoing.x) * outside;
+    return triangleDistance(
+        point,
+        joint,
+        joint + incomingNormal * halfWidth,
+        joint + outgoingNormal * halfWidth);
 }
 
 vec4 premultiply(vec4 color) {
@@ -329,7 +418,8 @@ void main() {
     vec4 color = tintColor;
 
     if (primitiveKind == 0u || primitiveKind == 1u) {
-        vec2 centered = (localPosition - vec2(0.5)) * primitiveSize;
+        vec2 primitiveSize = linePoints.zw - linePoints.xy;
+        vec2 centered = pixelPosition - (linePoints.xy + linePoints.zw) * 0.5;
         float distanceToEdge = roundedBoxDistance(
             centered,
             primitiveSize * 0.5,
@@ -344,12 +434,61 @@ void main() {
             coverage = outer;
         }
     } else if (primitiveKind == 2u) {
-        float distanceToLine = segmentDistance(pixelPosition, linePoints.xy, linePoints.zw);
+        uint joinMode = lineJoin == 0u ? 0u : 2u;
+        bool hasPrevious = (lineFlags & 1u) != 0u;
+        bool hasNext = (lineFlags & 2u) != 0u;
+        uint startMode = hasPrevious ? joinMode : lineCap;
+        uint endMode = hasNext ? joinMode : lineCap;
+        float halfWidth = shapeMetrics.y * 0.5;
+        float distanceToLine = cappedSegmentDistance(
+            pixelPosition,
+            linePoints.xy,
+            linePoints.zw,
+            startMode,
+            endMode,
+            halfWidth);
+        if (hasNext && lineJoin == 0u) {
+            distanceToLine = min(
+                distanceToLine,
+                bevelJoinDistance(
+                    pixelPosition,
+                    linePoints.xy,
+                    linePoints.zw,
+                    lineNeighbors.zw,
+                    halfWidth));
+        }
         float antiAlias = max(fwidth(distanceToLine), 0.75);
-        coverage = 1.0 - smoothstep(
-            shapeMetrics.y * 0.5 - antiAlias,
-            shapeMetrics.y * 0.5 + antiAlias,
-            distanceToLine);
+        if (hasPrevious) {
+            float previousDistance = cappedSegmentDistance(
+                pixelPosition,
+                lineNeighbors.xy,
+                linePoints.xy,
+                0u,
+                joinMode,
+                halfWidth);
+            if (lineJoin == 0u) {
+                previousDistance = min(
+                    previousDistance,
+                    bevelJoinDistance(
+                        pixelPosition,
+                        lineNeighbors.xy,
+                        linePoints.xy,
+                        linePoints.zw,
+                        halfWidth));
+            }
+            if (previousDistance <= distanceToLine) discard;
+        }
+        if (hasNext) {
+            float nextDistance = cappedSegmentDistance(
+                pixelPosition,
+                linePoints.zw,
+                lineNeighbors.zw,
+                joinMode,
+                0u,
+                halfWidth);
+            if (nextDistance < distanceToLine) discard;
+        }
+        coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToLine);
     } else if (primitiveKind == 3u) {
         color *= sampleTexture(textureSlot, textureUv);
     } else if (primitiveKind == 4u) {
@@ -1283,7 +1422,7 @@ void OpenGlRenderer::Implementation::configureAttributes(std::size_t firstInstan
     gl.vertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, pointer(offsetof(DrawInstance, color)));
     gl.vertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, stride, pointer(offsetof(DrawInstance, radius)));
     gl.vertexAttribIPointer(5, 1, GL_UNSIGNED_INT, stride, pointer(offsetof(DrawInstance, textureSlot)));
-    gl.vertexAttribIPointer(6, 1, GL_UNSIGNED_BYTE, stride, pointer(offsetof(DrawInstance, kind)));
+    gl.vertexAttribIPointer(6, 4, GL_UNSIGNED_BYTE, stride, pointer(offsetof(DrawInstance, kind)));
     for (GLuint index = 0; index <= 6; ++index) {
         gl.enableVertexAttribArray(index);
         gl.vertexAttribDivisor(index, 1);

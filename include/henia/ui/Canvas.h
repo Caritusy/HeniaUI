@@ -24,8 +24,19 @@ public:
     [[nodiscard]] bool pushClip(Rect rect) noexcept;
     [[nodiscard]] bool popClip() noexcept;
 
-    void line(Vec2 from, Vec2 to, Color color, float thickness) noexcept;
-    void polyline(std::span<const Vec2> points, Color color, float thickness, bool closed) noexcept;
+    void line(
+        Vec2 from,
+        Vec2 to,
+        Color color,
+        float thickness,
+        LineCap cap = LineCap::Round) noexcept;
+    void polyline(
+        std::span<const Vec2> points,
+        Color color,
+        float thickness,
+        bool closed,
+        LineCap cap = LineCap::Round,
+        LineJoin join = LineJoin::Round) noexcept;
     void fillRect(Rect rect, Color color, float rounding = 0.0F) noexcept;
     void strokeRect(Rect rect, Color color, float rounding, float thickness) noexcept;
     void image(TextureHandle texture, Rect rect, Color tint = {}) noexcept;
@@ -48,6 +59,16 @@ private:
     [[nodiscard]] ClipRect currentClip() const noexcept;
     void rejectInvalid(std::string_view field) noexcept;
     void append(DrawCommand command) noexcept;
+    void appendLine(
+        Vec2 from,
+        Vec2 to,
+        Vec2 previous,
+        Vec2 next,
+        Color color,
+        float thickness,
+        LineCap cap,
+        LineJoin join,
+        std::uint8_t flags) noexcept;
 
     DisplayList* mDisplayList = nullptr;
     std::array<ClipRect, kMaximumClipDepth> mClips{};
