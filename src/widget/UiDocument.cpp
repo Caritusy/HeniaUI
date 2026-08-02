@@ -319,6 +319,9 @@ bool UiDocument::dispatchEvent(const InputEvent& event) {
         case InputEventKind::FocusLost:
             clearInteraction();
             return false;
+        case InputEventKind::PointerCancel:
+            clearPointerInteraction();
+            return false;
     }
     return false;
 }
@@ -343,20 +346,9 @@ void UiDocument::clearInteraction() {
 }
 
 void UiDocument::clearInteractionImpl() {
-    Widget* hovered = resolve(mHoveredIdentity);
-    Widget* captured = resolve(mCapturedIdentity);
     Widget* focused = resolve(mFocusedIdentity);
-    mHoveredIdentity = 0;
-    mCapturedIdentity = 0;
     mFocusedIdentity = 0;
-    mPointerSequenceActive = false;
-
-    if (hovered != nullptr) {
-        hovered->setHovered(false);
-    }
-    if (captured != nullptr) {
-        captured->setPressed(false);
-    }
+    clearPointerInteraction();
     if (focused != nullptr) {
         focused->setFocused(false);
         static_cast<void>(focused->handleInput({.kind = InputEventKind::FocusLost}));
@@ -486,6 +478,20 @@ bool UiDocument::interactive(const Widget& widget) noexcept {
         current = current->parent();
     }
     return true;
+}
+
+void UiDocument::clearPointerInteraction() noexcept {
+    Widget* hovered = resolve(mHoveredIdentity);
+    Widget* captured = resolve(mCapturedIdentity);
+    mHoveredIdentity = 0;
+    mCapturedIdentity = 0;
+    mPointerSequenceActive = false;
+    if (hovered != nullptr) {
+        hovered->setHovered(false);
+    }
+    if (captured != nullptr) {
+        captured->setPressed(false);
+    }
 }
 
 void UiDocument::widgetBecameNonInteractive(Widget& subtree) {

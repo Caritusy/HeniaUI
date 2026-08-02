@@ -90,6 +90,7 @@ private:
     [[nodiscard]] static bool subtreeContains(const Widget& root, std::uint64_t identity) noexcept;
     [[nodiscard]] static bool interactive(const Widget& widget) noexcept;
     void widgetBecameNonInteractive(Widget& subtree);
+    void clearPointerInteraction() noexcept;
     void clearInteractionImpl();
     void clearInteractionForSubtree(Widget& subtree);
     void resetInteractionWithoutCallbacks() noexcept;

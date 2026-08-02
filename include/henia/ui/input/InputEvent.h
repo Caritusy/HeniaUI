@@ -15,6 +15,7 @@ enum class InputEventKind : std::uint8_t {
     KeyUp,
     TextInput,
     FocusLost,
+    PointerCancel,
 };
 
 enum class PointerButton : std::uint8_t {

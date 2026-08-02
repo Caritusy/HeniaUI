@@ -138,6 +138,30 @@ that callback can propagate, so `setVisible()` and `setEnabled()` are not
 Clicks on a passive background clear an existing focus but otherwise do not
 dirty paint or publish a replacement packet.
 
+### Win32 input and message ownership
+
+`Win32InputAdapter` observes one host-owned `HWND` message stream and never
+subclasses or destroys the window. A handled left/right/middle button down calls
+`SetCapture()`; the adapter tracks every pressed supported button and calls
+`ReleaseCapture()` only after the last corresponding up. If capture cannot be
+acquired, the document pointer sequence is cancelled immediately. An expected
+`WM_CAPTURECHANGED` caused by that final release does not cancel keyboard focus.
+
+External `WM_CAPTURECHANGED` and `WM_CANCELMODE` dispatch platform-neutral
+`PointerCancel`, which clears hover/capture/pressed state while preserving
+keyboard focus. `WM_KILLFOCUS`, `WM_DESTROY`, and `WM_NCDESTROY` release native
+capture, discard a pending UTF-16 high surrogate, and dispatch `FocusLost` to
+clear all interaction. Hosts must route destruction messages to the adapter
+before invalidating its document or adapter pointer.
+
+The return value is a consumption decision. Pointer, wheel, key, and completed
+text messages return the document handler result. A buffered UTF-16 high
+surrogate and `WM_UNICHAR`'s `UNICODE_NOCHAR` capability probe return `true`.
+Capture/focus/cancellation/destruction notifications are observed but return
+`false` so normal host window processing continues. Valid surrogate pairs are
+combined; isolated surrogates and invalid `WM_UNICHAR` scalar values dispatch
+U+FFFD. Unsupported messages return `false` unchanged.
+
 ### Widget mutation and callback ordering
 
 `UiDocument` identifies hovered, captured, and focused widgets by stable widget
