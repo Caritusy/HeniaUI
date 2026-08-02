@@ -117,7 +117,9 @@ target_link_libraries(MyApplication PRIVATE
 ## Rendering invariants
 
 - Command ordering is preserved.
-- Nested clips are intersected at record time.
+- Nested clips are intersected at record time; `Canvas::scopedClip()` balances
+  only the entry it successfully pushed, and empty intersections make nested
+  drawing a no-op.
 - Compatible adjacent commands are merged.
 - Up to eight live textures share one batch before a new batch is opened.
 - Capacity is retained between frames.

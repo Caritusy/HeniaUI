@@ -122,6 +122,63 @@ namespace henia::ui {
     return {};
 }
 
+// Conservative raster bounds match the shader's analytic fringe and oriented
+// line-quad expansion. Call only after validation.
+[[nodiscard]] inline bool commandOverlapsClip(const DrawCommand& command) noexcept {
+    if (!command.clip.enabled) return true;
+    double minimumX = 0.0;
+    double minimumY = 0.0;
+    double maximumX = 0.0;
+    double maximumY = 0.0;
+    if (command.kind == PrimitiveKind::Line) {
+        const double fromX = static_cast<double>(command.bounds.min.x);
+        const double fromY = static_cast<double>(command.bounds.min.y);
+        const double toX = static_cast<double>(command.bounds.max.x);
+        const double toY = static_cast<double>(command.bounds.max.y);
+        const double deltaX = toX - fromX;
+        const double deltaY = toY - fromY;
+        const double length = std::hypot(deltaX, deltaY);
+        const double directionX = deltaX / length;
+        const double directionY = deltaY / length;
+        const double halfWidth = static_cast<double>(command.thickness) * 0.5;
+        const double fringe = static_cast<double>(kAnalyticAaFringe);
+        const double startExtension = fringe
+            + (((command.lineFlags & kLineHasPrevious) != 0
+                    || command.lineCap != LineCap::Butt)
+                ? halfWidth
+                : 0.0);
+        const double endExtension = fringe
+            + (((command.lineFlags & kLineHasNext) != 0
+                    || command.lineCap != LineCap::Butt)
+                ? halfWidth
+                : 0.0);
+        const double across = halfWidth + fringe;
+        const double startCenterX = fromX - directionX * startExtension;
+        const double startCenterY = fromY - directionY * startExtension;
+        const double endCenterX = toX + directionX * endExtension;
+        const double endCenterY = toY + directionY * endExtension;
+        const double acrossX = std::abs(directionY) * across;
+        const double acrossY = std::abs(directionX) * across;
+        minimumX = std::min(startCenterX, endCenterX) - acrossX;
+        minimumY = std::min(startCenterY, endCenterY) - acrossY;
+        maximumX = std::max(startCenterX, endCenterX) + acrossX;
+        maximumY = std::max(startCenterY, endCenterY) + acrossY;
+    } else {
+        const double fringe = command.kind == PrimitiveKind::SolidRect
+                || command.kind == PrimitiveKind::StrokeRect
+            ? static_cast<double>(kAnalyticAaFringe)
+            : 0.0;
+        minimumX = static_cast<double>(command.bounds.min.x) - fringe;
+        minimumY = static_cast<double>(command.bounds.min.y) - fringe;
+        maximumX = static_cast<double>(command.bounds.max.x) + fringe;
+        maximumY = static_cast<double>(command.bounds.max.y) + fringe;
+    }
+    return maximumX > static_cast<double>(command.clip.area.min.x)
+        && minimumX < static_cast<double>(command.clip.area.max.x)
+        && maximumY > static_cast<double>(command.clip.area.min.y)
+        && minimumY < static_cast<double>(command.clip.area.max.y);
+}
+
 struct ScissorRect final {
     std::int32_t left = 0;
     std::int32_t top = 0;
@@ -136,6 +193,7 @@ struct ScissorRect final {
     std::uint32_t viewportWidth,
     std::uint32_t viewportHeight,
     ScissorRect& output) noexcept {
+    output = {};
     if (!validateRect(area, "clip.area").empty()
         || viewportWidth == 0 || viewportHeight == 0
         || viewportWidth > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())
@@ -152,6 +210,10 @@ struct ScissorRect final {
         std::clamp(std::ceil(static_cast<double>(area.max.x)), 0.0, width));
     output.bottom = static_cast<std::int32_t>(
         std::clamp(std::ceil(static_cast<double>(area.max.y)), 0.0, height));
+    if (output.left >= output.right || output.top >= output.bottom) {
+        output = {};
+        return false;
+    }
     return true;
 }
 

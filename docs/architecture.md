@@ -337,9 +337,25 @@ commands. `lastError()` names the rejected field. Invalid-input counters are
 separate from capacity-exhaustion counters while the aggregate rejection count
 is retained for compatibility.
 
-Clip rectangles are converted once with floor for minima and ceil for maxima,
-then clamped to the viewport. This preserves fractional analytic-AA coverage and
-gives OpenGL and D3D12 identical integer coverage. Capacity products, byte
+`Canvas::scopedClip()` returns a move-only scope tied to the exact stack token
+that it pushed. Its destructor cannot pop a parent after a failed push, a manual
+pop, or an out-of-order scope release; an out-of-order release remains pending
+until its children leave. Valid clips whose nested intersection is empty still
+occupy one stack entry, so drawing becomes a counted recording no-op and the
+matching pop remains balanced. The manual `pushClip()` / `popClip()` pair remains
+available for integrations that already balance it explicitly.
+
+Canvas and retained-segment compilation reject primitives whose conservative
+raster bounds do not overlap the active clip. Solid/stroked geometry includes
+its analytic-AA fringe, and line bounds include half-width plus cap/join fringe,
+so edge coverage is not over-culled. Empty stroke regions are removed during
+expansion as well.
+
+Clip rectangles are converted with floor for minima and ceil for maxima, then
+clamped to the viewport. Empty results are rejected as no-op batches before any
+instance upload or draw call. This preserves fractional analytic-AA coverage,
+never passes a negative scissor extent to a backend, and gives OpenGL and D3D12
+identical integer coverage. Capacity products, byte
 ranges, descriptor counts, and narrowing conversions are checked before any
 allocation or API call; configurations whose instance-buffer view would exceed
 `GLsizeiptr` or D3D12's `UINT` byte count are rejected during initialization.

@@ -1330,6 +1330,7 @@ bool OpenGlRenderer::Implementation::render(
         error = "Render packet byte range exceeds the OpenGL instance buffer";
         return false;
     }
+    bool hasVisibleBatches = false;
     for (const DrawBatch& batch : packet.batches()) {
         const std::size_t first = batch.firstInstance;
         const std::size_t count = batch.instanceCount;
@@ -1341,22 +1342,31 @@ bool OpenGlRenderer::Implementation::render(
             return false;
         }
         if (batch.clip.enabled) {
-            ScissorRect scissor{};
-            if (!makeScissorRect(batch.clip.area, width, height, scissor)) {
+            if (!validateRect(batch.clip.area, "clip.area").empty()) {
                 ++statistics.rejectedFrames;
                 ++statistics.invalidInputFrames;
                 error = "clip.area is invalid";
                 return false;
             }
+            ScissorRect scissor{};
+            hasVisibleBatches = hasVisibleBatches
+                || (batch.instanceCount != 0
+                    && makeScissorRect(batch.clip.area, width, height, scissor));
+        } else {
+            hasVisibleBatches = hasVisibleBatches || batch.instanceCount != 0;
         }
     }
-    if (packet.instances().empty() || packet.batches().empty()) {
+    if (packet.instances().empty() || packet.batches().empty() || !hasVisibleBatches) {
         ++statistics.frames;
         error.clear();
         return true;
     }
 
     for (const DrawBatch& batch : packet.batches()) {
+        if (batch.clip.enabled) {
+            ScissorRect scissor{};
+            if (!makeScissorRect(batch.clip.area, width, height, scissor)) continue;
+        }
         for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
             const TextureHandle handle = batch.textures[slot];
             if (!handle.valid() || handle.value() > textures.size()
@@ -1480,6 +1490,11 @@ bool OpenGlRenderer::Implementation::render(
         if (batch.instanceCount == 0) {
             continue;
         }
+        ScissorRect scissor{};
+        if (batch.clip.enabled
+            && !makeScissorRect(batch.clip.area, width, height, scissor)) {
+            continue;
+        }
         if (batch.blend == BlendMode::Additive) {
             gl.blendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE);
         } else {
@@ -1487,8 +1502,6 @@ bool OpenGlRenderer::Implementation::render(
         }
 
         if (batch.clip.enabled) {
-            ScissorRect scissor{};
-            static_cast<void>(makeScissorRect(batch.clip.area, width, height, scissor));
             glScissor(
                 static_cast<GLint>(scissor.left),
                 static_cast<GLint>(height - static_cast<std::uint32_t>(scissor.bottom)),

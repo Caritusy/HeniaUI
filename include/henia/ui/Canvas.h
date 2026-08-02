@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string_view>
 
@@ -18,9 +19,34 @@ class Canvas final {
 public:
     static constexpr std::size_t kMaximumClipDepth = 32;
 
+    class ClipScope final {
+    public:
+        ClipScope() noexcept = default;
+        ~ClipScope();
+        ClipScope(const ClipScope&) = delete;
+        ClipScope& operator=(const ClipScope&) = delete;
+        ClipScope(ClipScope&& other) noexcept;
+        ClipScope& operator=(ClipScope&& other) noexcept;
+
+        // active() means this object still owns its push token. reset() may be
+        // called out of order; removal is deferred until child entries leave.
+        [[nodiscard]] bool active() const noexcept;
+        [[nodiscard]] bool reset() noexcept;
+
+    private:
+        friend class Canvas;
+        ClipScope(Canvas& canvas, std::uint64_t token) noexcept;
+
+        Canvas* mCanvas = nullptr;
+        std::uint64_t mToken = 0;
+    };
+
     explicit Canvas(DisplayList& displayList) noexcept;
 
     void reset() noexcept;
+    // Prefer scopedClip() for conditional or nested clipping. A failed push
+    // returns an inactive scope whose destructor cannot pop a parent.
+    [[nodiscard]] ClipScope scopedClip(Rect rect) noexcept;
     [[nodiscard]] bool pushClip(Rect rect) noexcept;
     [[nodiscard]] bool popClip() noexcept;
 
@@ -51,12 +77,24 @@ public:
     [[nodiscard]] BlendMode blendMode() const noexcept;
     [[nodiscard]] std::size_t clipDepth() const noexcept;
     [[nodiscard]] std::uint64_t rejectedCommands() const noexcept;
+    [[nodiscard]] std::uint64_t clippedCommands() const noexcept;
     [[nodiscard]] std::uint64_t invalidInputCommands() const noexcept;
     [[nodiscard]] std::uint64_t capacityRejectedCommands() const noexcept;
     [[nodiscard]] std::string_view lastError() const noexcept;
 
 private:
+    struct ClipEntry final {
+        ClipRect clip{};
+        std::uint64_t token = 0;
+        bool empty = false;
+        bool releasePending = false;
+    };
+
+    [[nodiscard]] bool pushClip(Rect rect, std::uint64_t token) noexcept;
+    [[nodiscard]] bool releaseClip(std::uint64_t token) noexcept;
+    void collapseReleasedClips() noexcept;
     [[nodiscard]] ClipRect currentClip() const noexcept;
+    [[nodiscard]] bool commandOverlapsCurrentClip(const DrawCommand& command) const noexcept;
     void rejectInvalid(std::string_view field) noexcept;
     void append(DrawCommand command) noexcept;
     void appendLine(
@@ -71,10 +109,12 @@ private:
         std::uint8_t flags) noexcept;
 
     DisplayList* mDisplayList = nullptr;
-    std::array<ClipRect, kMaximumClipDepth> mClips{};
+    std::array<ClipEntry, kMaximumClipDepth> mClips{};
     std::size_t mClipDepth = 0;
+    std::uint64_t mNextClipToken = 1;
     BlendMode mBlendMode = BlendMode::PremultipliedAlpha;
     std::uint64_t mRejectedCommands = 0;
+    std::uint64_t mClippedCommands = 0;
     std::uint64_t mInvalidInputCommands = 0;
     std::uint64_t mCapacityRejectedCommands = 0;
     std::string_view mLastError{};

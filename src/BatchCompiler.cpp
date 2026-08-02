@@ -47,6 +47,9 @@ bool BatchCompiler::compile(
         if (!validateDrawCommand(command).empty()) {
             return output.rejectPacket(true);
         }
+        if (!commandOverlapsClip(command)) {
+            continue;
+        }
         if (command.kind == PrimitiveKind::StrokeRect) {
             std::array<PreparedCommand, 8> prepared{};
             const std::size_t preparedCount = prepareCommand(command, prepared);
@@ -146,6 +149,9 @@ BatchCompiler::PrepareResult BatchCompiler::prepare(
             if (!validateDrawCommand(command).empty()) {
                 return PrepareResult::InvalidInput;
             }
+            if (!commandOverlapsClip(command)) {
+                continue;
+            }
             if (command.kind != PrimitiveKind::StrokeRect) {
                 output.commands.push_back({
                     .instance = makeInstance(command, kNoTextureSlot),
@@ -218,7 +224,8 @@ std::size_t BatchCompiler::prepareCommand(
 
     std::size_t count = 0;
     for (const Rect region : regions) {
-        if (!region.valid()) {
+        if (!region.valid()
+            || (command.clip.enabled && !intersect(region, command.clip.area).valid())) {
             continue;
         }
         instance.bounds = region;
