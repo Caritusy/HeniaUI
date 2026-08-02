@@ -205,12 +205,29 @@ sit inside a `ScrollContainer` without forwarding wheel input manually.
 
 Ancestor child clips are intersected and embedded into each descendant's
 retained draw commands. A scroll viewport change invalidates affected
-descendant paint segments; stable clipped subtrees remain reusable. `ListView`
-and `TreeView` keep one retained widget and emit only the fixed-height rows that
-overlap their viewport. Their backing item count can therefore be much larger
-than command, instance, or widget counts. The initial fixed-row implementation
-is intentionally small; variable-height recycling and more advanced scrolling
-policies remain the scope of roadmap issue #7.
+descendant paint segments; stable clipped subtrees remain reusable. The direct
+label modes of `ListView` and `TreeView` keep one retained widget and emit only
+fixed-height rows that overlap their viewport. Their backing item count can
+therefore be much larger than command and instance counts.
+
+`ListView::setRecycledItems()` adds lazy widget-backed rows without changing
+that scaling contract. `VirtualListSource` is non-owning and supplies a unique,
+stable `ListItemKey`, optional item extent, lazy factory, and rebind callback.
+The pool grows only when a viewport needs more visible plus overscan slots and
+does not shrink or allocate during steady-state scrolling. Physical widget
+identity belongs to a pool slot; logical selection belongs to the data key.
+`refreshRecycledItems()` rebuilds optional prefix extents and resolves an
+existing selection against new ordering by key. Source updates are O(total
+items); each scroll is O(log total items + visible items) for variable extents,
+or O(visible items) for fixed extents.
+
+Recycled children are explicitly presentation-only. `allowsChildInteraction()`
+stops hit testing, focus traversal, and stale-interaction validation at the list
+while leaving child layout, retained painting, and ancestor clipping intact.
+Pointer and keyboard selection therefore cannot follow a recycled widget to a
+different logical item. Factories and binders may throw to the host; callback
+contexts and any borrowed data must outlive the list. A null factory result is
+an explicit composition error rather than a partially realized list.
 
 `PopupLayer` owns normal content, a modal backdrop, and popup content in that
 paint order. Popup bounds are local to and clamped within the layer viewport.

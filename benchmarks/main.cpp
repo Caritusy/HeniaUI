@@ -228,6 +228,8 @@ struct ScenarioResult final {
     std::uint64_t cpuResidentBytes = 0;
     std::uint64_t gpuBufferBytes = 0;
     std::uint64_t textureBytes = 0;
+    std::uint64_t logicalItems = 0;
+    std::uint64_t residentItemWidgets = 0;
     std::uint64_t checksum = 0;
     henia::ui::PacketStatistics packetStatistics{};
     bool packetStatisticsAvailable = false;
@@ -264,6 +266,77 @@ struct VirtualListLabels final {
         "player-alpha", "player-bravo", "player-charlie", "player-delta",
         "player-echo", "player-foxtrot", "player-golf", "player-hotel",
     };
+};
+
+class BenchmarkRecycledRow final : public henia::ui::Widget {
+public:
+    explicit BenchmarkRecycledRow(henia::ui::FontHandle font) noexcept : mFont(font) {}
+
+    void bind(std::string_view label, bool selected) noexcept {
+        if (mLabel == label && mSelected == selected) return;
+        mLabel = label;
+        mSelected = selected;
+        markPaintDirty();
+    }
+
+protected:
+    [[nodiscard]] henia::ui::Vec2 onMeasure(
+        henia::ui::TextPainter&,
+        henia::ui::Constraints constraints) override {
+        return constraints.maximum;
+    }
+
+    void onPaint(
+        henia::ui::Canvas& canvas,
+        henia::ui::TextPainter& text,
+        const henia::ui::Theme&) override {
+        const henia::ui::Rect row = frame();
+        canvas.fillRect(
+            {{row.min.x + 4.0F, row.min.y + 2.0F},
+             {row.max.x - 4.0F, row.max.y - 2.0F}},
+            mSelected
+                ? henia::ui::Color{0.12F, 0.42F, 0.60F, 1.0F}
+                : henia::ui::Color{0.05F, 0.08F, 0.12F, 1.0F},
+            2.0F);
+        text.draw(canvas, mFont, 14.0F,
+            {row.min.x + 10.0F, row.min.y + 4.0F},
+            {0.86F, 0.92F, 0.97F, 1.0F}, mLabel);
+    }
+
+private:
+    henia::ui::FontHandle mFont{};
+    std::string_view mLabel;
+    bool mSelected = false;
+};
+
+struct RecycledListBenchmarkModel final {
+    explicit RecycledListBenchmarkModel(henia::ui::FontHandle fontValue) noexcept
+        : font(fontValue) {}
+
+    [[nodiscard]] henia::ui::ListItemKey key(std::size_t index) const noexcept {
+        return 1'000'000U + static_cast<henia::ui::ListItemKey>(index);
+    }
+    [[nodiscard]] float extent(std::size_t index) const noexcept {
+        return 18.0F + static_cast<float>(index % 3U) * 4.0F;
+    }
+    [[nodiscard]] std::unique_ptr<henia::ui::Widget> create() {
+        ++creations;
+        return std::make_unique<BenchmarkRecycledRow>(font);
+    }
+    void bind(
+        henia::ui::Widget& widget,
+        std::size_t index,
+        henia::ui::ListItemKey,
+        bool selected) {
+        static_cast<BenchmarkRecycledRow&>(widget).bind(
+            labels.label(index), selected);
+        ++binds;
+    }
+
+    henia::ui::FontHandle font{};
+    VirtualListLabels labels;
+    std::uint64_t creations = 0;
+    std::uint64_t binds = 0;
 };
 
 [[nodiscard]] std::uint64_t nanosecondsSince(Clock::time_point start) noexcept {
@@ -832,6 +905,89 @@ template <typename Operation>
         + packet.batchCapacity() * sizeof(DrawBatch);
     result.gpuBufferBytes = packet.instanceCapacity() * sizeof(DrawInstance);
     result.textureBytes = kTextAtlasBytes;
+    result.logicalItems = 10'000;
+    return result;
+}
+
+[[nodiscard]] ScenarioResult benchmarkRecycledWidgetList(const Options& options) {
+    using namespace henia::ui;
+    constexpr std::size_t logicalItemCount = 50'000;
+    FontStore fonts;
+    const FontHandle font = createBenchmarkFont(fonts);
+    TextRunCache cache(fonts);
+    cache.reserve(16, 16);
+    cache.setMaximumEntries(16);
+    TextPainter painter(cache);
+    RecycledListBenchmarkModel model(font);
+    auto list = std::make_unique<ListView>(std::vector<std::string>{}, ListViewStyle{
+        .font = font,
+        .width = 320.0F,
+        .height = 240.0F,
+        .rowHeight = 22.0F,
+        .overscanRows = 2,
+    });
+    ListView* listPointer = list.get();
+    list->setRecycledItems({
+        .itemCount = logicalItemCount,
+        .itemKey = ValueCallback<ListItemKey, std::size_t>::bind<
+            RecycledListBenchmarkModel, &RecycledListBenchmarkModel::key>(model),
+        .itemExtent = ValueCallback<float, std::size_t>::bind<
+            RecycledListBenchmarkModel, &RecycledListBenchmarkModel::extent>(model),
+        .createWidget = ValueCallback<std::unique_ptr<Widget>>::bind<
+            RecycledListBenchmarkModel, &RecycledListBenchmarkModel::create>(model),
+        .bindWidget = Callback<Widget&, std::size_t, ListItemKey, bool>::bind<
+            RecycledListBenchmarkModel, &RecycledListBenchmarkModel::bind>(model),
+    });
+    UiDocument document(painter);
+    document.reserve(384, 384, 24, CapacityPolicy::Fixed);
+    document.setViewport({320.0F, 240.0F});
+    document.setRoot(std::move(list));
+    static_cast<void>(document.compose());
+    for (std::size_t sample = 0; sample < 128; ++sample) {
+        listPointer->setScrollOffset(static_cast<float>(sample * 173U));
+        static_cast<void>(document.compose());
+    }
+    const std::uint64_t warmCreations = listPointer->widgetCreationCount();
+    if (warmCreations == 0 || warmCreations > 18U) {
+        throw std::runtime_error("Recycled list did not establish a viewport-bounded widget pool");
+    }
+
+    RenderPacket packet;
+    const std::uint64_t hitsBefore = cache.hits();
+    const std::uint64_t missesBefore = cache.misses();
+    ScenarioResult result = measureScenario(
+        "recycled_widget_list_50000",
+        options,
+        [&](std::size_t iteration) {
+            listPointer->setScrollOffset(
+                static_cast<float>((iteration * 104'729U) % 1'080'000U));
+            const auto paintStarted = Clock::now();
+            packet = document.compose();
+            return IterationPhases{
+                .paintBuildNanoseconds = nanosecondsSince(paintStarted),
+                .checksum = packet.identity() ^ packet.revision()
+                    ^ listPointer->widgetBindCount()
+                    ^ static_cast<std::uint64_t>(listPointer->realizedItems().size()),
+            };
+        });
+    if (listPointer->widgetCreationCount() != warmCreations) {
+        throw std::runtime_error("Recycled list allocated a larger widget pool while scrolling");
+    }
+    result.cacheHits = cache.hits() - hitsBefore;
+    result.cacheMisses = cache.misses() - missesBefore;
+    result.drawCalls = packet.batches().size();
+    result.submittedInstances = packet.instances().size();
+    capturePacketStatistics(result, packet);
+    result.uploadBytes = packet.instances().size() * sizeof(DrawInstance);
+    result.coldUploadBytes = result.uploadBytes;
+    result.cpuResidentBytes = packet.instanceCapacity() * sizeof(DrawInstance)
+        + packet.batchCapacity() * sizeof(DrawBatch)
+        + (logicalItemCount + 1U) * sizeof(double)
+        + listPointer->pooledWidgetCount() * sizeof(BenchmarkRecycledRow);
+    result.gpuBufferBytes = packet.instanceCapacity() * sizeof(DrawInstance);
+    result.textureBytes = kTextAtlasBytes;
+    result.logicalItems = logicalItemCount;
+    result.residentItemWidgets = listPointer->pooledWidgetCount();
     return result;
 }
 
@@ -1050,6 +1206,7 @@ template <typename Operation>
     const ScenarioResult* dynamic = findScenario(results, "retained_dynamic_dirty_ui");
     const ScenarioResult* text = findScenario(results, "text_heavy_ui");
     const ScenarioResult* virtualList = findScenario(results, "virtualized_list_10000");
+    const ScenarioResult* recycledList = findScenario(results, "recycled_widget_list_50000");
     const ScenarioResult* full3d = findScenario(results, "large_3d_full_build");
     const ScenarioResult* dirty3d = findScenario(results, "large_3d_dirty_update");
     const ScenarioResult* pagedStable = findScenario(results, "paged_3d_stable_snapshot_100k");
@@ -1059,7 +1216,7 @@ template <typename Operation>
     bool valid = tessellation != nullptr && shaderEllipses != nullptr
         && primitives != nullptr && analytic != nullptr
         && retained != nullptr && fullDynamic != nullptr && dynamic != nullptr && text != nullptr
-        && virtualList != nullptr
+        && virtualList != nullptr && recycledList != nullptr
         && full3d != nullptr && dirty3d != nullptr && pagedStable != nullptr
         && pagedOne != nullptr && pagedClustered != nullptr && pagedSparse != nullptr;
     if (!valid) {
@@ -1106,6 +1263,13 @@ template <typename Operation>
         && virtualList->packetStatisticsAvailable
         && virtualList->packetStatistics.sourceCommands <= 192
         && virtualList->submittedInstances <= 192
+        && recycledList->allocationsMedian == 0
+        && recycledList->allocatedBytesMedian == 0
+        && recycledList->cacheHits > 0
+        && recycledList->cacheMisses == 0
+        && recycledList->packetStatisticsAvailable
+        && recycledList->packetStatistics.sourceCommands <= 256
+        && recycledList->submittedInstances <= 256
         && full3d->submittedInstances == kBoxCount
         && full3d->uploadBytes == kBoxCount * sizeof(henia::gfx::BoxInstance)
         && dirty3d->uploadBytes == sizeof(henia::gfx::BoxInstance)
@@ -1250,6 +1414,11 @@ void writeJson(
                << "        \"gpu_buffer_bytes\": " << result.gpuBufferBytes << ",\n"
                << "        \"texture_bytes\": " << result.textureBytes << "\n"
                << "      },\n"
+               << "      \"virtualization\": {\n"
+               << "        \"logical_items\": " << result.logicalItems << ",\n"
+               << "        \"resident_item_widgets\": "
+               << result.residentItemWidgets << "\n"
+               << "      },\n"
                << "      \"checksum\": " << result.checksum << "\n"
                << "    }" << (index + 1U == results.size() ? "\n" : ",\n");
     }
@@ -1336,7 +1505,7 @@ int main(int argc, char** argv) {
     }
     try {
         std::vector<ScenarioResult> results;
-        results.reserve(15);
+        results.reserve(16);
         results.push_back(benchmarkTessellation(options));
         results.push_back(benchmarkShaderEllipses(options));
         results.push_back(benchmarkManyPrimitives(options));
@@ -1346,6 +1515,7 @@ int main(int argc, char** argv) {
         results.push_back(benchmarkDynamicDirty(options));
         results.push_back(benchmarkTextHeavy(options));
         results.push_back(benchmarkVirtualList(options));
+        results.push_back(benchmarkRecycledWidgetList(options));
         results.push_back(benchmarkLarge3DFull(options));
         results.push_back(benchmarkLarge3DDirty(options));
         results.push_back(benchmarkPaged3DStable(options));

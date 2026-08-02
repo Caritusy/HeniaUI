@@ -116,6 +116,10 @@ public:
     // widgets opt in explicitly instead of stealing hover, capture, or focus.
     [[nodiscard]] virtual bool acceptsPointerInput() const noexcept;
     [[nodiscard]] virtual bool acceptsKeyboardFocus() const noexcept;
+    // Presentation-only child pools can opt out as one subtree. Hit testing,
+    // focus traversal, and stale-interaction validation then stop at the
+    // container while the children continue to participate in layout/paint.
+    [[nodiscard]] virtual bool allowsChildInteraction() const noexcept;
     // Focused editors that deliberately bind Tab may opt out of document-level
     // focus traversal for that key while their capture mode is active.
     [[nodiscard]] virtual bool wantsTabKey() const noexcept;
@@ -131,6 +135,9 @@ protected:
     [[nodiscard]] virtual bool clipsChildren() const noexcept;
     [[nodiscard]] virtual Rect childrenClipRect() const noexcept;
     [[nodiscard]] bool contains(Vec2 point) const noexcept;
+    // Container implementations may replace an owned presentation pool.
+    // Any document interaction inside the removed subtrees is cleared first.
+    void clearChildren();
 
     std::vector<std::unique_ptr<Widget>> mChildren;
 

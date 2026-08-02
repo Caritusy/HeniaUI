@@ -19,7 +19,29 @@
 #include <henia/ui/widget/controls/TreeView.h>
 
 #include <cstdlib>
+#include <memory>
 #include <string>
+
+namespace {
+
+struct PackageListModel final {
+    [[nodiscard]] henia::ui::ListItemKey key(std::size_t index) const noexcept {
+        return 100U + static_cast<henia::ui::ListItemKey>(index);
+    }
+    [[nodiscard]] float extent(std::size_t index) const noexcept {
+        return index % 2U == 0 ? 20.0F : 24.0F;
+    }
+    [[nodiscard]] std::unique_ptr<henia::ui::Widget> create() {
+        return std::make_unique<henia::ui::Widget>();
+    }
+    void bind(
+        henia::ui::Widget&,
+        std::size_t,
+        henia::ui::ListItemKey,
+        bool) {}
+};
+
+} // namespace
 
 int main() {
     std::size_t bytes = 0;
@@ -44,6 +66,21 @@ int main() {
     henia::ui::ComboBox combo({"A", "B"});
     henia::ui::TabBar tabs({"One", "Two"});
     henia::ui::ListView list({"First", "Second"});
+    PackageListModel listModel;
+    henia::ui::ListView recycledList;
+    recycledList.setRecycledItems({
+        .itemCount = 50'000,
+        .itemKey = henia::ui::ValueCallback<henia::ui::ListItemKey, std::size_t>::bind<
+            PackageListModel, &PackageListModel::key>(listModel),
+        .itemExtent = henia::ui::ValueCallback<float, std::size_t>::bind<
+            PackageListModel, &PackageListModel::extent>(listModel),
+        .createWidget = henia::ui::ValueCallback<std::unique_ptr<henia::ui::Widget>>::bind<
+            PackageListModel, &PackageListModel::create>(listModel),
+        .bindWidget = henia::ui::Callback<
+            henia::ui::Widget&, std::size_t, henia::ui::ListItemKey, bool>::bind<
+                PackageListModel, &PackageListModel::bind>(listModel),
+    });
+    recycledList.setSelectedItemKey(42'100);
     henia::ui::TreeView tree({{"Root"}});
     henia::ui::ColorPicker picker;
     henia::ui::KeyBindingEditor binding(henia::ui::KeyCode::F1);
@@ -60,6 +97,8 @@ int main() {
         && textInput.text() == "A\xE4\xB8\xAD"
         && checkbox.checked() && toggle.checked() && slider.value() == 0.5
         && combo.itemCount() == 2 && tabs.tabCount() == 2 && list.itemCount() == 2
+        && recycledList.itemCount() == 50'000
+        && recycledList.selectedItemKey() == 42'100
         && tree.nodeCount() == 1 && picker.color().alpha == 1.0F
         && binding.binding() == henia::ui::KeyCode::F1 && tooltip.text() == "Tip"
         && scroll.content() == nullptr && popup.popup() == nullptr

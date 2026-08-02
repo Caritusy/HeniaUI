@@ -507,6 +507,9 @@ bool UiDocument::interactive(const Widget& widget) noexcept {
         if (!current->visible() || !current->enabled()) {
             return false;
         }
+        if (current != &widget && !current->allowsChildInteraction()) {
+            return false;
+        }
         current = current->parent();
     }
     return true;
@@ -530,8 +533,10 @@ Widget* UiDocument::adjacentFocusable(bool backwards) const noexcept {
             }
             last = widget;
         }
-        for (const std::unique_ptr<Widget>& child : widget->children()) {
-            self(self, child.get());
+        if (widget->allowsChildInteraction()) {
+            for (const std::unique_ptr<Widget>& child : widget->children()) {
+                self(self, child.get());
+            }
         }
     };
     visit(visit, mRoot.get());
