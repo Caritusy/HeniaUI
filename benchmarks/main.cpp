@@ -4,6 +4,7 @@
 #include "henia/ui/text/TextLayout.h"
 #include "henia/ui/widget/UiDocument.h"
 #include "henia/ui/widget/controls/Label.h"
+#include "henia/ui/widget/controls/ListView.h"
 #include "henia/ui/widget/controls/Panel.h"
 
 #include <algorithm>
@@ -252,6 +253,17 @@ struct TessVertex final {
 struct WidgetScene final {
     std::unique_ptr<henia::ui::Panel> root;
     henia::ui::Label* dynamicLabel = nullptr;
+};
+
+struct VirtualListLabels final {
+    [[nodiscard]] std::string_view label(std::size_t index) {
+        return labels[index % labels.size()];
+    }
+
+    std::array<std::string_view, 8> labels{
+        "player-alpha", "player-bravo", "player-charlie", "player-delta",
+        "player-echo", "player-foxtrot", "player-golf", "player-hotel",
+    };
 };
 
 [[nodiscard]] std::uint64_t nanosecondsSince(Clock::time_point start) noexcept {
@@ -763,6 +775,66 @@ template <typename Operation>
     return result;
 }
 
+[[nodiscard]] ScenarioResult benchmarkVirtualList(const Options& options) {
+    using namespace henia::ui;
+    FontStore fonts;
+    const FontHandle font = createBenchmarkFont(fonts);
+    TextRunCache cache(fonts);
+    cache.reserve(16, 16);
+    cache.setMaximumEntries(16);
+    TextPainter painter(cache);
+    VirtualListLabels labels;
+    auto list = std::make_unique<ListView>(std::vector<std::string>{}, ListViewStyle{
+        .font = font,
+        .width = 320.0F,
+        .height = 200.0F,
+        .rowHeight = 20.0F,
+    });
+    ListView* listPointer = list.get();
+    list->setVirtualItems(10'000,
+        ValueCallback<std::string_view, std::size_t>::bind<
+            VirtualListLabels, &VirtualListLabels::label>(labels));
+    UiDocument document(painter);
+    document.reserve(256, 256, 16, CapacityPolicy::Fixed);
+    document.setViewport({320.0F, 200.0F});
+    document.setRoot(std::move(list));
+    static_cast<void>(document.compose());
+    for (std::size_t row = 0; row < labels.labels.size(); ++row) {
+        listPointer->setScrollOffset(static_cast<float>(row) * 20.0F);
+        static_cast<void>(document.compose());
+    }
+
+    RenderPacket packet;
+    const std::uint64_t hitsBefore = cache.hits();
+    const std::uint64_t missesBefore = cache.misses();
+    ScenarioResult result = measureScenario(
+        "virtualized_list_10000",
+        options,
+        [&](std::size_t iteration) {
+            listPointer->setScrollOffset(
+                static_cast<float>((iteration * 97U) % 9'990U) * 20.0F);
+            const auto paintStarted = Clock::now();
+            packet = document.compose();
+            return IterationPhases{
+                .paintBuildNanoseconds = nanosecondsSince(paintStarted),
+                .checksum = packet.identity() ^ packet.revision()
+                    ^ static_cast<std::uint64_t>(listPointer->lastPaintedRowCount()),
+            };
+        });
+    result.cacheHits = cache.hits() - hitsBefore;
+    result.cacheMisses = cache.misses() - missesBefore;
+    result.drawCalls = packet.batches().size();
+    result.submittedInstances = packet.instances().size();
+    capturePacketStatistics(result, packet);
+    result.uploadBytes = packet.instances().size() * sizeof(DrawInstance);
+    result.coldUploadBytes = result.uploadBytes;
+    result.cpuResidentBytes = packet.instanceCapacity() * sizeof(DrawInstance)
+        + packet.batchCapacity() * sizeof(DrawBatch);
+    result.gpuBufferBytes = packet.instanceCapacity() * sizeof(DrawInstance);
+    result.textureBytes = kTextAtlasBytes;
+    return result;
+}
+
 [[nodiscard]] ScenarioResult benchmarkLarge3DFull(const Options& options) {
     using namespace henia::gfx;
     const std::vector<BoxInstance> boxes = createBoxes();
@@ -977,6 +1049,7 @@ template <typename Operation>
     const ScenarioResult* fullDynamic = findScenario(results, "full_repaint_dynamic_ui");
     const ScenarioResult* dynamic = findScenario(results, "retained_dynamic_dirty_ui");
     const ScenarioResult* text = findScenario(results, "text_heavy_ui");
+    const ScenarioResult* virtualList = findScenario(results, "virtualized_list_10000");
     const ScenarioResult* full3d = findScenario(results, "large_3d_full_build");
     const ScenarioResult* dirty3d = findScenario(results, "large_3d_dirty_update");
     const ScenarioResult* pagedStable = findScenario(results, "paged_3d_stable_snapshot_100k");
@@ -986,6 +1059,7 @@ template <typename Operation>
     bool valid = tessellation != nullptr && shaderEllipses != nullptr
         && primitives != nullptr && analytic != nullptr
         && retained != nullptr && fullDynamic != nullptr && dynamic != nullptr && text != nullptr
+        && virtualList != nullptr
         && full3d != nullptr && dirty3d != nullptr && pagedStable != nullptr
         && pagedOne != nullptr && pagedClustered != nullptr && pagedSparse != nullptr;
     if (!valid) {
@@ -1026,6 +1100,12 @@ template <typename Operation>
         && text->cacheHits > 0
         && text->cacheMisses == 0
         && text->submittedInstances >= kGlyphCount * 3U / 4U
+        && virtualList->allocationsMedian == 0
+        && virtualList->cacheHits > 0
+        && virtualList->cacheMisses == 0
+        && virtualList->packetStatisticsAvailable
+        && virtualList->packetStatistics.sourceCommands <= 192
+        && virtualList->submittedInstances <= 192
         && full3d->submittedInstances == kBoxCount
         && full3d->uploadBytes == kBoxCount * sizeof(henia::gfx::BoxInstance)
         && dirty3d->uploadBytes == sizeof(henia::gfx::BoxInstance)
@@ -1256,7 +1336,7 @@ int main(int argc, char** argv) {
     }
     try {
         std::vector<ScenarioResult> results;
-        results.reserve(14);
+        results.reserve(15);
         results.push_back(benchmarkTessellation(options));
         results.push_back(benchmarkShaderEllipses(options));
         results.push_back(benchmarkManyPrimitives(options));
@@ -1265,6 +1345,7 @@ int main(int argc, char** argv) {
         results.push_back(benchmarkDynamicFullRepaint(options));
         results.push_back(benchmarkDynamicDirty(options));
         results.push_back(benchmarkTextHeavy(options));
+        results.push_back(benchmarkVirtualList(options));
         results.push_back(benchmarkLarge3DFull(options));
         results.push_back(benchmarkLarge3DDirty(options));
         results.push_back(benchmarkPaged3DStable(options));

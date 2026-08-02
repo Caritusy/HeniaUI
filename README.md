@@ -166,7 +166,9 @@ target_link_libraries(MyApplication PRIVATE
 leaf rebuilds only its affected branch; unrelated sibling `onPaint()` output and
 compiled segment data are reused in depth-first draw order. Rebuilt/reused
 subtree and segment totals are observable through `UiDocumentStatistics`.
-`Panel`, `Label`, `Button`, `NumericInput`, and `TextInput` use direct
+`Panel`, `Label`, `Button`, `NumericInput`, `TextInput`, `Checkbox`, `Toggle`,
+`Slider`, `ComboBox`, `TabBar`, `ScrollContainer`, `ListView`, `Tooltip`,
+`PopupLayer`, `ColorPicker`, `KeyBindingEditor`, and `TreeView` use direct
 context/function-pointer callbacks and platform-neutral input events. The Win32
 adapter translates an existing host `WndProc` message stream without
 subclassing or owning the window. It owns native mouse capture only for handled
@@ -187,6 +189,29 @@ message boundary should catch there. HeniaUI does not convert a throwing callbac
 into process termination.
 
 The numeric control reserves fixed, separately centered decrement/value/increment regions, supports direct typing, wheel and key stepping, range clamping and precision, and does not depend on a debug UI library.
+
+Tab and Shift+Tab traverse visible, enabled focus targets without allocating a
+temporary focus list. Buttons and production controls expose keyboard
+activation/navigation, while a capturing `KeyBindingEditor` may deliberately
+consume Tab. Wheel input bubbles from a hovered child to its nearest scrollable
+ancestor.
+
+```cpp
+#include <henia/ui/widget/controls/ListView.h>
+#include <henia/ui/widget/controls/Toggle.h>
+
+auto menu = std::make_unique<henia::ui::Panel>();
+menu->emplaceChild<henia::ui::Toggle>("World overlay", true, toggleStyle);
+auto& players = menu->emplaceChild<henia::ui::ListView>(playerNames, listStyle);
+players.setOnSelectionChanged(onPlayerSelected);
+```
+
+`ScrollContainer` clips retained descendant segments to its viewport.
+`ListView` and `TreeView` generate draw commands only for visible fixed-height
+rows, so a common overlay does not need one widget or one paint call per data
+item. `PopupLayer` owns content, modal backdrop, and popup in explicit paint
+order; `Tooltip` visibility remains host-controlled so hover delay does not
+introduce a hidden timer.
 
 ## Multilingual text and editing
 

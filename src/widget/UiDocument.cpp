@@ -1,5 +1,6 @@
 #include "henia/ui/widget/UiDocument.h"
 
+#include <optional>
 #include <utility>
 
 namespace henia::ui {
@@ -161,6 +162,21 @@ RenderPacket UiDocument::compose() {
 void UiDocument::rebuildPaintSegment(Widget& widget) {
     widget.mPaintSegment.clear();
     Canvas canvas(widget.mPaintSegment);
+    std::optional<Rect> inheritedClip;
+    for (Widget* ancestor = widget.mParent; ancestor != nullptr; ancestor = ancestor->mParent) {
+        if (!ancestor->clipsChildren()) continue;
+        inheritedClip = inheritedClip.has_value()
+            ? intersect(*inheritedClip, ancestor->childrenClipRect())
+            : ancestor->childrenClipRect();
+    }
+    if (inheritedClip.has_value() && !inheritedClip->valid()) {
+        ++widget.mPaintRevision;
+        if (widget.mPaintRevision == 0) ++widget.mPaintRevision;
+        ++mStatistics.rebuiltSegments;
+        return;
+    }
+    Canvas::ClipScope clip = inheritedClip.has_value()
+        ? canvas.scopedClip(*inheritedClip) : Canvas::ClipScope{};
     widget.onPaint(canvas, *mText, mTheme);
     ++widget.mPaintRevision;
     if (widget.mPaintRevision == 0) {
@@ -311,14 +327,26 @@ bool UiDocument::dispatchEvent(const InputEvent& event) {
         case InputEventKind::CompositionCommit:
         case InputEventKind::CompositionCancel: {
             Widget* focused = resolve(mFocusedIdentity);
+            if (event.kind == InputEventKind::KeyDown && event.key == KeyCode::Tab
+                && (focused == nullptr || !focused->wantsTabKey())) {
+                Widget* next = adjacentFocusable(event.shift);
+                if (next == nullptr) return false;
+                setFocus(next->identity());
+                return true;
+            }
             return focused != nullptr && interactive(*focused)
                 && focused->acceptsKeyboardFocus() && focused->handleInput(event);
         }
         case InputEventKind::PointerScroll: {
             updateHover(event.position);
             Widget* hovered = resolve(mHoveredIdentity);
-            return hovered != nullptr && interactive(*hovered)
-                && hovered->acceptsPointerInput() && hovered->handleInput(event);
+            for (Widget* current = hovered; current != nullptr; current = current->parent()) {
+                if (interactive(*current) && current->acceptsPointerInput()
+                    && current->handleInput(event)) {
+                    return true;
+                }
+            }
+            return false;
         }
         case InputEventKind::FocusLost:
             clearInteraction();
@@ -482,6 +510,35 @@ bool UiDocument::interactive(const Widget& widget) noexcept {
         current = current->parent();
     }
     return true;
+}
+
+Widget* UiDocument::adjacentFocusable(bool backwards) const noexcept {
+    Widget* first = nullptr;
+    Widget* last = nullptr;
+    Widget* previous = nullptr;
+    Widget* next = nullptr;
+    bool foundCurrent = mFocusedIdentity == 0;
+    const auto visit = [&](const auto& self, Widget* widget) -> void {
+        if (widget == nullptr || !widget->visible() || !widget->enabled()) return;
+        if (widget->acceptsKeyboardFocus()) {
+            if (first == nullptr) first = widget;
+            if (widget->identity() == mFocusedIdentity) {
+                foundCurrent = true;
+                previous = last;
+            } else if (foundCurrent && next == nullptr) {
+                next = widget;
+            }
+            last = widget;
+        }
+        for (const std::unique_ptr<Widget>& child : widget->children()) {
+            self(self, child.get());
+        }
+    };
+    visit(visit, mRoot.get());
+    if (first == nullptr) return nullptr;
+    if (mFocusedIdentity == 0) return backwards ? last : first;
+    return backwards ? (previous == nullptr ? last : previous)
+                     : (next == nullptr ? first : next);
 }
 
 void UiDocument::clearPointerInteraction() noexcept {

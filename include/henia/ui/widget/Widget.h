@@ -47,6 +47,18 @@ enum class WidgetKind : std::uint8_t {
     Button,
     NumericInput,
     TextInput,
+    Checkbox,
+    Toggle,
+    Slider,
+    ComboBox,
+    TabBar,
+    ScrollContainer,
+    ListView,
+    Tooltip,
+    PopupLayer,
+    ColorPicker,
+    KeyBindingEditor,
+    TreeView,
 };
 
 class Widget {
@@ -99,11 +111,14 @@ public:
     [[nodiscard]] Vec2 measure(TextPainter& text, Constraints constraints);
     void arrange(TextPainter& text, Rect frame);
     void paint(Canvas& canvas, TextPainter& text, const Theme& theme);
-    [[nodiscard]] Widget* hitTest(Vec2 point) noexcept;
+    [[nodiscard]] virtual Widget* hitTest(Vec2 point) noexcept;
     // Passive containers/labels return false for both. Interactive custom
     // widgets opt in explicitly instead of stealing hover, capture, or focus.
     [[nodiscard]] virtual bool acceptsPointerInput() const noexcept;
     [[nodiscard]] virtual bool acceptsKeyboardFocus() const noexcept;
+    // Focused editors that deliberately bind Tab may opt out of document-level
+    // focus traversal for that key while their capture mode is active.
+    [[nodiscard]] virtual bool wantsTabKey() const noexcept;
     [[nodiscard]] virtual bool handleInput(const InputEvent& event);
 
     void markLayoutDirty() noexcept;
@@ -113,6 +128,8 @@ protected:
     [[nodiscard]] virtual Vec2 onMeasure(TextPainter& text, Constraints constraints);
     virtual void onArrange(TextPainter& text, Rect frame);
     virtual void onPaint(Canvas& canvas, TextPainter& text, const Theme& theme);
+    [[nodiscard]] virtual bool clipsChildren() const noexcept;
+    [[nodiscard]] virtual Rect childrenClipRect() const noexcept;
     [[nodiscard]] bool contains(Vec2 point) const noexcept;
 
     std::vector<std::unique_ptr<Widget>> mChildren;

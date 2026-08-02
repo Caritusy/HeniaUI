@@ -186,6 +186,38 @@ that callback can propagate, so `setVisible()` and `setEnabled()` are not
 Clicks on a passive background clear an existing focus but otherwise do not
 dirty paint or publish a replacement packet.
 
+### Production overlay controls and virtualization
+
+The production control set covers checkbox/toggle, slider, combo box, tab bar,
+scroll container, virtual list, tooltip, modal popup layer, color picker, key
+binding editor, and tree view. Controls own their strings or node/item arrays
+explicitly. Large lists may instead use `ValueCallback<std::string_view,
+std::size_t>` as a non-owning, allocation-free label provider; the provider and
+its returned view must outlive the synchronous paint call. Event callbacks use
+the same context/function-pointer representation as existing controls.
+
+Document-level Tab and Shift+Tab traversal walks the existing tree directly and
+wraps without constructing a focus vector. Hidden or disabled subtrees are
+skipped. A focused `KeyBindingEditor` opts into Tab only while capturing so Tab
+can be bound and normal traversal resumes immediately afterward. Unhandled
+wheel events bubble through interactive ancestors, allowing a nested control to
+sit inside a `ScrollContainer` without forwarding wheel input manually.
+
+Ancestor child clips are intersected and embedded into each descendant's
+retained draw commands. A scroll viewport change invalidates affected
+descendant paint segments; stable clipped subtrees remain reusable. `ListView`
+and `TreeView` keep one retained widget and emit only the fixed-height rows that
+overlap their viewport. Their backing item count can therefore be much larger
+than command, instance, or widget counts. The initial fixed-row implementation
+is intentionally small; variable-height recycling and more advanced scrolling
+policies remain the scope of roadmap issue #7.
+
+`PopupLayer` owns normal content, a modal backdrop, and popup content in that
+paint order. Popup bounds are local to and clamped within the layer viewport.
+Backdrop dismissal is handled by the layer without host hit testing. Tooltip
+visibility is explicit so hosts choose hover delay and scheduling policy rather
+than inheriting a hidden UI timer.
+
 ### Win32 input and message ownership
 
 `Win32InputAdapter` observes one host-owned `HWND` message stream and never

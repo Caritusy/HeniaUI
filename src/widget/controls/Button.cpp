@@ -50,9 +50,15 @@ bool Button::acceptsPointerInput() const noexcept { return true; }
 bool Button::acceptsKeyboardFocus() const noexcept { return true; }
 
 bool Button::handleInput(const InputEvent& event) {
-    if (!enabled() || event.button != PointerButton::Primary) {
+    if (!enabled()) {
         return false;
     }
+    if (event.kind == InputEventKind::KeyDown && focused()
+        && (event.key == KeyCode::Enter || event.key == KeyCode::Space)) {
+        mOnClick();
+        return true;
+    }
+    if (event.button != PointerButton::Primary) return false;
     if (event.kind == InputEventKind::PointerDown) {
         return true;
     }

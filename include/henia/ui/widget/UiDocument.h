@@ -89,6 +89,7 @@ private:
     [[nodiscard]] static Widget* findInSubtree(Widget* root, std::uint64_t identity) noexcept;
     [[nodiscard]] static bool subtreeContains(const Widget& root, std::uint64_t identity) noexcept;
     [[nodiscard]] static bool interactive(const Widget& widget) noexcept;
+    [[nodiscard]] Widget* adjacentFocusable(bool backwards) const noexcept;
     void widgetBecameNonInteractive(Widget& subtree);
     void clearPointerInteraction() noexcept;
     void clearInteractionImpl();

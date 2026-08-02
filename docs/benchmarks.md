@@ -283,3 +283,22 @@ Packet work, upload bytes, instance count, draw count, and steady-state
 allocations are unchanged. CJK fallback, a synthetic
 Indic ligature backend, two-page dynamic atlas growth, and editor/IME behavior
 are correctness tests rather than fabricated portable GPU-time claims.
+
+## Production widget virtualization capture (#4)
+
+Recorded on the same MSVC Release/x64 workstation on 2026-08-03, with 25
+measured iterations after 5 warmups. The preceding `7180804` baseline and the
+candidate executable ran consecutively and passed
+`tools/compare_benchmarks.py` with the 15% CPU and 5% memory limits.
+
+| Scenario | Logical rows | Median / p95 CPU | Allocations | Source commands / instances | Upload | Draws |
+|---|---:|---:|---:|---:|---:|---:|
+| Virtualized list | 10,000 | 25.2 / 100.5 us | 0 | 135 / 142 | 8,520 B | 3 |
+
+The 200 px viewport materializes only its overlapping fixed-height rows; the
+logical item count does not determine command, instance, or upload volume.
+Eight recurring labels were prewarmed, producing 600 measured cache hits and
+zero misses. A separate 100 px unit-test viewport asserts that no more than six
+rows are painted. The other 14 benchmark scenarios retained their allocation,
+upload, and draw-count profiles and stayed within the same-runner comparison
+limits.
