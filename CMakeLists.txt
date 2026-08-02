@@ -7,6 +7,7 @@ include(CMakePackageConfigHelpers)
 
 option(HENIAUI_BUILD_TESTS "Build HeniaUI tests" ${PROJECT_IS_TOP_LEVEL})
 option(HENIAUI_BUILD_SANDBOX "Build the batching sandbox" ${PROJECT_IS_TOP_LEVEL})
+option(HENIAUI_BUILD_BENCHMARKS "Build reproducible HeniaUI benchmarks" ${HENIAUI_BUILD_TESTS})
 option(HENIAUI_ENABLE_ADDRESS_SANITIZER "Build with AddressSanitizer" OFF)
 option(HENIAUI_ENABLE_UNDEFINED_SANITIZER "Build with UndefinedBehaviorSanitizer" OFF)
 
@@ -242,9 +243,31 @@ if(HENIAUI_BUILD_SANDBOX)
     endif()
 endif()
 
+if(HENIAUI_BUILD_BENCHMARKS AND NOT HENIAUI_ENABLE_ADDRESS_SANITIZER)
+    add_executable(HeniaUIBenchmarks benchmarks/main.cpp)
+    target_link_libraries(HeniaUIBenchmarks PRIVATE HeniaUI::Core HeniaUI::Gfx)
+    target_compile_features(HeniaUIBenchmarks PRIVATE cxx_std_23)
+    if(MSVC)
+        target_compile_options(HeniaUIBenchmarks PRIVATE /W4 /permissive- /utf-8 /GR-)
+    else()
+        target_compile_options(
+            HeniaUIBenchmarks
+            PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow ${HENIAUI_DISABLE_RTTI_OPTION}
+        )
+    endif()
+    set_target_properties(HeniaUIBenchmarks PROPERTIES FOLDER "HeniaUI/Benchmarks")
+endif()
+
 if(HENIAUI_BUILD_TESTS)
     enable_testing()
     find_package(Threads REQUIRED)
+    if(TARGET HeniaUIBenchmarks)
+        add_test(
+            NAME HeniaUI.Benchmarks.Verify
+            COMMAND HeniaUIBenchmarks --verify --iterations 3 --warmup 2
+        )
+        set_tests_properties(HeniaUI.Benchmarks.Verify PROPERTIES TIMEOUT 60)
+    endif()
     add_executable(HeniaUITests tests/CoreTests.cpp)
     target_link_libraries(HeniaUITests PRIVATE HeniaUI::Core Threads::Threads)
     target_compile_features(HeniaUITests PRIVATE cxx_std_23)

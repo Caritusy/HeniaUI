@@ -91,6 +91,11 @@ The complete initialization, multi-instance, context/device-loss, destruction,
 submission-fence, resize, and recreation rules are documented in
 [Renderer ownership and recreation](resource-lifetime.md).
 
+Performance changes use the fixed scenes and CPU/upload/memory accounting in
+[Renderer benchmark methodology](benchmarks.md). Pull requests compare the base
+and candidate executables on the same runner instead of treating workstation
+nanoseconds as portable constants.
+
 For OpenGL, the host keeps the exact context passed to `initialize()` current for
 every renderer call that can access GL objects. HeniaUI deliberately validates
 the `HGLRC` rather than assuming that another context belongs to the same share
