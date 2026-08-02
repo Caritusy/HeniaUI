@@ -1,5 +1,6 @@
 #pragma once
 
+#include "henia/RenderProfile.h"
 #include "henia/ui/RenderPacket.h"
 #include "henia/ui/resource/TextureStore.h"
 
@@ -11,7 +12,8 @@
 namespace henia::ui {
 
 struct OpenGlRenderStatistics final {
-    std::uint64_t frames = 0;
+    std::uint64_t frameAttempts = 0;
+    std::uint64_t successfulFrames = 0;
     std::uint64_t drawCalls = 0;
     std::uint64_t submittedInstances = 0;
     std::uint64_t instanceUploads = 0;
@@ -36,6 +38,7 @@ struct OpenGlRenderStatistics final {
     std::uint64_t textureSynchronizationFailures = 0;
     std::uint64_t lifecycleRejections = 0;
     std::uint64_t abandonedContexts = 0;
+    RenderProfile profile{};
 };
 
 enum class OpenGlExternalTextureOwnership : std::uint8_t {
@@ -82,6 +85,11 @@ public:
         const RenderPacket& packet,
         std::uint32_t viewportWidth,
         std::uint32_t viewportHeight) noexcept;
+    // Associates a resolved host timestamp with a retained successful sample.
+    // Unknown, duplicate, expired, and previous-lifetime IDs return false.
+    [[nodiscard]] bool reportGpuTime(
+        std::uint64_t sampleId,
+        std::uint64_t nanoseconds) noexcept;
     // Returns false and preserves every GL object when the owner context is not
     // current, allowing the host to make it current and retry destruction.
     [[nodiscard]] bool shutdown() noexcept;

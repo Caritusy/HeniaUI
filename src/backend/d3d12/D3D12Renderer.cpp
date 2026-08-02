@@ -4,12 +4,14 @@
 
 #include "D3D12TextureUploadTransaction.h"
 #include "../FixedError.h"
+#include "../ProfileTimeline.h"
 
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <limits>
@@ -512,6 +514,7 @@ struct D3D12Renderer::Implementation final {
     std::uint32_t cpuDescriptorCapacity = 0;
     std::uint32_t gpuDescriptorCapacity = 0;
     D3D12RenderStatistics statistics{};
+    henia::detail::ProfileTimeline profileTimeline;
     henia::detail::FixedError error;
     std::uint64_t nextTextureUploadFenceValue = 1;
     std::uint64_t nextDescriptorRevision = 1;
@@ -659,6 +662,7 @@ bool D3D12Renderer::Implementation::initialize(
         return false;
     }
     statistics = {};
+    profileTimeline.reset();
     statistics.adapterArchitectureKnown = adapterArchitectureKnown;
     statistics.adapterUma = adapterUma;
     if (gpuLocalResourcesEnabled) {
@@ -1425,6 +1429,7 @@ bool D3D12Renderer::Implementation::record(
     std::uint32_t width,
     std::uint32_t height,
     henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
+    const std::uint64_t frameAttemptId = ++statistics.frameAttempts;
     if (!ready || submissionSlot >= submissions.size()) {
         ++statistics.rejectedFrames;
         error = "D3D12 renderer or submissionSlot is unavailable";
@@ -1499,7 +1504,16 @@ bool D3D12Renderer::Implementation::record(
         for (ComPtr<ID3D12Resource>& retained : submission.retainedTextures) {
             retained.Reset();
         }
-        ++statistics.recordedFrames;
+        ++statistics.successfulFrames;
+        static_cast<void>(profileTimeline.complete({
+            .frameAttemptId = frameAttemptId,
+            .producerIdentity = packet.identity(),
+            .producerRevision = packet.revision(),
+            .producerBuildNanoseconds = packet.cpuBuildNanoseconds(),
+            .submissionSlot = submissionSlot,
+            .uploadKind = InstanceUploadKind::ZeroWorkRevision,
+        }));
+        statistics.profile = profileTimeline.profile();
         error.clear();
         return true;
     }
@@ -1547,7 +1561,10 @@ bool D3D12Renderer::Implementation::record(
     std::uint64_t& uploadedRevision = useGpuLocal
         ? submission.gpuLocalUploadedRevision
         : submission.directUploadedRevision;
+    std::uint64_t cpuUploadNanoseconds = 0;
+    bool uploadedInstances = false;
     if (uploadedIdentity != packet.identity() || uploadedRevision != packet.revision()) {
+        const auto uploadStarted = std::chrono::steady_clock::now();
         std::memcpy(submission.mapped, packet.instances().data(), packetBytes);
         if (useGpuLocal && packetBytes != 0) {
             D3D12_RESOURCE_BARRIER transition{};
@@ -1572,10 +1589,15 @@ bool D3D12Renderer::Implementation::record(
         uploadedRevision = packet.revision();
         ++statistics.instanceUploads;
         statistics.uploadedInstanceBytes += packetBytes;
+        uploadedInstances = true;
+        cpuUploadNanoseconds = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - uploadStarted).count());
     }
     if (useGpuLocal) ++statistics.gpuLocalFrames;
     else ++statistics.directUploadFrames;
 
+    const auto submitStarted = std::chrono::steady_clock::now();
     const std::array viewportConstants{static_cast<float>(width), static_cast<float>(height)};
     if (usesTextures) {
         ID3D12DescriptorHeap* heaps[]{gpuBatchHeap.Get()};
@@ -1683,7 +1705,25 @@ bool D3D12Renderer::Implementation::record(
         }
     }
 
-    ++statistics.recordedFrames;
+    const std::uint64_t cpuDrawSubmitNanoseconds = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - submitStarted).count());
+    ++statistics.successfulFrames;
+    static_cast<void>(profileTimeline.complete({
+        .frameAttemptId = frameAttemptId,
+        .producerIdentity = packet.identity(),
+        .producerRevision = packet.revision(),
+        .producerBuildNanoseconds = packet.cpuBuildNanoseconds(),
+        .cpuUploadNanoseconds = cpuUploadNanoseconds,
+        .cpuDrawSubmitNanoseconds = cpuDrawSubmitNanoseconds,
+        .uploadedInstanceBytes = uploadedInstances ? packetBytes : 0,
+        .uploadRangeCount = uploadedInstances ? 1U : 0U,
+        .submissionSlot = submissionSlot,
+        .uploadKind = uploadedInstances
+            ? InstanceUploadKind::Full
+            : InstanceUploadKind::None,
+    }));
+    statistics.profile = profileTimeline.profile();
     error.clear();
     return true;
 }
@@ -1875,6 +1915,15 @@ bool D3D12Renderer::record(
         viewportWidth,
         viewportHeight,
         submissionReuse);
+}
+
+bool D3D12Renderer::reportGpuTime(
+    std::uint64_t sampleId,
+    std::uint64_t nanoseconds) noexcept {
+    if (!mImplementation->ready) return false;
+    const bool reported = mImplementation->profileTimeline.reportGpuTime(sampleId, nanoseconds);
+    mImplementation->statistics.profile = mImplementation->profileTimeline.profile();
+    return reported;
 }
 
 void D3D12Renderer::shutdown() noexcept { mImplementation->shutdown(); }

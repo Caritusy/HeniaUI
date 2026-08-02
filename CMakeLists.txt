@@ -339,6 +339,17 @@ if(HENIAUI_BUILD_TESTS)
     set_target_properties(HeniaUIValidationTests PROPERTIES FOLDER "HeniaUI/Tests")
     add_test(NAME HeniaUI.Validation COMMAND HeniaUIValidationTests)
 
+    add_executable(HeniaUIProfileTimelineTests tests/ProfileTimelineTests.cpp)
+    target_include_directories(
+        HeniaUIProfileTimelineTests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/backend
+    )
+    target_compile_features(HeniaUIProfileTimelineTests PRIVATE cxx_std_23)
+    set_target_properties(HeniaUIProfileTimelineTests PROPERTIES FOLDER "HeniaUI/Tests")
+    add_test(NAME HeniaUI.ProfileTimeline COMMAND HeniaUIProfileTimelineTests)
+
     add_executable(HeniaUIOpenGlUploadRingTests tests/OpenGlUploadRingTests.cpp)
     target_include_directories(
         HeniaUIOpenGlUploadRingTests

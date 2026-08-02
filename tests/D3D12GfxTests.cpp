@@ -274,6 +274,8 @@ int main() {
         std::cerr << renderer.lastError() << '\n';
         return EXIT_FAILURE;
     }
+    const std::uint64_t firstProfileSampleId =
+        renderer.statistics().profile.latestSample.identity.sampleId;
     view.timeSeconds = 10.0F;
     view.viewProjection.values[14] = 0.01F;
     if (!renderer.record(batch, view, *commandList.Get(), 0)) {
@@ -356,8 +358,31 @@ int main() {
         || statistics.viewUpdates != 2 || statistics.commandListValidationFailures != 1
         || statistics.submissionFenceChecks != 2
         || statistics.submissionSlotBusyRejections != 1
-        || statistics.deviceRemovalRejections != 0) {
+        || statistics.deviceRemovalRejections != 0
+        || statistics.frameAttempts != statistics.successfulFrames + statistics.rejectedFrames
+        || statistics.profile.cumulative.samples != statistics.successfulFrames
+        || statistics.profile.cumulative.producerBuilds != 1
+        || statistics.profile.latestSample.identity.producerIdentity != batch.identity()
+        || statistics.profile.latestSample.identity.producerRevision != batch.revision()
+        || statistics.profile.latestSample.identity.submissionSlot != 0
+        || statistics.profile.latestSample.uploadKind != henia::InstanceUploadKind::None
+        || statistics.profile.latestSample.gpuTimingAvailable) {
         fail("D3D12 gfx stable-frame statistics are incorrect");
+    }
+    const std::uint64_t currentProfileSampleId =
+        statistics.profile.latestSample.identity.sampleId;
+    if (!renderer.reportGpuTime(firstProfileSampleId, 1234)
+        || renderer.reportGpuTime(firstProfileSampleId, 5678)) {
+        fail("D3D12 gfx delayed/duplicate GPU profile reporting is incorrect");
+    }
+    statistics = renderer.statistics();
+    if (statistics.profile.latestSample.identity.sampleId != currentProfileSampleId
+        || statistics.profile.latestSample.gpuTimingAvailable
+        || statistics.profile.latestGpuSample.identity.sampleId != firstProfileSampleId
+        || statistics.profile.latestGpuSample.identity.producerRevision != batch.revision()
+        || statistics.profile.latestGpuSample.identity.submissionSlot != 0
+        || statistics.profile.latestGpuSample.gpuNanoseconds != 1234) {
+        fail("D3D12 gfx delayed GPU sample lost its frame association");
     }
 
     D3D12RenderDevice clipRenderer;

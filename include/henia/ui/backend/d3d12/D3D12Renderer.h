@@ -1,5 +1,6 @@
 #pragma once
 
+#include "henia/RenderProfile.h"
 #include "henia/backend/d3d12/D3D12InstanceStorage.h"
 #include "henia/backend/d3d12/D3D12SubmissionReuse.h"
 #include "henia/ui/RenderPacket.h"
@@ -28,7 +29,8 @@ struct D3D12RendererConfiguration final {
 };
 
 struct D3D12RenderStatistics final {
-    std::uint64_t recordedFrames = 0;
+    std::uint64_t frameAttempts = 0;
+    std::uint64_t successfulFrames = 0;
     std::uint64_t drawCalls = 0;
     std::uint64_t submittedInstances = 0;
     std::uint64_t instanceUploads = 0;
@@ -65,6 +67,7 @@ struct D3D12RenderStatistics final {
     std::uint64_t lifecycleRejections = 0;
     bool adapterArchitectureKnown = false;
     bool adapterUma = true;
+    RenderProfile profile{};
 };
 
 // The host owns command allocators, back-buffer transitions, render targets,
@@ -124,6 +127,11 @@ public:
         std::uint32_t viewportWidth,
         std::uint32_t viewportHeight,
         henia::backend::d3d12::SubmissionReuse submissionReuse = {}) noexcept;
+    // Associates a resolved host timestamp with a retained successful sample.
+    // Unknown, duplicate, expired, and previous-lifetime IDs return false.
+    [[nodiscard]] bool reportGpuTime(
+        std::uint64_t sampleId,
+        std::uint64_t nanoseconds) noexcept;
     void shutdown() noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;

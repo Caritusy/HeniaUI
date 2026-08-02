@@ -337,7 +337,8 @@ int main() {
         fail("D3D12 rejected a valid fully off-screen scissor");
     }
     const D3D12RenderStatistics afterOffscreen = renderer.statistics();
-    if (afterOffscreen.recordedFrames != beforeOffscreen.recordedFrames + 1U
+    if (afterOffscreen.successfulFrames != beforeOffscreen.successfulFrames + 1U
+        || afterOffscreen.frameAttempts != beforeOffscreen.frameAttempts + 1U
         || afterOffscreen.drawCalls != beforeOffscreen.drawCalls
         || afterOffscreen.instanceUploads != beforeOffscreen.instanceUploads) {
         fail("D3D12 submitted or uploaded a fully off-screen scissor batch");
@@ -498,7 +499,18 @@ int main() {
         || statistics.submissionFenceChecks != 2
         || statistics.submissionSlotBusyRejections != 1
         || statistics.deviceRemovalRejections != 0
-        || statistics.commandListValidationFailures != expectedCommandListValidationFailures) {
+        || statistics.commandListValidationFailures != expectedCommandListValidationFailures
+        || statistics.frameAttempts != statistics.successfulFrames + statistics.rejectedFrames
+        || statistics.profile.cumulative.samples != statistics.successfulFrames
+        || statistics.profile.latestSample.identity.producerIdentity
+            != textureFreePacket.identity()
+        || statistics.profile.latestSample.identity.producerRevision
+            != textureFreePacket.revision()
+        || statistics.profile.latestSample.identity.submissionSlot != 0
+        || statistics.profile.latestSample.uploadKind != henia::InstanceUploadKind::Full
+        || statistics.profile.latestSample.uploadedInstanceBytes
+            != textureFreePacket.instances().size() * sizeof(DrawInstance)
+        || statistics.profile.latestSample.gpuTimingAvailable) {
         fail("D3D12 renderer statistics are incorrect");
     }
 
