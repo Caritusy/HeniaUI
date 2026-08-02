@@ -255,6 +255,22 @@ if(HENIAUI_BUILD_SANDBOX)
             target_compile_options(HeniaUIVisualSandbox PRIVATE /W4 /permissive- /utf-8 /GR-)
         endif()
         set_target_properties(HeniaUIVisualSandbox PROPERTIES FOLDER "HeniaUI/Sandbox")
+
+        add_executable(HeniaUIEffectsExample WIN32 sandbox/win32/EffectsExample.cpp)
+        target_link_libraries(
+            HeniaUIEffectsExample
+            PRIVATE
+                HeniaUI::Core
+                HeniaUI::OpenGL
+                HeniaUI::Win32
+                opengl32
+                user32
+        )
+        target_compile_features(HeniaUIEffectsExample PRIVATE cxx_std_23)
+        if(MSVC)
+            target_compile_options(HeniaUIEffectsExample PRIVATE /W4 /permissive- /utf-8 /GR-)
+        endif()
+        set_target_properties(HeniaUIEffectsExample PROPERTIES FOLDER "HeniaUI/Sandbox")
     endif()
 endif()
 
@@ -411,6 +427,13 @@ if(HENIAUI_BUILD_TESTS)
     )
 
     if(WIN32)
+        if(TARGET HeniaUIEffectsExample)
+            add_test(
+                NAME HeniaUI.EffectsExample.Help
+                COMMAND HeniaUIEffectsExample --help
+            )
+        endif()
+
         add_executable(HeniaUIWin32Tests tests/Win32Tests.cpp)
         target_link_libraries(HeniaUIWin32Tests PRIVATE HeniaUI::Core HeniaUI::Win32)
         target_compile_features(HeniaUIWin32Tests PRIVATE cxx_std_23)

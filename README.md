@@ -138,6 +138,18 @@ The core library itself is platform-neutral and has no external dependencies. Th
 
 Windows builds also produce `HeniaUIVisualSandbox.exe`. It owns a normal Win32/WGL window, builds a Segoe UI alpha atlas through the optional Win32 platform target, and renders the complete interface through `HeniaUI::OpenGL` without ImGui.
 
+`HeniaUIEffectsExample.exe` is the compact, interactive gallery for the
+currently implemented 2D drawing, effects, text, clipping, blending, image,
+nine-patch, and SDF paths:
+
+```powershell
+.\out\build\vs2022\Debug\HeniaUIEffectsExample.exe
+```
+
+Press Escape to close it. Add `--headless --snapshot` for an unattended
+three-frame smoke run that writes `HeniaUIEffectsExample.bmp` in the current
+directory.
+
 Top-level non-sanitizer builds also produce `HeniaUIBenchmarks`. Run it with
 `--verify --iterations 25 --warmup 5 --json out/benchmark.json`; the complete
 scene definitions, metrics, reference baseline, and same-runner CI comparison

@@ -1967,8 +1967,12 @@ bool OpenGlRenderer::Implementation::restoreState(const GlState& state) noexcept
     gl.blendEquationSeparate(
         static_cast<GLenum>(state.equationRgb),
         static_cast<GLenum>(state.equationAlpha));
-    glPolygonMode(GL_FRONT, static_cast<GLenum>(state.polygonMode[0]));
-    glPolygonMode(GL_BACK, static_cast<GLenum>(state.polygonMode[1]));
+    if (state.polygonMode[0] == state.polygonMode[1]) {
+        glPolygonMode(GL_FRONT_AND_BACK, static_cast<GLenum>(state.polygonMode[0]));
+    } else {
+        glPolygonMode(GL_FRONT, static_cast<GLenum>(state.polygonMode[0]));
+        glPolygonMode(GL_BACK, static_cast<GLenum>(state.polygonMode[1]));
+    }
     gl.colorMaskIndexed(
         0, state.colorMask[0], state.colorMask[1], state.colorMask[2], state.colorMask[3]);
     (state.blend == GL_TRUE ? glEnable : glDisable)(GL_BLEND);
