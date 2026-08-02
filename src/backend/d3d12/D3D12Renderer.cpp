@@ -1475,6 +1475,7 @@ bool D3D12Renderer::Implementation::record(
         submission.uploadedIdentity = packet.identity();
         submission.uploadedRevision = packet.revision();
         ++statistics.instanceUploads;
+        statistics.uploadedInstanceBytes += packetBytes;
     }
 
     const std::array viewportConstants{static_cast<float>(width), static_cast<float>(height)};

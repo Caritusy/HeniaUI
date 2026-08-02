@@ -65,7 +65,10 @@ compilation, and snapshot-slot exhaustion reject work without allocating or
 throwing; the default `Grow` policy permits capacity or slot growth but still
 converts allocation failure into rejected work. `begin` clears mutable builder
 contents without releasing memory, and `finish` publishes a cheap `RenderPacket`
-snapshot handle while coalescing compatible commands. Rejected command and
+snapshot handle while placing compatible compiled instances into shared draw
+batches. Source commands, compiled instances, batch density, texture-table use,
+state boundaries, and full-upload bytes remain separate statistics; batching
+does not claim to compress or eliminate instance data. Rejected command and
 packet-overflow counts are observable through the canvas and packet statistics;
 slot count, growth, and rejected builds are observable through `Frame`.
 The overload taking separate command and instance capacities is useful for
@@ -120,7 +123,8 @@ target_link_libraries(MyApplication PRIVATE
 - Nested clips are intersected at record time; `Canvas::scopedClip()` balances
   only the entry it successfully pushed, and empty intersections make nested
   drawing a no-op.
-- Compatible adjacent commands are merged.
+- Compatible adjacent instances share a draw batch; source commands and
+  compiled instance counts remain reported separately.
 - Up to eight live textures share one batch before a new batch is opened.
 - Capacity is retained between frames.
 - Fixed-capacity recording and rendering paths do not allocate after initialization.

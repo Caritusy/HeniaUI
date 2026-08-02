@@ -478,7 +478,11 @@ int main() {
     if (statistics.drawCalls != packet.batches().size() * 2U + 1U
         || statistics.submittedInstances != packet.instances().size() * 2U + 1U
         || statistics.textureUploads != 1 || statistics.textureUploadBatches != 1
-        || statistics.instanceUploads != 2 || statistics.descriptorHeapBindings != 2
+        || statistics.instanceUploads != 2
+        || statistics.uploadedInstanceBytes
+            != (packet.instances().size() + textureFreePacket.instances().size())
+                * sizeof(DrawInstance)
+        || statistics.descriptorHeapBindings != 2
         || statistics.descriptorTableCopies != packet.batches().size()
         || statistics.descriptorTableCacheHits != packet.batches().size()
         || statistics.textureFreeFrames != 1
@@ -535,6 +539,9 @@ int main() {
     if (updatedStatistics.drawCalls != packet.batches().size() * 3U + 1U
         || updatedStatistics.submittedInstances != packet.instances().size() * 3U + 1U
         || updatedStatistics.instanceUploads != 3
+        || updatedStatistics.uploadedInstanceBytes
+            != (packet.instances().size() * 2U + textureFreePacket.instances().size())
+                * sizeof(DrawInstance)
         || updatedStatistics.textureUploads != 3
         || updatedStatistics.textureUploadBatches != 3
         || updatedStatistics.failedTextureUploadBatches != 0

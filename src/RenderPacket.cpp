@@ -379,10 +379,43 @@ void RenderPacketBuilder::completePacket() noexcept {
     assert(mStorage != nullptr);
     mStorage->statistics.instances = mStorage->instances.size();
     mStorage->statistics.batches = mStorage->batches.size();
-    mStorage->statistics.mergedCommands =
-        mStorage->statistics.instances > mStorage->statistics.batches
-        ? mStorage->statistics.instances - mStorage->statistics.batches
-        : 0;
+    PacketStatistics& statistics = mStorage->statistics;
+    const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+    const auto addSaturated = [maximum](std::uint64_t value, std::uint64_t& total) noexcept {
+        total = value > maximum - total ? maximum : total + value;
+    };
+    const std::size_t instanceCount = mStorage->instances.size();
+    statistics.fullInstanceUploadBytes = instanceCount > maximum / sizeof(DrawInstance)
+        ? maximum
+        : static_cast<std::uint64_t>(instanceCount * sizeof(DrawInstance));
+
+    const DrawBatch* previous = nullptr;
+    for (const DrawBatch& batch : mStorage->batches) {
+        if (batch.instanceCount > 0) {
+            addSaturated(batch.instanceCount - 1U, statistics.batchedInstancesBeyondFirst);
+        }
+        statistics.maxInstancesPerBatch = std::max<std::uint64_t>(
+            statistics.maxInstancesPerBatch,
+            batch.instanceCount);
+        if (batch.textureCount != 0) {
+            ++statistics.texturedBatches;
+            addSaturated(batch.textureCount, statistics.textureSlotsUsed);
+            statistics.maxTextureSlotsPerBatch = std::max<std::uint64_t>(
+                statistics.maxTextureSlotsPerBatch,
+                batch.textureCount);
+        }
+        if (previous != nullptr) {
+            const bool clipChanged = previous->clip != batch.clip;
+            const bool blendChanged = previous->blend != batch.blend;
+            statistics.clipStateBoundaries += clipChanged ? 1U : 0U;
+            statistics.blendStateBoundaries += blendChanged ? 1U : 0U;
+            if (!clipChanged && !blendChanged
+                && previous->textureCount == DrawBatch::kTextureCapacity) {
+                ++statistics.textureTableCapacityBoundaries;
+            }
+        }
+        previous = &batch;
+    }
 }
 
 } // namespace henia::ui

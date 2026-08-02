@@ -59,7 +59,19 @@ struct PacketStatistics final {
     std::uint64_t sourceCommands = 0;
     std::uint64_t instances = 0;
     std::uint64_t batches = 0;
-    std::uint64_t mergedCommands = 0;
+    // Sum of max(batch.instanceCount - 1, 0). This measures draw batching,
+    // never source-command or instance-data elimination.
+    std::uint64_t batchedInstancesBeyondFirst = 0;
+    std::uint64_t maxInstancesPerBatch = 0;
+    std::uint64_t texturedBatches = 0;
+    std::uint64_t textureSlotsUsed = 0;
+    std::uint64_t maxTextureSlotsPerBatch = 0;
+    std::uint64_t clipStateBoundaries = 0;
+    std::uint64_t blendStateBoundaries = 0;
+    std::uint64_t textureTableCapacityBoundaries = 0;
+    // Bytes needed to upload every compiled instance once. Actual backend
+    // upload bytes can be lower when an immutable packet revision is reused.
+    std::uint64_t fullInstanceUploadBytes = 0;
     // Conservative pixel-space quad area before viewport/scissor clipping.
     // This tracks fragment-work bounds; it is not a hardware occlusion query.
     std::uint64_t estimatedFragmentArea = 0;

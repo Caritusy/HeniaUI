@@ -228,9 +228,18 @@ struct ScenarioResult final {
     std::uint64_t gpuBufferBytes = 0;
     std::uint64_t textureBytes = 0;
     std::uint64_t checksum = 0;
+    henia::ui::PacketStatistics packetStatistics{};
+    bool packetStatisticsAvailable = false;
     bool gpuTimestampAvailable = false;
     std::uint64_t gpuNanoseconds = 0;
 };
+
+void capturePacketStatistics(
+    ScenarioResult& result,
+    const henia::ui::RenderPacket& packet) noexcept {
+    result.packetStatistics = packet.statistics();
+    result.packetStatisticsAvailable = true;
+}
 
 struct TessVertex final {
     float x = 0.0F;
@@ -465,6 +474,7 @@ template <typename Operation>
         });
     result.drawCalls = packet.batches().size();
     result.submittedInstances = packet.instances().size();
+    capturePacketStatistics(result, packet);
     result.uploadBytes = packet.instances().size() * sizeof(DrawInstance);
     result.coldUploadBytes = result.uploadBytes;
     result.cpuResidentBytes = frame.displayList().capacity() * sizeof(DrawCommand)
@@ -509,6 +519,7 @@ template <typename Operation>
         });
     result.drawCalls = packet.batches().size();
     result.submittedInstances = packet.instances().size();
+    capturePacketStatistics(result, packet);
     result.uploadBytes = packet.instances().size() * sizeof(DrawInstance);
     result.coldUploadBytes = result.uploadBytes;
     result.estimatedFragmentArea = packet.statistics().estimatedFragmentArea;
@@ -545,6 +556,7 @@ template <typename Operation>
     result.cacheHits = document.statistics().cachedFrames - cachedBefore;
     result.drawCalls = packet.batches().size();
     result.submittedInstances = packet.instances().size();
+    capturePacketStatistics(result, packet);
     result.uploadBytes = 0;
     result.coldUploadBytes = packet.instances().size() * sizeof(DrawInstance);
     result.cpuResidentBytes = packet.instanceCapacity() * sizeof(DrawInstance)
@@ -595,6 +607,7 @@ template <typename Operation>
     result.cacheMisses = cache.misses();
     result.drawCalls = packet.batches().size();
     result.submittedInstances = packet.instances().size();
+    capturePacketStatistics(result, packet);
     result.uploadBytes = packet.instances().size() * sizeof(DrawInstance);
     result.coldUploadBytes = result.uploadBytes;
     result.cpuResidentBytes = frame.displayList().capacity() * sizeof(DrawCommand)
@@ -641,6 +654,7 @@ template <typename Operation>
     result.cacheMisses = statisticsAfter.rebuiltSegments - statisticsBefore.rebuiltSegments;
     result.drawCalls = packet.batches().size();
     result.submittedInstances = packet.instances().size();
+    capturePacketStatistics(result, packet);
     result.uploadBytes = packet.instances().size() * sizeof(DrawInstance);
     result.coldUploadBytes = result.uploadBytes;
     result.cpuResidentBytes = packet.instanceCapacity() * sizeof(DrawInstance)
@@ -697,6 +711,7 @@ template <typename Operation>
     result.cacheMisses = cache.misses() - missesBefore;
     result.drawCalls = packet.batches().size();
     result.submittedInstances = packet.instances().size();
+    capturePacketStatistics(result, packet);
     result.uploadBytes = packet.instances().size() * sizeof(DrawInstance);
     result.coldUploadBytes = result.uploadBytes;
     result.cpuResidentBytes = frame.displayList().capacity() * sizeof(DrawCommand)
@@ -936,8 +951,18 @@ template <typename Operation>
     }
     valid = primitives->submittedInstances == kPrimitiveCount
         && primitives->drawCalls == 1
+        && primitives->packetStatisticsAvailable
+        && primitives->packetStatistics.sourceCommands == kPrimitiveCount
+        && primitives->packetStatistics.instances == kPrimitiveCount
+        && primitives->packetStatistics.batches == 1
+        && primitives->packetStatistics.batchedInstancesBeyondFirst == kPrimitiveCount - 1U
+        && primitives->packetStatistics.maxInstancesPerBatch == kPrimitiveCount
+        && primitives->packetStatistics.fullInstanceUploadBytes == primitives->coldUploadBytes
+        && !tessellation->packetStatisticsAvailable
         && tessellation->uploadBytes > primitives->uploadBytes * 4U
         && analytic->submittedInstances == 9
+        && analytic->packetStatistics.sourceCommands == 2
+        && analytic->packetStatistics.batchedInstancesBeyondFirst == 8
         && analytic->estimatedFragmentArea > 0
         && analytic->estimatedFragmentArea < (1925U * 1085U + 1724U * 884U) / 8U
         && retained->allocationsMedian == 0
@@ -1017,6 +1042,16 @@ void writeJson(
         const double cacheRate = cacheRequests == 0
             ? 0.0
             : static_cast<double>(result.cacheHits) / static_cast<double>(cacheRequests);
+        const henia::ui::PacketStatistics& batching = result.packetStatistics;
+        const double averageInstancesPerBatch = batching.batches == 0
+            ? 0.0
+            : static_cast<double>(batching.instances) / static_cast<double>(batching.batches);
+        const std::uint64_t textureSlotCapacity = batching.texturedBatches
+            * henia::ui::DrawBatch::kTextureCapacity;
+        const double textureTableUtilization = textureSlotCapacity == 0
+            ? 0.0
+            : static_cast<double>(batching.textureSlotsUsed)
+                / static_cast<double>(textureSlotCapacity);
         output << "    {\n"
                << "      \"name\": \"" << result.name << "\",\n"
                << "      \"cpu\": {\n"
@@ -1034,6 +1069,34 @@ void writeJson(
                << "        \"hits\": " << result.cacheHits << ",\n"
                << "        \"misses\": " << result.cacheMisses << ",\n"
                << "        \"hit_rate\": " << std::fixed << std::setprecision(6) << cacheRate << "\n"
+               << "      },\n"
+               << "      \"batching\": {\n"
+               << "        \"available\": "
+               << (result.packetStatisticsAvailable ? "true" : "false") << ",\n"
+               << "        \"source_commands\": " << batching.sourceCommands << ",\n"
+               << "        \"compiled_instances\": " << batching.instances << ",\n"
+               << "        \"draw_batches\": " << batching.batches << ",\n"
+               << "        \"average_instances_per_batch\": "
+               << averageInstancesPerBatch << ",\n"
+               << "        \"max_instances_per_batch\": "
+               << batching.maxInstancesPerBatch << ",\n"
+               << "        \"batched_instances_beyond_first\": "
+               << batching.batchedInstancesBeyondFirst << ",\n"
+               << "        \"textured_batches\": " << batching.texturedBatches << ",\n"
+               << "        \"texture_slots_used\": " << batching.textureSlotsUsed << ",\n"
+               << "        \"texture_slots_capacity\": " << textureSlotCapacity << ",\n"
+               << "        \"texture_table_utilization_ratio\": "
+               << textureTableUtilization << ",\n"
+               << "        \"max_texture_slots_per_batch\": "
+               << batching.maxTextureSlotsPerBatch << ",\n"
+               << "        \"clip_state_boundaries\": "
+               << batching.clipStateBoundaries << ",\n"
+               << "        \"blend_state_boundaries\": "
+               << batching.blendStateBoundaries << ",\n"
+               << "        \"texture_table_capacity_boundaries\": "
+               << batching.textureTableCapacityBoundaries << ",\n"
+               << "        \"full_instance_upload_bytes\": "
+               << batching.fullInstanceUploadBytes << "\n"
                << "      },\n"
                << "      \"gpu\": {\n"
                << "        \"draw_calls\": " << result.drawCalls << ",\n"

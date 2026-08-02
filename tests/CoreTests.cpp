@@ -107,6 +107,45 @@ void testTextureTableOverflowStartsOneNewBatch() {
     require(packet.batches()[1].textureCount == 1, "overflow texture was not retained");
 }
 
+void testBatchStatisticsDescribeWorkWithoutClaimingCompression() {
+    Frame frame;
+    frame.reserve(32, 32, 8);
+    Canvas& canvas = frame.begin();
+
+    canvas.fillRect({{0.0F, 0.0F}, {10.0F, 10.0F}}, {});
+    canvas.strokeRect({{12.0F, 0.0F}, {32.0F, 20.0F}}, {}, 3.0F, 2.0F);
+    for (std::uint32_t texture = 1; texture <= 9; ++texture) {
+        const float x = 40.0F + static_cast<float>(texture) * 4.0F;
+        canvas.image(TextureHandle{texture}, {{x, 0.0F}, {x + 3.0F, 3.0F}});
+    }
+    require(canvas.pushClip({{0.0F, 0.0F}, {100.0F, 100.0F}}),
+        "batch-statistics clip setup failed");
+    canvas.fillRect({{2.0F, 24.0F}, {8.0F, 30.0F}}, {});
+    canvas.setBlendMode(BlendMode::Additive);
+    canvas.fillRect({{10.0F, 24.0F}, {16.0F, 30.0F}}, {});
+    require(canvas.popClip(), "batch-statistics clip cleanup failed");
+    canvas.setBlendMode(BlendMode::PremultipliedAlpha);
+    canvas.fillRect({{18.0F, 24.0F}, {24.0F, 30.0F}}, {});
+
+    const RenderPacket packet = frame.finish();
+    const PacketStatistics& statistics = packet.statistics();
+    require(statistics.sourceCommands == 14 && statistics.instances == 21
+            && statistics.batches == 5,
+        "batch statistics lost source, compiled-instance, or draw counts");
+    require(statistics.batchedInstancesBeyondFirst == 16
+            && statistics.maxInstancesPerBatch == 17,
+        "batch density was not defined from per-batch instance counts");
+    require(statistics.texturedBatches == 2 && statistics.textureSlotsUsed == 9
+            && statistics.maxTextureSlotsPerBatch == DrawBatch::kTextureCapacity,
+        "texture-table utilization statistics are incorrect");
+    require(statistics.clipStateBoundaries == 2
+            && statistics.blendStateBoundaries == 2
+            && statistics.textureTableCapacityBoundaries == 1,
+        "batch state-boundary reasons are incorrect");
+    require(statistics.fullInstanceUploadBytes == 21U * sizeof(DrawInstance),
+        "full instance-upload byte count is incorrect");
+}
+
 void testWarmFrameDoesNotGrow() {
     Frame frame;
     frame.reserve(256, 8);
@@ -759,6 +798,7 @@ int main() {
     testMixedUiUsesOneBatch();
     testClipAndBlendPreserveOrdering();
     testTextureTableOverflowStartsOneNewBatch();
+    testBatchStatisticsDescribeWorkWithoutClaimingCompression();
     testWarmFrameDoesNotGrow();
     testNestedClipIntersection();
     testFailureSafeClippingAndCulling();
