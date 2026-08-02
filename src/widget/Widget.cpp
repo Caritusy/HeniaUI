@@ -242,9 +242,11 @@ Widget* Widget::hitTest(Vec2 point) noexcept {
     if (!mVisible || !mEnabled || !contains(point)) {
         return nullptr;
     }
-    for (auto iterator = mChildren.rbegin(); iterator != mChildren.rend(); ++iterator) {
-        if (Widget* hit = (*iterator)->hitTest(point)) {
-            return hit;
+    if (allowsChildInteraction()) {
+        for (auto iterator = mChildren.rbegin(); iterator != mChildren.rend(); ++iterator) {
+            if (Widget* hit = (*iterator)->hitTest(point)) {
+                return hit;
+            }
         }
     }
     return acceptsPointerInput() ? this : nullptr;
@@ -253,6 +255,8 @@ Widget* Widget::hitTest(Vec2 point) noexcept {
 bool Widget::acceptsPointerInput() const noexcept { return false; }
 
 bool Widget::acceptsKeyboardFocus() const noexcept { return false; }
+
+bool Widget::allowsChildInteraction() const noexcept { return true; }
 
 bool Widget::wantsTabKey() const noexcept { return false; }
 
@@ -295,6 +299,22 @@ void Widget::onPaint(Canvas&, TextPainter&, const Theme&) {}
 bool Widget::clipsChildren() const noexcept { return false; }
 
 Rect Widget::childrenClipRect() const noexcept { return mFrame; }
+
+void Widget::clearChildren() {
+    if (mChildren.empty()) return;
+    if (mDocument != nullptr) {
+        for (const std::unique_ptr<Widget>& child : mChildren) {
+            mDocument->clearInteractionForSubtree(*child);
+        }
+    }
+    for (const std::unique_ptr<Widget>& child : mChildren) {
+        child->mParent = nullptr;
+        child->setDocumentRecursive(nullptr);
+    }
+    mChildren.clear();
+    markPaintTopologyDirty();
+    markLayoutDirty();
+}
 
 bool Widget::contains(Vec2 point) const noexcept {
     return point.x >= mFrame.min.x && point.y >= mFrame.min.y

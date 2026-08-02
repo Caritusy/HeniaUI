@@ -92,6 +92,17 @@ struct ExpansionRecorder final {
     int calls = 0;
 };
 
+struct ItemSelectionRecorder final {
+    void changed(std::size_t nextIndex, ListItemKey nextKey) {
+        index = nextIndex;
+        key = nextKey;
+        ++calls;
+    }
+    std::size_t index = 0;
+    ListItemKey key = 0;
+    int calls = 0;
+};
+
 struct VirtualLabels final {
     [[nodiscard]] std::string_view label(std::size_t index) {
         return labels[index % labels.size()];
@@ -256,6 +267,70 @@ protected:
     }
 private:
     float mHeight = 0.0F;
+};
+
+class RecycledRowProbe final : public Widget {
+public:
+    void bind(std::size_t index, ListItemKey key, bool selected) noexcept {
+        if (mIndex == index && mKey == key && mSelected == selected) return;
+        mIndex = index;
+        mKey = key;
+        mSelected = selected;
+        markPaintDirty();
+    }
+
+    [[nodiscard]] std::size_t index() const noexcept { return mIndex; }
+    [[nodiscard]] ListItemKey key() const noexcept { return mKey; }
+    [[nodiscard]] bool selected() const noexcept { return mSelected; }
+    [[nodiscard]] bool acceptsPointerInput() const noexcept override { return true; }
+    [[nodiscard]] bool acceptsKeyboardFocus() const noexcept override { return true; }
+    [[nodiscard]] bool handleInput(const InputEvent&) override {
+        ++unexpectedInputCalls;
+        return true;
+    }
+
+    int unexpectedInputCalls = 0;
+
+protected:
+    [[nodiscard]] Vec2 onMeasure(TextPainter&, Constraints constraints) override {
+        return constraints.maximum;
+    }
+    void onPaint(Canvas& canvas, TextPainter&, const Theme&) override {
+        const Color color = mSelected
+            ? Color{0.18F, 0.58F, 0.74F, 1.0F}
+            : Color{0.10F, 0.16F, 0.22F, 1.0F};
+        canvas.fillRect(
+            {{frame().min.x + 4.0F, frame().min.y + 2.0F},
+             {frame().max.x - 4.0F, frame().max.y - 2.0F}},
+            color, 2.0F);
+    }
+
+private:
+    std::size_t mIndex = std::numeric_limits<std::size_t>::max();
+    ListItemKey mKey = 0;
+    bool mSelected = false;
+};
+
+struct RecycledListModel final {
+    [[nodiscard]] ListItemKey key(std::size_t index) const noexcept {
+        return 10'000U + static_cast<ListItemKey>((index + rotation) % itemCount);
+    }
+    [[nodiscard]] float extent(std::size_t index) const noexcept {
+        return 18.0F + static_cast<float>(key(index) % 3U) * 6.0F;
+    }
+    [[nodiscard]] std::unique_ptr<Widget> create() {
+        ++creations;
+        return std::make_unique<RecycledRowProbe>();
+    }
+    void bind(Widget& widget, std::size_t index, ListItemKey itemKey, bool selected) {
+        static_cast<RecycledRowProbe&>(widget).bind(index, itemKey, selected);
+        ++binds;
+    }
+
+    std::size_t itemCount = 50'000;
+    std::size_t rotation = 0;
+    std::uint64_t creations = 0;
+    std::uint64_t binds = 0;
 };
 
 void verifyConstraintSensitiveLayout(TextPainter& painter) {
@@ -781,6 +856,98 @@ void verifyProductionOverlayWidgets(TextPainter& painter, FontHandle font) {
         if (listPointer->selectedIndex() != 9'999 || recorder.value != 9'999
             || listPointer->scrollOffset() <= 0.0F) {
             fail("Virtual ListView selection/reveal keyboard path failed");
+        }
+    }
+
+    {
+        UiDocument document(painter);
+        document.reserve(256, 256, 24, CapacityPolicy::Fixed);
+        document.setViewport({180.0F, 120.0F});
+        RecycledListModel model;
+        ItemSelectionRecorder selection;
+        auto list = std::make_unique<ListView>(std::vector<std::string>{}, ListViewStyle{
+            .width = 180.0F,
+            .height = 120.0F,
+            .rowHeight = 24.0F,
+            .overscanRows = 2,
+        });
+        ListView* listPointer = list.get();
+        list->setRecycledItems({
+            .itemCount = model.itemCount,
+            .itemKey = ValueCallback<ListItemKey, std::size_t>::bind<
+                RecycledListModel, &RecycledListModel::key>(model),
+            .itemExtent = ValueCallback<float, std::size_t>::bind<
+                RecycledListModel, &RecycledListModel::extent>(model),
+            .createWidget = ValueCallback<std::unique_ptr<Widget>>::bind<
+                RecycledListModel, &RecycledListModel::create>(model),
+            .bindWidget = Callback<Widget&, std::size_t, ListItemKey, bool>::bind<
+                RecycledListModel, &RecycledListModel::bind>(model),
+        });
+        list->setOnItemSelectionChanged(
+            Callback<std::size_t, ListItemKey>::bind<
+                ItemSelectionRecorder, &ItemSelectionRecorder::changed>(selection));
+        document.setRoot(std::move(list));
+        RenderPacket packet = document.compose();
+
+        for (std::size_t sample = 0; sample < 128; ++sample) {
+            listPointer->setScrollOffset(static_cast<float>(sample * 173U));
+            packet = document.compose();
+        }
+        const std::size_t warmPoolSize = listPointer->pooledWidgetCount();
+        const std::uint64_t warmCreationCount = listPointer->widgetCreationCount();
+        std::vector<std::uint64_t> physicalIdentities;
+        physicalIdentities.reserve(warmPoolSize);
+        for (const std::unique_ptr<Widget>& itemWidget : listPointer->children()) {
+            physicalIdentities.push_back(itemWidget->identity());
+        }
+
+        for (std::size_t sample = 0; sample < 1'000; ++sample) {
+            listPointer->setScrollOffset(static_cast<float>((sample * 7'919U) % 1'100'000U));
+            packet = document.compose();
+        }
+        if (listPointer->pooledWidgetCount() != warmPoolSize
+            || listPointer->widgetCreationCount() != warmCreationCount
+            || model.creations != warmCreationCount || warmPoolSize > 12
+            || listPointer->lastPaintedRowCount() > 8 || packet.instances().size() > 40) {
+            fail("Recycled ListView pool or render work grew with the 50,000-item data set");
+        }
+        for (std::size_t slot = 0; slot < physicalIdentities.size(); ++slot) {
+            if (listPointer->children()[slot]->identity() != physicalIdentities[slot]) {
+                fail("Recycled ListView replaced a physical widget while scrolling");
+            }
+        }
+        const bool clippedRows = std::any_of(packet.batches().begin(), packet.batches().end(),
+            [](const DrawBatch& batch) { return batch.clip.enabled; });
+        if (!clippedRows) fail("Recycled ListView descendants were not clipped to the viewport");
+
+        const ListItemKey preserved = model.key(43'210);
+        listPointer->setSelectedItemKey(preserved);
+        static_cast<void>(document.compose());
+        model.rotation = 123;
+        listPointer->refreshRecycledItems(model.itemCount);
+        static_cast<void>(document.compose());
+        if (listPointer->selectedItemKey() != preserved
+            || listPointer->selectedIndex() != 43'087) {
+            fail("Recycled ListView did not preserve stable-key selection across reordering");
+        }
+        const auto selectedRow = std::find_if(
+            listPointer->realizedItems().begin(), listPointer->realizedItems().end(),
+            [preserved](const RealizedListItem& itemValue) {
+                return itemValue.key == preserved && itemValue.selected;
+            });
+        if (selectedRow == listPointer->realizedItems().end()) {
+            fail("Recycled ListView did not realize/rebind its revealed selected item");
+        }
+
+        click(document, {40.0F, 50.0F});
+        if (!listPointer->focused() || selection.calls != 1
+            || selection.key != model.key(selection.index)) {
+            fail("Recycled ListView input selected an obsolete physical-widget identity");
+        }
+        for (const RealizedListItem& itemValue : listPointer->realizedItems()) {
+            if (static_cast<RecycledRowProbe*>(itemValue.widget)->unexpectedInputCalls != 0) {
+                fail("Presentation-only recycled item intercepted list input");
+            }
         }
     }
 

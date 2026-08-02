@@ -209,9 +209,20 @@ players.setOnSelectionChanged(onPlayerSelected);
 `ScrollContainer` clips retained descendant segments to its viewport.
 `ListView` and `TreeView` generate draw commands only for visible fixed-height
 rows, so a common overlay does not need one widget or one paint call per data
-item. `PopupLayer` owns content, modal backdrop, and popup in explicit paint
-order; `Tooltip` visibility remains host-controlled so hover delay does not
-introduce a hidden timer.
+item. For richer rows, `ListView::setRecycledItems()` accepts a non-owning
+`VirtualListSource`: a stable-key callback, an optional variable-height
+callback, a lazy widget factory, and a rebind callback. The list keeps only a
+viewport-sized widget pool, reuses each physical widget for new logical keys,
+and preserves selection by key across `refreshRecycledItems()` reorders.
+Source callback contexts must outlive the list.
+
+Recycled row widgets are presentation delegates: list hit testing, keyboard
+focus, and selection remain on the `ListView`, preventing a reused widget's
+identity from retaining input state for an old item. The optional extent table
+is rebuilt only when the source changes; scrolling performs a binary search
+plus work proportional to visible and overscan rows. `PopupLayer` owns content,
+modal backdrop, and popup in explicit paint order; `Tooltip` visibility remains
+host-controlled so hover delay does not introduce a hidden timer.
 
 ## Multilingual text and editing
 

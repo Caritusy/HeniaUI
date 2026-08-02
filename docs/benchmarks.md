@@ -302,3 +302,25 @@ zero misses. A separate 100 px unit-test viewport asserts that no more than six
 rows are painted. The other 14 benchmark scenarios retained their allocation,
 upload, and draw-count profiles and stayed within the same-runner comparison
 limits.
+
+## Recycled variable-height list capture (#7)
+
+Recorded on the same MSVC Release/x64 workstation on 2026-08-03, with 100
+measured iterations after 10 warmups. The #4 merge `b5b59f7` and candidate
+executables ran consecutively and passed `tools/compare_benchmarks.py` with the
+15% CPU and 5% memory limits. The longer capture reduces the influence of the
+sub-10-us micro-scenarios on the same-runner comparison.
+
+| Logical items | Resident item widgets | Median / p95 CPU | Allocations | Commands / instances | Upload | Draws | CPU resident |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 50,000 | 17 | 47.4 / 62.1 us | 0 | 174 / 181 | 10,860 B | 4 | 430,256 B |
+
+Rows cycle through 18, 22, and 26 px extents in a 240 px viewport. The resident
+figure includes the 50,001-entry double-precision prefix table, fixed packet
+capacities, and the 17-widget pool; it does not grow while scrolling. The
+measured path recorded 1,755 prewarmed text-cache hits, zero misses, zero
+allocated bytes, and zero peak transient bytes. A separate 50,000-item unit
+test performs 1,000 distant scrolls, verifies unchanged physical widget
+identities, keeps a 120 px viewport pool at no more than 12 widgets, preserves
+selection by stable key after reordering, and confirms recycled child widgets
+cannot capture stale input.
