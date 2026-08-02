@@ -7,6 +7,75 @@ include(CMakePackageConfigHelpers)
 
 option(HENIAUI_BUILD_TESTS "Build HeniaUI tests" ${PROJECT_IS_TOP_LEVEL})
 option(HENIAUI_BUILD_SANDBOX "Build the batching sandbox" ${PROJECT_IS_TOP_LEVEL})
+option(HENIAUI_ENABLE_ADDRESS_SANITIZER "Build with AddressSanitizer" OFF)
+option(HENIAUI_ENABLE_UNDEFINED_SANITIZER "Build with UndefinedBehaviorSanitizer" OFF)
+
+set(HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY "")
+if(HENIAUI_ENABLE_ADDRESS_SANITIZER)
+    if(MSVC)
+        add_compile_options(/fsanitize=address /Zi)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            # clang-cl ASan does not support the debug CRT (/MDd). Keep debug
+            # symbols while using the supported dynamic release CRT.
+            set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+            execute_process(
+                COMMAND ${CMAKE_CXX_COMPILER} --print-resource-dir
+                OUTPUT_VARIABLE HENIAUI_CLANG_RESOURCE_DIRECTORY
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+            )
+            set(
+                HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY
+                "${HENIAUI_CLANG_RESOURCE_DIRECTORY}/lib/windows"
+            )
+            set(
+                HENIAUI_CLANG_ASAN_DYNAMIC_LIBRARY
+                "${HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY}/clang_rt.asan_dynamic-x86_64.lib"
+            )
+            set(
+                HENIAUI_CLANG_ASAN_THUNK_LIBRARY
+                "${HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY}/clang_rt.asan_dynamic_runtime_thunk-x86_64.lib"
+            )
+            if(NOT EXISTS "${HENIAUI_CLANG_ASAN_DYNAMIC_LIBRARY}"
+                OR NOT EXISTS "${HENIAUI_CLANG_ASAN_THUNK_LIBRARY}")
+                message(FATAL_ERROR "clang-cl AddressSanitizer runtime libraries were not found")
+            endif()
+            # Visual Studio generators invoke lld-link directly, bypassing the
+            # clang driver that would normally add compiler-rt at final link.
+            link_libraries("${HENIAUI_CLANG_ASAN_DYNAMIC_LIBRARY}")
+            add_link_options("/WHOLEARCHIVE:${HENIAUI_CLANG_ASAN_THUNK_LIBRARY}")
+        else()
+            get_filename_component(
+                HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY
+                "${CMAKE_CXX_COMPILER}"
+                DIRECTORY
+            )
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+        add_link_options(-fsanitize=address)
+    else()
+        message(FATAL_ERROR "AddressSanitizer is unsupported by ${CMAKE_CXX_COMPILER_ID}")
+    endif()
+endif()
+
+if(HENIAUI_ENABLE_UNDEFINED_SANITIZER)
+    if(MSVC)
+        message(FATAL_ERROR "UndefinedBehaviorSanitizer requires Clang or GCC in this project")
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        add_compile_options(-fsanitize=undefined -fno-sanitize-recover=all)
+        add_link_options(-fsanitize=undefined -fno-sanitize-recover=all)
+    else()
+        message(FATAL_ERROR "UndefinedBehaviorSanitizer is unsupported by ${CMAKE_CXX_COMPILER_ID}")
+    endif()
+endif()
+
+set(HENIAUI_DISABLE_RTTI_OPTION -fno-rtti)
+if(HENIAUI_ENABLE_UNDEFINED_SANITIZER)
+    # UBSan's vptr checks require RTTI. Sanitizer builds enable it so those
+    # checks remain active instead of suppressing a category of project bugs.
+    set(HENIAUI_DISABLE_RTTI_OPTION "")
+endif()
 
 add_library(HeniaUI STATIC
     src/BatchCompiler.cpp
@@ -38,7 +107,10 @@ target_include_directories(
 if(MSVC)
     target_compile_options(HeniaUI PRIVATE /W4 /permissive- /utf-8 /GR-)
 else()
-    target_compile_options(HeniaUI PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -fno-rtti)
+    target_compile_options(
+        HeniaUI
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow ${HENIAUI_DISABLE_RTTI_OPTION}
+    )
 endif()
 
 set_target_properties(HeniaUI PROPERTIES
@@ -61,7 +133,10 @@ target_include_directories(
 if(MSVC)
     target_compile_options(HeniaUIGfx PRIVATE /W4 /permissive- /utf-8 /GR-)
 else()
-    target_compile_options(HeniaUIGfx PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -fno-rtti)
+    target_compile_options(
+        HeniaUIGfx
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow ${HENIAUI_DISABLE_RTTI_OPTION}
+    )
 endif()
 set_target_properties(HeniaUIGfx PROPERTIES
     CXX_EXTENSIONS OFF
@@ -188,6 +263,12 @@ if(HENIAUI_BUILD_TESTS)
     set_target_properties(HeniaUIGfxTests PROPERTIES FOLDER "HeniaUI/Tests")
     add_test(NAME HeniaUI.Gfx COMMAND HeniaUIGfxTests)
 
+    add_executable(HeniaUIValidationTests tests/ValidationTests.cpp)
+    target_link_libraries(HeniaUIValidationTests PRIVATE HeniaUI::Core HeniaUI::Gfx)
+    target_compile_features(HeniaUIValidationTests PRIVATE cxx_std_23)
+    set_target_properties(HeniaUIValidationTests PROPERTIES FOLDER "HeniaUI/Tests")
+    add_test(NAME HeniaUI.Validation COMMAND HeniaUIValidationTests)
+
     add_executable(HeniaUIOpenGlUploadRingTests tests/OpenGlUploadRingTests.cpp)
     target_include_directories(
         HeniaUIOpenGlUploadRingTests
@@ -258,6 +339,36 @@ if(HENIAUI_BUILD_TESTS)
         endif()
         set_target_properties(HeniaUID3D12GfxTests PROPERTIES FOLDER "HeniaUI/Tests")
         add_test(NAME HeniaUI.D3D12.Gfx COMMAND HeniaUID3D12GfxTests)
+
+        add_executable(HeniaUIOpenGlOutputTests tests/OpenGlOutputTests.cpp)
+        target_link_libraries(
+            HeniaUIOpenGlOutputTests
+            PRIVATE
+                HeniaUI::Core
+                HeniaUI::OpenGL
+                opengl32
+                user32
+        )
+        target_compile_features(HeniaUIOpenGlOutputTests PRIVATE cxx_std_23)
+        target_compile_definitions(
+            HeniaUIOpenGlOutputTests
+            PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
+        )
+        if(MSVC)
+            target_compile_options(HeniaUIOpenGlOutputTests PRIVATE /W4 /permissive- /utf-8 /GR-)
+        endif()
+        set_target_properties(HeniaUIOpenGlOutputTests PROPERTIES FOLDER "HeniaUI/Tests")
+        add_test(NAME HeniaUI.OpenGL.Output COMMAND HeniaUIOpenGlOutputTests)
+        set_tests_properties(HeniaUI.OpenGL.Output PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
+
+    if(HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY)
+        get_property(HENIAUI_TEST_NAMES DIRECTORY PROPERTY TESTS)
+        set_tests_properties(
+            ${HENIAUI_TEST_NAMES}
+            PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY}"
+        )
     endif()
 endif()
 
