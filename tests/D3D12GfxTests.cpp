@@ -16,6 +16,8 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -348,6 +350,106 @@ int main() {
         || statistics.deviceRemovalRejections != 0) {
         fail("D3D12 gfx stable-frame statistics are incorrect");
     }
+
+    D3D12RenderDevice clipRenderer;
+    if (!clipRenderer.initialize(*device.Get(), {
+            .boxCapacity = 1,
+            .submissionCapacity = 1,
+            .renderTargetFormat = DXGI_FORMAT_R8G8B8A8_UNORM,
+        })) {
+        fail("D3D12 gfx clip-sweep renderer did not initialize");
+    }
+    const auto renderClipFrame = [&](const BoxInstance& box, ClipDepthRange depthRange) {
+        if (FAILED(allocator->Reset()) || FAILED(commandList->Reset(allocator.Get(), nullptr))) {
+            fail("Unable to reset the D3D12 gfx clip-sweep command list");
+        }
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        commandList->ResourceBarrier(1, &barrier);
+        commandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);
+        commandList->ClearRenderTargetView(renderTarget, black.data(), 0, nullptr);
+        const InstanceBatch clipBatch = henia::test::gfxClipBatch(box);
+        if (!clipRenderer.record(
+                clipBatch,
+                henia::test::gfxClipView(depthRange),
+                *commandList.Get(),
+                0)) {
+            std::cerr << clipRenderer.lastError() << '\n';
+            fail("D3D12 gfx clip-sweep recording failed");
+        }
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        commandList->ResourceBarrier(1, &barrier);
+        commandList->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        if (FAILED(commandList->Close())) {
+            fail("Unable to close the D3D12 gfx clip-sweep command list");
+        }
+        queue->ExecuteCommandLists(1, lists);
+        if (!waitForQueue(*device.Get(), *queue.Get())) {
+            fail("D3D12 gfx clip-sweep queue timed out");
+        }
+
+        void* clipMappedMemory = nullptr;
+        if (FAILED(readback->Map(0, &readRange, &clipMappedMemory))
+            || clipMappedMemory == nullptr) {
+            fail("Unable to map the D3D12 gfx clip-sweep readback buffer");
+        }
+        const auto* clipMappedPixels = static_cast<const std::byte*>(clipMappedMemory);
+        std::vector<henia::test::Rgba8> clipPixels(static_cast<std::size_t>(width) * height);
+        for (std::uint32_t y = 0; y < height; ++y) {
+            for (std::uint32_t x = 0; x < width; ++x) {
+                const std::size_t sourceOffset = footprint.Offset
+                    + static_cast<std::size_t>(y) * footprint.Footprint.RowPitch
+                    + static_cast<std::size_t>(x) * 4U;
+                clipPixels[static_cast<std::size_t>(y) * width + x] = {
+                    static_cast<std::uint8_t>(clipMappedPixels[sourceOffset]),
+                    static_cast<std::uint8_t>(clipMappedPixels[sourceOffset + 1U]),
+                    static_cast<std::uint8_t>(clipMappedPixels[sourceOffset + 2U]),
+                    static_cast<std::uint8_t>(clipMappedPixels[sourceOffset + 3U]),
+                };
+            }
+        }
+        readback->Unmap(0, nullptr);
+        return clipPixels;
+    };
+    constexpr std::array depthRanges{
+        ClipDepthRange::ZeroToOne,
+        ClipDepthRange::MinusOneToOne,
+    };
+    for (const ClipDepthRange depthRange : depthRanges) {
+        const std::string_view rangeName = depthRange == ClipDepthRange::ZeroToOne
+            ? "zero-to-one"
+            : "minus-one-to-one";
+        for (const henia::test::GfxClipSweep& sweep : henia::test::kGfxClipSweeps) {
+            for (const henia::test::GfxClipFrame& frameValue : sweep.frames) {
+                const std::vector<henia::test::Rgba8> clipPixels = renderClipFrame(
+                    frameValue.box,
+                    depthRange);
+                if (!henia::test::matchesGfxClipFrame(clipPixels, frameValue.position)) {
+                    const std::string filename = "d3d12-gfx-clip-" + std::string(sweep.plane)
+                        + '-' + std::string(rangeName) + "-actual.ppm";
+                    henia::test::writePpm(filename, clipPixels, width, height);
+                    std::cerr << "D3D12 gfx clip sweep failed at " << sweep.plane << " ("
+                              << rangeName << "), visible pixels="
+                              << henia::test::visibleGfxPixelCount(clipPixels) << '\n';
+                    return EXIT_FAILURE;
+                }
+            }
+        }
+        const std::vector<henia::test::Rgba8> cameraPixels = renderClipFrame(
+            henia::test::kGfxCameraCrossingBox,
+            depthRange);
+        if (!henia::test::matchesGfxCameraCrossing(cameraPixels)) {
+            const std::string filename = "d3d12-gfx-camera-crossing-"
+                + std::string(rangeName) + "-actual.ppm";
+            henia::test::writePpm(filename, cameraPixels, width, height);
+            std::cerr << "D3D12 camera-crossing edges were not shortened continuously ("
+                      << rangeName << "), visible pixels="
+                      << henia::test::visibleGfxPixelCount(cameraPixels) << '\n';
+            return EXIT_FAILURE;
+        }
+    }
+    clipRenderer.shutdown();
 
     BoxInstance changed = boxes[7];
     changed.lineWidth = 8.0F;

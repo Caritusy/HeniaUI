@@ -241,6 +241,66 @@ vec3 corner(int code) {
     return vec3(float(code & 1), float((code >> 1) & 1), float((code >> 2) & 1));
 }
 
+bool finiteClip(vec4 value) {
+    return !any(isnan(value)) && !any(isinf(value));
+}
+
+float planeDistance(vec4 point, int plane, bool zeroToOne) {
+    if (plane == 0) return point.w + point.x;
+    if (plane == 1) return point.w - point.x;
+    if (plane == 2) return point.w + point.y;
+    if (plane == 3) return point.w - point.y;
+    if (plane == 4) return zeroToOne ? point.z : point.w + point.z;
+    if (plane == 5) return point.w - point.z;
+    return point.w - 0.0001;
+}
+
+bool clipAgainstPlane(
+    inout vec4 startClip,
+    inout vec4 finishClip,
+    int plane,
+    bool zeroToOne) {
+    float startDistance = planeDistance(startClip, plane, zeroToOne);
+    float finishDistance = planeDistance(finishClip, plane, zeroToOne);
+    if (isnan(startDistance) || isinf(startDistance)
+        || isnan(finishDistance) || isinf(finishDistance)) {
+        return false;
+    }
+    bool startInside = startDistance >= 0.0;
+    bool finishInside = finishDistance >= 0.0;
+    if (!startInside && !finishInside) return false;
+    if (startInside && finishInside) return true;
+
+    float denominator = startDistance - finishDistance;
+    if (abs(denominator) <= 1e-20 || isnan(denominator) || isinf(denominator)) {
+        return false;
+    }
+    float amount = clamp(startDistance / denominator, 0.0, 1.0);
+    if (isnan(amount) || isinf(amount)) return false;
+    vec4 clipped = mix(startClip, finishClip, amount);
+    if (!finiteClip(clipped)) return false;
+    if (startInside) {
+        finishClip = clipped;
+    } else {
+        startClip = clipped;
+    }
+    return true;
+}
+
+bool clipSegment(inout vec4 startClip, inout vec4 finishClip, bool zeroToOne) {
+    if (!finiteClip(startClip) || !finiteClip(finishClip)
+        || !clipAgainstPlane(startClip, finishClip, 6, zeroToOne)) {
+        return false;
+    }
+    for (int plane = 0; plane < 6; ++plane) {
+        if (!clipAgainstPlane(startClip, finishClip, plane, zeroToOne)) {
+            return false;
+        }
+    }
+    return finiteClip(startClip) && finiteClip(finishClip)
+        && startClip.w >= 0.0001 && finishClip.w >= 0.0001;
+}
+
 void main() {
     int edgeIndex = gl_VertexID / 6;
     vec2 vertex = quad[gl_VertexID % 6];
@@ -250,27 +310,33 @@ void main() {
     vec3 finish = mix(minimumValue, maximumValue, corner(edges[edgeIndex].y));
     vec4 startClip = viewProjection * vec4(start, 1.0);
     vec4 finishClip = viewProjection * vec4(finish, 1.0);
-    validEdge = startClip.w > 0.0001 && finishClip.w > 0.0001 ? 1.0 : 0.0;
+    bool zeroToOne = zeroToOneDepth != 0;
+    validEdge = clipSegment(startClip, finishClip, zeroToOne) ? 1.0 : 0.0;
 
-    vec2 startNdc = startClip.xy / max(startClip.w, 0.0001);
-    vec2 finishNdc = finishClip.xy / max(finishClip.w, 0.0001);
-    vec2 directionPixels = (finishNdc - startNdc) * viewportSize * 0.5;
-    vec2 normalPixels = length(directionPixels) > 0.0001
-        ? normalize(vec2(-directionPixels.y, directionPixels.x))
-        : vec2(0.0, 1.0);
     halfWidth = max(instanceMinimumAndWidth.w, 0.5) * 0.5;
     float expandedWidth = halfWidth + 1.25;
-    vec2 offsetNdc = normalPixels * expandedWidth * 2.0 / viewportSize * vertex.y;
-    vec4 endpoint = mix(startClip, finishClip, vertex.x);
-    endpoint.xy += offsetNdc * endpoint.w;
-    if (zeroToOneDepth != 0) {
-        endpoint.z = endpoint.z * 2.0 - endpoint.w;
-    }
-    gl_Position = validEdge > 0.5 ? endpoint : vec4(2.0, 2.0, 2.0, 1.0);
     edgeDistance = vertex.y * expandedWidth;
     lineColor = instanceColor;
     hueOffset = instanceMaximumAndHue.w;
     effects = instanceEffects;
+    if (validEdge < 0.5) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
+
+    vec2 startNdc = startClip.xy / startClip.w;
+    vec2 finishNdc = finishClip.xy / finishClip.w;
+    vec2 directionPixels = (finishNdc - startNdc) * viewportSize * 0.5;
+    vec2 normalPixels = length(directionPixels) > 0.0001
+        ? normalize(vec2(-directionPixels.y, directionPixels.x))
+        : vec2(0.0, 1.0);
+    vec2 offsetNdc = normalPixels * expandedWidth * 2.0 / viewportSize * vertex.y;
+    vec4 endpoint = mix(startClip, finishClip, vertex.x);
+    endpoint.xy += offsetNdc * endpoint.w;
+    if (zeroToOne) {
+        endpoint.z = endpoint.z * 2.0 - endpoint.w;
+    }
+    gl_Position = endpoint;
 }
 )glsl";
 

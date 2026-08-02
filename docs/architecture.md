@@ -208,6 +208,16 @@ The box fast path uses twelve fixed edges. Each edge is represented by two trian
 - hue cycling is driven by a frame constant and per-instance offset;
 - camera and time changes do not upload the instance buffer.
 
+Before the perspective divide, every edge is clipped as a homogeneous segment
+against `w >= 0.0001` and the six canonical clip planes. The near plane is
+selected from `ViewParameters::clipDepthRange`: `z >= 0` for `ZeroToOne`, or
+`z + w >= 0` for `MinusOneToOne`; the far plane is `w - z >= 0` in both
+conventions. Intersections are computed in clip space, and only finite endpoints
+with safe positive `w` reach viewport-space line expansion. This shortens an
+edge that crosses the camera or any frustum plane instead of discarding the
+whole edge or dividing by a near-zero value. OpenGL and D3D12 then perform only
+their API-specific depth-range conversion on the already clipped endpoint.
+
 The OpenGL backends allocate a configurable ring of complete instance buffers
 during initialization and never call `glBufferData` from the render path. Every
 drawn slot receives a `glFenceSync`. Before any later CPU write, the renderer
