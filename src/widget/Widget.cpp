@@ -1,14 +1,32 @@
 #include "henia/ui/widget/Widget.h"
 
 #include <algorithm>
+#include <atomic>
 
 namespace henia::ui {
+namespace {
 
-Widget::Widget(WidgetKind kind) noexcept : mKind(kind) {}
+std::atomic_uint64_t gNextWidgetIdentity{1};
+
+[[nodiscard]] std::uint64_t nextWidgetIdentity() noexcept {
+    std::uint64_t identity = gNextWidgetIdentity.fetch_add(1, std::memory_order_relaxed);
+    if (identity == 0) {
+        identity = gNextWidgetIdentity.fetch_add(1, std::memory_order_relaxed);
+    }
+    return identity;
+}
+
+} // namespace
+
+Widget::Widget(WidgetKind kind) noexcept
+    : mKind(kind),
+      mIdentity(nextWidgetIdentity()) {}
 
 Widget::~Widget() = default;
 
 WidgetKind Widget::kind() const noexcept { return mKind; }
+
+std::uint64_t Widget::identity() const noexcept { return mIdentity; }
 
 Widget* Widget::parent() const noexcept { return mParent; }
 
@@ -70,11 +88,11 @@ Widget& Widget::addChild(std::unique_ptr<Widget> child) {
     if (child == nullptr) {
         return *this;
     }
-    child->mParent = this;
-    Widget& reference = *child;
+    Widget* pointer = child.get();
     mChildren.push_back(std::move(child));
+    pointer->mParent = this;
     markLayoutDirty();
-    return reference;
+    return *pointer;
 }
 
 Vec2 Widget::measure(TextPainter& text, Constraints constraints) {
@@ -168,6 +186,23 @@ void Widget::onPaint(Canvas&, TextPainter&, const Theme&) {}
 bool Widget::contains(Vec2 point) const noexcept {
     return point.x >= mFrame.min.x && point.y >= mFrame.min.y
         && point.x < mFrame.max.x && point.y < mFrame.max.y;
+}
+
+std::unique_ptr<Widget> Widget::detachChild(std::uint64_t identityValue) noexcept {
+    const auto iterator = std::find_if(
+        mChildren.begin(),
+        mChildren.end(),
+        [identityValue](const std::unique_ptr<Widget>& child) {
+            return child->mIdentity == identityValue;
+        });
+    if (iterator == mChildren.end()) {
+        return {};
+    }
+    std::unique_ptr<Widget> child = std::move(*iterator);
+    mChildren.erase(iterator);
+    child->mParent = nullptr;
+    markLayoutDirty();
+    return child;
 }
 
 void Widget::setHovered(bool hoveredValue) noexcept {

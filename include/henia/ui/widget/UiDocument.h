@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace henia::ui {
 
@@ -14,6 +15,7 @@ struct UiDocumentStatistics final {
     std::uint64_t paintPasses = 0;
     std::uint64_t cachedFrames = 0;
     std::uint64_t inputEvents = 0;
+    std::uint64_t rejectedNestedDispatches = 0;
     std::uint64_t revision = 0;
 };
 
@@ -26,6 +28,11 @@ public:
         std::size_t batchCapacity,
         CapacityPolicy capacityPolicy = CapacityPolicy::Grow);
     void setRoot(std::unique_ptr<Widget> root);
+    // Structural changes requested from an input/focus callback are applied in
+    // request order after the outer callback returns. A false result means the
+    // widget is not currently owned by this document or the reparent is invalid.
+    [[nodiscard]] bool removeWidget(Widget& widget);
+    [[nodiscard]] bool reparentWidget(Widget& widget, Widget& newParent);
     [[nodiscard]] Widget* root() const noexcept;
     void setViewport(Vec2 viewport) noexcept;
     [[nodiscard]] Vec2 viewport() const noexcept;
@@ -34,24 +41,55 @@ public:
 
     [[nodiscard]] const RenderPacket& compose();
     // Exceptions raised by client callbacks propagate to the host boundary.
+    // Recursive dispatch is rejected and counted; compose() remains valid during
+    // callbacks. Deferred structural mutations are discarded if a callback throws.
     [[nodiscard]] bool dispatch(const InputEvent& event);
     void clearInteraction();
 
     [[nodiscard]] UiDocumentStatistics statistics() const noexcept;
 
 private:
+    enum class MutationKind : std::uint8_t {
+        SetRoot,
+        Remove,
+        Reparent,
+    };
+
+    struct PendingMutation final {
+        MutationKind kind = MutationKind::SetRoot;
+        std::unique_ptr<Widget> root;
+        std::uint64_t widgetIdentity = 0;
+        std::uint64_t parentIdentity = 0;
+    };
+
+    [[nodiscard]] bool dispatchEvent(const InputEvent& event);
+    void drainMutations();
+    void applyMutation(PendingMutation mutation);
+    [[nodiscard]] bool mustDeferMutation() const noexcept;
+    [[nodiscard]] Widget* resolve(std::uint64_t identity) const noexcept;
+    [[nodiscard]] static Widget* findInSubtree(Widget* root, std::uint64_t identity) noexcept;
+    [[nodiscard]] static bool subtreeContains(const Widget& root, std::uint64_t identity) noexcept;
+    [[nodiscard]] static bool interactive(const Widget& widget) noexcept;
+    void clearInteractionImpl();
+    void clearInteractionForSubtree(Widget& subtree);
+    void resetInteractionWithoutCallbacks() noexcept;
+    void sanitizeInteraction() noexcept;
     void updateHover(Vec2 position) noexcept;
-    void setFocus(Widget* widget);
+    void setFocus(std::uint64_t identity);
 
     TextPainter* mText = nullptr;
     Theme mTheme{};
     Frame mFrame;
     std::unique_ptr<Widget> mRoot;
-    Widget* mHovered = nullptr;
-    Widget* mCaptured = nullptr;
-    Widget* mFocused = nullptr;
+    std::vector<PendingMutation> mPendingMutations;
+    std::uint64_t mHoveredIdentity = 0;
+    std::uint64_t mCapturedIdentity = 0;
+    std::uint64_t mFocusedIdentity = 0;
     Vec2 mViewport{};
     UiDocumentStatistics mStatistics{};
+    bool mDispatching = false;
+    bool mApplyingMutations = false;
+    bool mClearingInteraction = false;
 };
 
 } // namespace henia::ui
