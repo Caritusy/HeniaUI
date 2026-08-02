@@ -18,8 +18,17 @@ void Label::setText(std::string textValue) {
 std::string_view Label::text() const noexcept { return mText; }
 
 void Label::setStyle(LabelStyle styleValue) noexcept {
+    if (mStyle.font == styleValue.font && mStyle.size == styleValue.size
+        && mStyle.color == styleValue.color) {
+        return;
+    }
+    const bool layoutChanged = mStyle.font != styleValue.font || mStyle.size != styleValue.size;
     mStyle = styleValue;
-    markLayoutDirty();
+    if (layoutChanged) {
+        markLayoutDirty();
+    } else {
+        markPaintDirty();
+    }
 }
 
 const LabelStyle& Label::style() const noexcept { return mStyle; }

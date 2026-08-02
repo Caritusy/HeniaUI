@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace henia::ui {
 
@@ -21,6 +22,9 @@ public:
     // Returns a cheap immutable handle. Keep the handle alive for as long as any
     // spans obtained from it are consumed.
     [[nodiscard]] RenderPacket finish();
+    // Compiles retained segments without concatenating their commands into the
+    // immediate-mode display list.
+    [[nodiscard]] RenderPacket finish(std::span<const DisplayListSegment> segments);
 
     [[nodiscard]] const DisplayList& displayList() const noexcept;
     [[nodiscard]] RenderPacket packet() const noexcept;

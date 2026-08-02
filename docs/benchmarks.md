@@ -11,7 +11,8 @@ versioned JSON document suitable for CI comparison.
 | `imdrawlist_cpu_tessellation` | ImDrawList-style CPU expansion of 4,096 rounded rectangles into 32-edge fans, vertices, and indices. This is an explicit model, not a linked copy of Dear ImGui. |
 | `henia_many_primitives` | The same 4,096 rounded rectangles recorded as Henia draw instances and packet-compiled. |
 | `retained_static_ui` | A 128-label retained widget tree returning its unchanged immutable packet. |
-| `retained_dynamic_dirty_ui` | One changed label followed by layout, paint, and packet compilation of the retained tree. |
+| `full_repaint_dynamic_ui` | One animated label color followed by the previous full-tree paint and packet-compilation path. |
+| `retained_dynamic_dirty_ui` | The same animation through `UiDocument`; stable sibling ranges and compiled segments are reused. |
 | `text_heavy_ui` | 160 telemetry rows / 4,270 cached glyph instances. |
 | `large_3d_full_build` | Cold construction and snapshot of 32,768 3D boxes. |
 | `large_3d_dirty_update` | One changed box while the previous 32,768-box immutable snapshot remains live. |
@@ -66,8 +67,9 @@ cmake --build out/bench --target HeniaUIBenchmarks
 `--verify` checks architecture-level invariants that should not depend on CPU
 frequency: the retained path allocates/uploads nothing on stable frames, all
 4,096 primitives remain one draw, text-cache misses stay zero after prewarm,
-instance upload bytes remain materially below tessellated bytes, and a one-box
-3D update advertises one instance rather than a full GPU upload.
+instance upload bytes remain materially below tessellated bytes, one dirty UI
+leaf rebuilds one retained segment and is faster than the paired full repaint,
+and a one-box 3D update advertises one instance rather than a full GPU upload.
 
 To compare two runs captured on the same machine:
 
@@ -104,10 +106,14 @@ i7-13650HX, 25 measured iterations after 5 warmups:
 | ImDrawList-style tessellation | 2,436.1 | 4,679.0 | 0 | 4,176.0 | 4,176.0 | 4,176.0 |
 | Henia many primitives | 389.0 | 593.7 | 0 | 320.0 | 720.3 | 320.0 |
 | Retained static UI | <0.1 | 0.1 | 0 | 0.0 | 322.1 | 320.0 |
-| Retained dynamic dirty UI | 139.4 | 145.9 | 0 | 87.0 | 722.1 | 320.0 |
+| Full-repaint dynamic UI | 136.2 | 139.2 | 0 | 87.0 | 722.1 | 320.0 |
+| Retained-segment dynamic UI | 14.5 | 14.6 | 0 | 87.0 | 322.1 | 320.0 |
 | Text-heavy UI | 527.2 | 573.1 | 0 | 333.6 | 769.3 | 340.0 |
 | Large 3D full build | 1,841.5 | 2,590.4 | 2 | 2,048.0 | 4,096.0 | 2,048.0 |
 | Large 3D dirty update | 606.9 | 900.1 | 2 | 0.0625 | 4,096.0 | 2,048.0 |
 
 These numbers are evidence for this machine, not universal pass/fail constants.
 CI uses same-runner relative comparison and deterministic work/memory fields.
+For the paired 128-label animation, retained subtree composition reduced median
+CPU time by 89.4% while preserving the exact submitted instance workload and
+performing zero steady-state allocations.

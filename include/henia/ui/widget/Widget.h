@@ -19,6 +19,8 @@ struct Insets final {
     float top = 0.0F;
     float right = 0.0F;
     float bottom = 0.0F;
+
+    friend constexpr bool operator==(Insets, Insets) noexcept = default;
 };
 
 struct Constraints final {
@@ -63,6 +65,12 @@ public:
     [[nodiscard]] bool focused() const noexcept;
     [[nodiscard]] bool layoutDirty() const noexcept;
     [[nodiscard]] bool paintDirty() const noexcept;
+    [[nodiscard]] bool subtreePaintDirty() const noexcept;
+    // One retained local paint segment is owned by every widget. Its identity
+    // is stable for the widget lifetime and its revision changes only when
+    // that widget's onPaint output is rebuilt.
+    [[nodiscard]] std::uint64_t paintSegmentIdentity() const noexcept;
+    [[nodiscard]] std::uint64_t paintRevision() const noexcept;
 
     void setLayoutParameters(LayoutParameters parameters) noexcept;
     void setVisible(bool visible) noexcept;
@@ -101,7 +109,9 @@ private:
     void setHovered(bool hovered) noexcept;
     void setPressed(bool pressed) noexcept;
     void setFocused(bool focused) noexcept;
-    void clearDirtyRecursive() noexcept;
+    void markPaintTopologyDirty() noexcept;
+    void markPaintDirtyRecursive() noexcept;
+    void clearPaintDirtyRecursive() noexcept;
 
     WidgetKind mKind = WidgetKind::Generic;
     std::uint64_t mIdentity = 0;
@@ -109,6 +119,10 @@ private:
     Rect mFrame{};
     LayoutParameters mLayout{};
     Vec2 mMeasured{};
+    DisplayList mPaintSegment;
+    std::uint64_t mPaintRevision = 0;
+    std::size_t mRetainedSegmentBegin = 0;
+    std::size_t mRetainedSegmentEnd = 0;
     bool mVisible = true;
     bool mEnabled = true;
     bool mHovered = false;
@@ -116,6 +130,8 @@ private:
     bool mFocused = false;
     bool mLayoutDirty = true;
     bool mPaintDirty = true;
+    bool mSubtreePaintDirty = true;
+    bool mSubtreePaintTopologyDirty = true;
 };
 
 } // namespace henia::ui

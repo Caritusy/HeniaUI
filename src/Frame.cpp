@@ -33,6 +33,17 @@ RenderPacket Frame::finish() {
     return mPacket;
 }
 
+RenderPacket Frame::finish(std::span<const DisplayListSegment> segments) {
+    mLastBuildPublished = false;
+    mRecording = false;
+    if (mPacketBuilder.begin()) {
+        static_cast<void>(mCompiler.compile(segments, mPacketBuilder));
+        mPacket = mPacketBuilder.publish();
+        mLastBuildPublished = true;
+    }
+    return mPacket;
+}
+
 const DisplayList& Frame::displayList() const noexcept { return mDisplayList; }
 
 RenderPacket Frame::packet() const noexcept { return mPacket; }

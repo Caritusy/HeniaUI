@@ -19,8 +19,28 @@ void Button::setText(std::string textValue) {
 std::string_view Button::text() const noexcept { return mText; }
 
 void Button::setStyle(ButtonStyle styleValue) noexcept {
+    const bool unchanged = mStyle.font == styleValue.font
+        && mStyle.fontSize == styleValue.fontSize
+        && mStyle.textColor == styleValue.textColor
+        && mStyle.background == styleValue.background
+        && mStyle.hover == styleValue.hover
+        && mStyle.pressed == styleValue.pressed
+        && mStyle.border == styleValue.border
+        && mStyle.borderWidth == styleValue.borderWidth
+        && mStyle.radius == styleValue.radius
+        && mStyle.padding == styleValue.padding;
+    if (unchanged) {
+        return;
+    }
+    const bool layoutChanged = mStyle.font != styleValue.font
+        || mStyle.fontSize != styleValue.fontSize
+        || !(mStyle.padding == styleValue.padding);
     mStyle = styleValue;
-    markLayoutDirty();
+    if (layoutChanged) {
+        markLayoutDirty();
+    } else {
+        markPaintDirty();
+    }
 }
 
 void Button::setOnClick(Callback<> callback) noexcept { mOnClick = callback; }

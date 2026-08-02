@@ -17,6 +17,12 @@ struct UiDocumentStatistics final {
     std::uint64_t rejectedCompositions = 0;
     std::uint64_t inputEvents = 0;
     std::uint64_t rejectedNestedDispatches = 0;
+    // A rebuilt subtree was visited because it contained dirty paint output;
+    // a reused subtree was skipped as one stable retained range.
+    std::uint64_t rebuiltSubtrees = 0;
+    std::uint64_t reusedSubtrees = 0;
+    std::uint64_t rebuiltSegments = 0;
+    std::uint64_t reusedSegments = 0;
     std::uint64_t revision = 0;
 };
 
@@ -79,11 +85,15 @@ private:
     void sanitizeInteraction() noexcept;
     void updateHover(Vec2 position) noexcept;
     void setFocus(std::uint64_t identity);
+    void rebuildPaintSegment(Widget& widget);
+    void rebuildSegmentTopology(Widget& widget);
+    void updateDirtySubtree(Widget& widget);
 
     TextPainter* mText = nullptr;
     Theme mTheme{};
     Frame mFrame;
     std::unique_ptr<Widget> mRoot;
+    std::vector<DisplayListSegment> mRetainedSegments;
     std::vector<PendingMutation> mPendingMutations;
     std::uint64_t mHoveredIdentity = 0;
     std::uint64_t mCapturedIdentity = 0;
@@ -93,6 +103,8 @@ private:
     bool mDispatching = false;
     bool mApplyingMutations = false;
     bool mClearingInteraction = false;
+    bool mHasPublishedPacket = false;
+    bool mPacketRepresentsEmptyDocument = false;
 };
 
 } // namespace henia::ui

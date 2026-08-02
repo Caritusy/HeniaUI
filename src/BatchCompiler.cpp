@@ -69,7 +69,130 @@ bool BatchCompiler::compile(
     return true;
 }
 
+bool BatchCompiler::compile(
+    std::span<const DisplayListSegment> segments,
+    RenderPacketBuilder& output) const noexcept {
+    if (!output.active()) {
+        return false;
+    }
+    output.clear();
+
+    std::size_t sourceCommands = 0;
+    for (const DisplayListSegment& segment : segments) {
+        if (segment.commands.size() > std::numeric_limits<std::size_t>::max() - sourceCommands) {
+            return output.rejectPacket();
+        }
+        sourceCommands += segment.commands.size();
+    }
+    output.setSourceCommands(sourceCommands);
+
+    try {
+        if (mPreparedSegments.size() < segments.size()) {
+            mPreparedSegments.resize(segments.size());
+        }
+    } catch (...) {
+        return output.rejectPacket();
+    }
+
+    for (std::size_t index = 0; index < segments.size(); ++index) {
+        const DisplayListSegment& segment = segments[index];
+        PreparedSegment& prepared = mPreparedSegments[index];
+        if (prepared.identity != segment.identity || prepared.revision != segment.revision) {
+            const PrepareResult result = prepare(segment, prepared);
+            if (result != PrepareResult::Ready) {
+                return output.rejectPacket(result == PrepareResult::InvalidInput);
+            }
+        }
+        for (const PreparedCommand& command : prepared.commands) {
+            if (!append(command, output)) {
+                return false;
+            }
+        }
+    }
+
+    output.completePacket();
+    return true;
+}
+
+BatchCompiler::PrepareResult BatchCompiler::prepare(
+    const DisplayListSegment& segment,
+    PreparedSegment& output) const noexcept {
+    output.identity = 0;
+    output.revision = 0;
+    output.commands.clear();
+    try {
+        output.commands.reserve(segment.commands.size());
+        for (const DrawCommand& command : segment.commands) {
+            if (!validateDrawCommand(command).empty()) {
+                return PrepareResult::InvalidInput;
+            }
+            output.commands.push_back({
+                .instance = makeInstance(command, kNoTextureSlot),
+                .clip = command.clip,
+                .blend = command.blend,
+                .texture = command.texture,
+            });
+        }
+    } catch (...) {
+        output.commands.clear();
+        return PrepareResult::OutOfMemory;
+    }
+    output.identity = segment.identity;
+    output.revision = segment.revision;
+    return PrepareResult::Ready;
+}
+
+bool BatchCompiler::append(
+    const PreparedCommand& command,
+    RenderPacketBuilder& output) noexcept {
+    if (output.instanceCount() >= std::numeric_limits<std::uint32_t>::max()) {
+        return output.rejectPacket();
+    }
+    DrawBatch* batch = output.lastBatch();
+    if (batch == nullptr || !compatible(*batch, command)) {
+        DrawCommand batchSource{};
+        batchSource.clip = command.clip;
+        batchSource.blend = command.blend;
+        batch = output.appendBatch(makeBatch(
+            batchSource,
+            static_cast<std::uint32_t>(output.instanceCount())));
+        if (batch == nullptr) {
+            return output.rejectPacket();
+        }
+    }
+
+    std::uint32_t textureSlot = kNoTextureSlot;
+    if (!resolveTextureSlot(*batch, command.texture, textureSlot)) {
+        DrawCommand batchSource{};
+        batchSource.clip = command.clip;
+        batchSource.blend = command.blend;
+        batch = output.appendBatch(makeBatch(
+            batchSource,
+            static_cast<std::uint32_t>(output.instanceCount())));
+        if (batch == nullptr) {
+            return output.rejectPacket();
+        }
+        if (!resolveTextureSlot(*batch, command.texture, textureSlot)) {
+            return output.rejectPacket();
+        }
+    }
+
+    DrawInstance instance = command.instance;
+    instance.textureSlot = textureSlot;
+    if (!output.appendInstance(instance)) {
+        return output.rejectPacket();
+    }
+    ++batch->instanceCount;
+    return true;
+}
+
 bool BatchCompiler::compatible(const DrawBatch& batch, const DrawCommand& command) noexcept {
+    return batch.clip == command.clip && batch.blend == command.blend;
+}
+
+bool BatchCompiler::compatible(
+    const DrawBatch& batch,
+    const PreparedCommand& command) noexcept {
     return batch.clip == command.clip && batch.blend == command.blend;
 }
 
