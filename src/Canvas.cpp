@@ -9,6 +9,9 @@
 namespace henia::ui {
 namespace {
 
+constexpr float kPi = 3.14159265358979323846F;
+constexpr float kTau = kPi * 2.0F;
+
 [[nodiscard]] bool visible(Color color) noexcept { return color.alpha > 0.0F; }
 
 [[nodiscard]] bool validLineSegment(Vec2 from, Vec2 to) noexcept {
@@ -17,6 +20,30 @@ namespace {
     const double length = std::hypot(deltaX, deltaY);
     return from != to && std::isfinite(length)
         && length <= static_cast<double>(std::numeric_limits<float>::max());
+}
+
+[[nodiscard]] Rect packed(Color color) noexcept {
+    return {{color.red, color.green}, {color.blue, color.alpha}};
+}
+
+[[nodiscard]] CornerRadii normalizedRadii(Rect rect, CornerRadii radii) noexcept {
+    const float width = rect.width();
+    const float height = rect.height();
+    float scale = 1.0F;
+    const auto constrain = [&scale](float available, float required) noexcept {
+        if (required > available && required > 0.0F) {
+            scale = std::min(scale, available / required);
+        }
+    };
+    constrain(width, radii.topLeft + radii.topRight);
+    constrain(width, radii.bottomLeft + radii.bottomRight);
+    constrain(height, radii.topLeft + radii.bottomLeft);
+    constrain(height, radii.topRight + radii.bottomRight);
+    radii.topLeft *= scale;
+    radii.topRight *= scale;
+    radii.bottomRight *= scale;
+    radii.bottomLeft *= scale;
+    return radii;
 }
 
 } // namespace
@@ -267,6 +294,185 @@ void Canvas::strokeRect(Rect rect, Color color, float rounding, float thickness)
     command.color = color;
     command.radius = std::clamp(rounding, 0.0F, std::min(rect.width(), rect.height()) * 0.5F);
     command.thickness = std::min(thickness, std::min(rect.width(), rect.height()) * 0.5F);
+    append(command);
+}
+
+void Canvas::circle(Vec2 center, float radius, Color color) noexcept {
+    if (!std::isfinite(center.x)) return rejectInvalid("center.x");
+    if (!std::isfinite(center.y)) return rejectInvalid("center.y");
+    if (!std::isfinite(radius) || radius <= 0.0F) return rejectInvalid("radius");
+    ellipse({
+        {center.x - radius, center.y - radius},
+        {center.x + radius, center.y + radius},
+    }, color);
+}
+
+void Canvas::ellipse(Rect rect, Color color) noexcept {
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) {
+        return rejectInvalid(issue);
+    }
+    if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
+    if (!visible(color)) return rejectInvalid("color.alpha");
+    DrawCommand command{};
+    command.kind = PrimitiveKind::Ellipse;
+    command.bounds = rect;
+    command.color = color;
+    append(command);
+}
+
+void Canvas::arc(
+    Rect ellipseBounds,
+    float startRadians,
+    float sweepRadians,
+    Color color,
+    float thickness) noexcept {
+    if (const std::string_view issue = validateRect(ellipseBounds, "bounds"); !issue.empty()) {
+        return rejectInvalid(issue);
+    }
+    if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
+    if (!std::isfinite(startRadians)) return rejectInvalid("arc.startRadians");
+    if (!std::isfinite(sweepRadians) || sweepRadians == 0.0F) {
+        return rejectInvalid("arc.sweepRadians");
+    }
+    if (!std::isfinite(thickness) || thickness <= 0.0F) return rejectInvalid("thickness");
+    if (!visible(color)) return rejectInvalid("color.alpha");
+    float start = std::fmod(startRadians, kTau);
+    if (start < 0.0F) start += kTau;
+    const float sweep = std::clamp(sweepRadians, -kTau, kTau);
+    DrawCommand command{};
+    command.kind = PrimitiveKind::Arc;
+    command.bounds = ellipseBounds;
+    command.uv = {{start, sweep}, {0.0F, 0.0F}};
+    command.color = color;
+    command.thickness = std::min(
+        thickness,
+        std::min(ellipseBounds.width(), ellipseBounds.height()));
+    append(command);
+}
+
+void Canvas::capsule(Rect rect, Color color) noexcept {
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) {
+        return rejectInvalid(issue);
+    }
+    if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
+    if (!visible(color)) return rejectInvalid("color.alpha");
+    DrawCommand command{};
+    command.kind = PrimitiveKind::Capsule;
+    command.bounds = rect;
+    command.color = color;
+    append(command);
+}
+
+void Canvas::gradientRect(
+    Rect rect,
+    Color start,
+    Color finish,
+    Vec2 direction,
+    float rounding) noexcept {
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) {
+        return rejectInvalid(issue);
+    }
+    if (const std::string_view issue = validateColor(start); !issue.empty()) return rejectInvalid(issue);
+    if (const std::string_view issue = validateColor(finish); !issue.empty()) {
+        return rejectInvalid("gradient.finish");
+    }
+    if (!std::isfinite(direction.x)) return rejectInvalid("gradient.direction.x");
+    if (!std::isfinite(direction.y)) return rejectInvalid("gradient.direction.y");
+    if (direction == Vec2{}) return rejectInvalid("gradient.direction");
+    if (!std::isfinite(rounding)) return rejectInvalid("rounding");
+    if (!visible(start) && !visible(finish)) return rejectInvalid("color.alpha");
+    float angle = std::atan2(direction.y, direction.x);
+    if (angle < 0.0F) angle += kTau;
+    DrawCommand command{};
+    command.kind = PrimitiveKind::GradientRect;
+    command.bounds = rect;
+    command.uv = packed(finish);
+    command.color = start;
+    command.radius = std::clamp(rounding, 0.0F, std::min(rect.width(), rect.height()) * 0.5F);
+    command.thickness = angle;
+    append(command);
+}
+
+void Canvas::roundedShadow(
+    Rect rect,
+    Color color,
+    float rounding,
+    float blurRadius,
+    Vec2 offset) noexcept {
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) {
+        return rejectInvalid(issue);
+    }
+    if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
+    if (!std::isfinite(rounding)) return rejectInvalid("rounding");
+    if (!std::isfinite(blurRadius) || blurRadius <= 0.0F) return rejectInvalid("shadow.blurRadius");
+    if (!std::isfinite(offset.x)) return rejectInvalid("shadow.offset.x");
+    if (!std::isfinite(offset.y)) return rejectInvalid("shadow.offset.y");
+    if (!visible(color)) return rejectInvalid("color.alpha");
+    DrawCommand command{};
+    command.kind = PrimitiveKind::RoundedShadow;
+    command.bounds = rect;
+    command.uv = {offset, {0.0F, 0.0F}};
+    command.color = color;
+    command.radius = std::clamp(rounding, 0.0F, std::min(rect.width(), rect.height()) * 0.5F);
+    command.thickness = blurRadius;
+    append(command);
+}
+
+void Canvas::border(
+    Rect rect,
+    Color color,
+    CornerRadii radii,
+    float thickness) noexcept {
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) {
+        return rejectInvalid(issue);
+    }
+    if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
+    const std::array values{radii.topLeft, radii.topRight, radii.bottomRight, radii.bottomLeft};
+    for (float value : values) {
+        if (!std::isfinite(value) || value < 0.0F) return rejectInvalid("border.radii");
+    }
+    if (!std::isfinite(thickness) || thickness <= 0.0F) return rejectInvalid("thickness");
+    if (!visible(color)) return rejectInvalid("color.alpha");
+    radii = normalizedRadii(rect, radii);
+    DrawCommand command{};
+    command.kind = PrimitiveKind::BorderRadii;
+    command.bounds = rect;
+    command.uv = {{radii.topLeft, radii.topRight}, {radii.bottomRight, radii.bottomLeft}};
+    command.color = color;
+    command.thickness = std::min(thickness, std::min(rect.width(), rect.height()) * 0.5F);
+    append(command);
+}
+
+void Canvas::ninePatch(
+    TextureHandle texture,
+    Rect rect,
+    Rect sourceUv,
+    float destinationBorder,
+    float sourceBorder,
+    Color tint) noexcept {
+    if (!texture.valid()) return rejectInvalid("texture");
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) {
+        return rejectInvalid(issue);
+    }
+    if (const std::string_view issue = validateRect(sourceUv, "uv"); !issue.empty()) {
+        return rejectInvalid(issue);
+    }
+    if (const std::string_view issue = validateColor(tint); !issue.empty()) return rejectInvalid(issue);
+    if (!std::isfinite(destinationBorder) || destinationBorder <= 0.0F) {
+        return rejectInvalid("ninePatch.destinationBorder");
+    }
+    if (!std::isfinite(sourceBorder) || sourceBorder <= 0.0F || sourceBorder >= 0.5F) {
+        return rejectInvalid("ninePatch.sourceBorder");
+    }
+    if (!visible(tint)) return rejectInvalid("color.alpha");
+    DrawCommand command{};
+    command.kind = PrimitiveKind::NinePatch;
+    command.texture = texture;
+    command.bounds = rect;
+    command.uv = sourceUv;
+    command.color = tint;
+    command.radius = std::min(destinationBorder, std::min(rect.width(), rect.height()) * 0.5F);
+    command.thickness = sourceBorder;
     append(command);
 }
 

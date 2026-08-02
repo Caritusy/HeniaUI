@@ -3,6 +3,7 @@
 #include "henia/ui/DisplayList.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -63,7 +64,8 @@ namespace henia::ui {
 }
 
 [[nodiscard]] inline std::string_view validateDrawCommand(const DrawCommand& command) noexcept {
-    if (static_cast<std::uint8_t>(command.kind) > static_cast<std::uint8_t>(PrimitiveKind::Glyph)) {
+    if (static_cast<std::uint8_t>(command.kind)
+        > static_cast<std::uint8_t>(PrimitiveKind::NinePatch)) {
         return "kind";
     }
     if (static_cast<std::uint8_t>(command.blend) > static_cast<std::uint8_t>(BlendMode::Additive)) {
@@ -115,9 +117,52 @@ namespace henia::ui {
             if (!validSegment(command.bounds.max, command.uv.max)) return "line.next";
         }
     }
-    if (command.kind == PrimitiveKind::Image || command.kind == PrimitiveKind::Glyph) {
+    if (command.kind == PrimitiveKind::Arc) {
+        if (!std::isfinite(command.uv.min.x)) return "arc.startRadians";
+        if (!std::isfinite(command.uv.min.y) || command.uv.min.y == 0.0F
+            || std::abs(command.uv.min.y) > 6.2831855F) {
+            return "arc.sweepRadians";
+        }
+        if (command.thickness <= 0.0F) return "thickness";
+    }
+    if (command.kind == PrimitiveKind::GradientRect) {
+        const Color finish{
+            command.uv.min.x,
+            command.uv.min.y,
+            command.uv.max.x,
+            command.uv.max.y,
+        };
+        if (const std::string_view issue = validateColor(finish); !issue.empty()) {
+            return "gradient.finish";
+        }
+        if (command.thickness > 6.2831855F) return "gradient.direction";
+    }
+    if (command.kind == PrimitiveKind::RoundedShadow) {
+        if (!std::isfinite(command.uv.min.x)) return "shadow.offset.x";
+        if (!std::isfinite(command.uv.min.y)) return "shadow.offset.y";
+        if (command.thickness <= 0.0F) return "shadow.blurRadius";
+    }
+    if (command.kind == PrimitiveKind::BorderRadii) {
+        const std::array radii{
+            command.uv.min.x,
+            command.uv.min.y,
+            command.uv.max.x,
+            command.uv.max.y,
+        };
+        for (float radius : radii) {
+            if (!std::isfinite(radius) || radius < 0.0F) return "border.radii";
+        }
+        if (command.thickness <= 0.0F) return "thickness";
+    }
+    if (command.kind == PrimitiveKind::Image || command.kind == PrimitiveKind::Glyph
+        || command.kind == PrimitiveKind::NinePatch) {
         if (!command.texture.valid()) return "texture";
         if (const std::string_view issue = validateRect(command.uv, "uv"); !issue.empty()) return issue;
+    }
+    if (command.kind == PrimitiveKind::NinePatch
+        && (command.radius <= 0.0F || command.thickness <= 0.0F
+            || command.thickness >= 0.5F)) {
+        return "ninePatch.border";
     }
     return {};
 }
@@ -164,14 +209,27 @@ namespace henia::ui {
         maximumX = std::max(startCenterX, endCenterX) + acrossX;
         maximumY = std::max(startCenterY, endCenterY) + acrossY;
     } else {
-        const double fringe = command.kind == PrimitiveKind::SolidRect
-                || command.kind == PrimitiveKind::StrokeRect
-            ? static_cast<double>(kAnalyticAaFringe)
+        const bool analytic = command.kind == PrimitiveKind::SolidRect
+            || command.kind == PrimitiveKind::StrokeRect
+            || command.kind == PrimitiveKind::Ellipse
+            || command.kind == PrimitiveKind::Arc
+            || command.kind == PrimitiveKind::Capsule
+            || command.kind == PrimitiveKind::GradientRect
+            || command.kind == PrimitiveKind::BorderRadii;
+        const double fringe = analytic ? static_cast<double>(kAnalyticAaFringe) : 0.0;
+        const double shadowExtent = command.kind == PrimitiveKind::RoundedShadow
+            ? static_cast<double>(command.thickness) * 3.0 + kAnalyticAaFringe
             : 0.0;
-        minimumX = static_cast<double>(command.bounds.min.x) - fringe;
-        minimumY = static_cast<double>(command.bounds.min.y) - fringe;
-        maximumX = static_cast<double>(command.bounds.max.x) + fringe;
-        maximumY = static_cast<double>(command.bounds.max.y) + fringe;
+        const double offsetX = command.kind == PrimitiveKind::RoundedShadow
+            ? static_cast<double>(command.uv.min.x)
+            : 0.0;
+        const double offsetY = command.kind == PrimitiveKind::RoundedShadow
+            ? static_cast<double>(command.uv.min.y)
+            : 0.0;
+        minimumX = static_cast<double>(command.bounds.min.x) + offsetX - fringe - shadowExtent;
+        minimumY = static_cast<double>(command.bounds.min.y) + offsetY - fringe - shadowExtent;
+        maximumX = static_cast<double>(command.bounds.max.x) + offsetX + fringe + shadowExtent;
+        maximumY = static_cast<double>(command.bounds.max.y) + offsetY + fringe + shadowExtent;
     }
     return maximumX > static_cast<double>(command.clip.area.min.x)
         && minimumX < static_cast<double>(command.clip.area.max.x)

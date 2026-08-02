@@ -443,6 +443,47 @@ template <typename Operation>
     return result;
 }
 
+[[nodiscard]] ScenarioResult benchmarkShaderEllipses(const Options& options) {
+    using namespace henia::ui;
+    Frame frame;
+    frame.reserve(kPrimitiveCount, 4, CapacityPolicy::Fixed);
+    RenderPacket packet;
+    ScenarioResult result = measureScenario(
+        "shader_analytic_ellipses",
+        options,
+        [&](std::size_t iteration) {
+            const auto paintStarted = Clock::now();
+            Canvas& canvas = frame.begin();
+            for (std::size_t primitive = 0; primitive < kPrimitiveCount; ++primitive) {
+                const float centerX = static_cast<float>(primitive % 128U) * 12.0F;
+                const float centerY = static_cast<float>(primitive / 128U) * 12.0F;
+                canvas.ellipse(
+                    {{centerX - 5.0F, centerY - 5.0F},
+                     {centerX + 5.0F, centerY + 5.0F}},
+                    {0.20F, 0.65F, 0.95F, 1.0F});
+            }
+            const std::uint64_t paint = nanosecondsSince(paintStarted);
+            const auto packetStarted = Clock::now();
+            packet = frame.finish();
+            const std::uint64_t compile = nanosecondsSince(packetStarted);
+            return IterationPhases{
+                .paintBuildNanoseconds = paint,
+                .packetCompileNanoseconds = compile,
+                .checksum = packet.identity() ^ packet.revision() ^ iteration,
+            };
+        });
+    result.drawCalls = packet.batches().size();
+    result.submittedInstances = packet.instances().size();
+    capturePacketStatistics(result, packet);
+    result.uploadBytes = packet.instances().size() * sizeof(DrawInstance);
+    result.coldUploadBytes = result.uploadBytes;
+    result.cpuResidentBytes = frame.displayList().capacity() * sizeof(DrawCommand)
+        + packet.instanceCapacity() * sizeof(DrawInstance)
+        + packet.batchCapacity() * sizeof(DrawBatch);
+    result.gpuBufferBytes = packet.instanceCapacity() * sizeof(DrawInstance);
+    return result;
+}
+
 [[nodiscard]] ScenarioResult benchmarkManyPrimitives(const Options& options) {
     using namespace henia::ui;
     Frame frame;
@@ -929,6 +970,7 @@ template <typename Operation>
 
 [[nodiscard]] bool verify(std::span<const ScenarioResult> results) {
     const ScenarioResult* tessellation = findScenario(results, "imdrawlist_cpu_tessellation");
+    const ScenarioResult* shaderEllipses = findScenario(results, "shader_analytic_ellipses");
     const ScenarioResult* primitives = findScenario(results, "henia_many_primitives");
     const ScenarioResult* analytic = findScenario(results, "analytic_2d_fragment_bounds");
     const ScenarioResult* retained = findScenario(results, "retained_static_ui");
@@ -941,7 +983,8 @@ template <typename Operation>
     const ScenarioResult* pagedOne = findScenario(results, "paged_3d_one_edit_100k");
     const ScenarioResult* pagedClustered = findScenario(results, "paged_3d_clustered_edits_100k");
     const ScenarioResult* pagedSparse = findScenario(results, "paged_3d_sparse_edits_100k");
-    bool valid = tessellation != nullptr && primitives != nullptr && analytic != nullptr
+    bool valid = tessellation != nullptr && shaderEllipses != nullptr
+        && primitives != nullptr && analytic != nullptr
         && retained != nullptr && fullDynamic != nullptr && dynamic != nullptr && text != nullptr
         && full3d != nullptr && dirty3d != nullptr && pagedStable != nullptr
         && pagedOne != nullptr && pagedClustered != nullptr && pagedSparse != nullptr;
@@ -949,7 +992,15 @@ template <typename Operation>
         std::cerr << "Benchmark verification: a required scenario is missing\n";
         return false;
     }
-    valid = primitives->submittedInstances == kPrimitiveCount
+    valid = shaderEllipses->submittedInstances == kPrimitiveCount
+        && shaderEllipses->drawCalls == 1
+        && shaderEllipses->packetStatisticsAvailable
+        && shaderEllipses->packetStatistics.sourceCommands == kPrimitiveCount
+        && shaderEllipses->packetStatistics.instances == kPrimitiveCount
+        && shaderEllipses->packetStatistics.batches == 1
+        && shaderEllipses->uploadBytes == kPrimitiveCount * sizeof(henia::ui::DrawInstance)
+        && tessellation->uploadBytes > shaderEllipses->uploadBytes * 4U
+        && primitives->submittedInstances == kPrimitiveCount
         && primitives->drawCalls == 1
         && primitives->packetStatisticsAvailable
         && primitives->packetStatistics.sourceCommands == kPrimitiveCount
@@ -1205,8 +1256,9 @@ int main(int argc, char** argv) {
     }
     try {
         std::vector<ScenarioResult> results;
-        results.reserve(13);
+        results.reserve(14);
         results.push_back(benchmarkTessellation(options));
+        results.push_back(benchmarkShaderEllipses(options));
         results.push_back(benchmarkManyPrimitives(options));
         results.push_back(benchmarkAnalyticFragmentBounds(options));
         results.push_back(benchmarkStaticRetained(options));

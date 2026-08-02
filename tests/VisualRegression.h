@@ -375,10 +375,18 @@ struct GfxPixelPoint final {
 // allowing small WARP/OpenGL rasterization differences.
 inline constexpr std::array kUiGolden{
     GoldenProbe{2, 2, {0, 0, 0, 255}, 2},
-    GoldenProbe{7, 32, {34, 5, 7, 255}, 6},
+    GoldenProbe{7, 32, {40, 29, 60, 255}, 8},
     GoldenProbe{32, 32, {217, 31, 46, 255}, 8},
+    GoldenProbe{22, 21, {31, 115, 242, 255}, 10},
+    GoldenProbe{43, 21, {38, 217, 122, 255}, 10},
+    GoldenProbe{20, 46, {226, 159, 69, 255}, 10},
+    GoldenProbe{50, 46, {169, 44, 222, 255}, 10},
+    GoldenProbe{60, 32, {10, 38, 86, 255}, 10},
     GoldenProbe{71, 32, {5, 34, 10, 255}, 6},
     GoldenProbe{96, 10, {31, 217, 64, 255}, 16},
+    GoldenProbe{114, 32, {32, 161, 204, 255}, 12},
+    GoldenProbe{96, 20, {208, 150, 21, 255}, 12},
+    GoldenProbe{96, 32, {0, 0, 0, 255}, 2},
     GoldenProbe{40, 70, {145, 145, 153, 255}, 12},
     GoldenProbe{86, 64, {51, 179, 230, 255}, 10},
     GoldenProbe{99, 64, {0, 0, 0, 255}, 2},
@@ -388,7 +396,8 @@ inline constexpr std::array kUiGolden{
     GoldenProbe{66, 91, {82, 18, 64, 255}, 10},
     GoldenProbe{96, 96, {230, 184, 31, 255}, 8},
     GoldenProbe{76, 96, {0, 0, 0, 255}, 2},
-    GoldenProbe{116, 96, {0, 0, 0, 255}, 2},
+    GoldenProbe{116, 96, {30, 70, 220, 255}, 10},
+    GoldenProbe{122, 96, {220, 45, 35, 255}, 10},
 };
 
 [[nodiscard]] inline henia::ui::RenderPacket buildUiVisualScene(
@@ -398,15 +407,54 @@ inline constexpr std::array kUiGolden{
     std::array<std::byte, 16> alpha{};
     alpha.fill(std::byte{0xFF});
     const TextureHandle atlas = textures.create(TextureFormat::Alpha8, 4, 4, 4, alpha);
+    std::array<std::byte, 64> panelPixels{};
+    for (std::size_t y = 0; y < 4; ++y) {
+        for (std::size_t x = 0; x < 4; ++x) {
+            const bool border = x == 0 || y == 0 || x == 3 || y == 3;
+            const std::array<std::uint8_t, 4> color = border
+                ? std::array<std::uint8_t, 4>{220, 45, 35, 255}
+                : std::array<std::uint8_t, 4>{30, 70, 220, 255};
+            const std::size_t offset = (y * 4 + x) * 4;
+            for (std::size_t channel = 0; channel < 4; ++channel) {
+                panelPixels[offset + channel] = static_cast<std::byte>(color[channel]);
+            }
+        }
+    }
+    const TextureHandle panel = textures.create(TextureFormat::Rgba8, 4, 4, 16, panelPixels);
 
-    frame.reserve(16, 8);
+    frame.reserve(32, 8);
     Canvas& canvas = frame.begin();
+    canvas.roundedShadow(
+        {{8.0F, 8.0F}, {56.0F, 56.0F}},
+        {0.05F, 0.20F, 0.45F, 0.8F},
+        8.0F,
+        4.0F,
+        {3.0F, 3.0F});
     canvas.fillRect({{8.0F, 8.0F}, {56.0F, 56.0F}}, {0.85F, 0.12F, 0.18F, 1.0F}, 8.0F);
+    canvas.ellipse({{14.0F, 14.0F}, {30.0F, 28.0F}}, {0.12F, 0.45F, 0.95F, 1.0F});
+    canvas.capsule({{34.0F, 14.0F}, {52.0F, 28.0F}}, {0.15F, 0.85F, 0.48F, 1.0F});
+    canvas.gradientRect(
+        {{12.0F, 40.0F}, {52.0F, 52.0F}},
+        {0.95F, 0.75F, 0.10F, 1.0F},
+        {0.65F, 0.15F, 0.90F, 1.0F},
+        {1.0F, 0.0F},
+        3.0F);
     canvas.strokeRect(
         {{72.0F, 8.0F}, {120.0F, 56.0F}},
         {0.12F, 0.85F, 0.25F, 1.0F},
         6.0F,
         4.0F);
+    canvas.border(
+        {{77.0F, 13.0F}, {115.0F, 51.0F}},
+        {0.15F, 0.75F, 0.95F, 1.0F},
+        {2.0F, 9.0F, 14.0F, 5.0F},
+        2.0F);
+    canvas.arc(
+        {{84.0F, 20.0F}, {108.0F, 44.0F}},
+        -1.5707963F,
+        4.712389F,
+        {1.0F, 0.72F, 0.10F, 1.0F},
+        3.0F);
     FontStore fonts;
     std::vector<GlyphMetrics> glyphs{
         {U'A', {{0.0F, 0.0F}, {1.0F, 1.0F}}, {32.0F, 16.0F}, {0.0F, 16.0F}, 32.0F},
@@ -456,6 +504,12 @@ inline constexpr std::array kUiGolden{
         false,
         LineCap::Butt,
         LineJoin::Bevel);
+    canvas.ninePatch(
+        panel,
+        {{104.0F, 80.0F}, {124.0F, 120.0F}},
+        {{0.0F, 0.0F}, {1.0F, 1.0F}},
+        4.0F,
+        0.25F);
     static_cast<void>(canvas.pushClip({{80.0F, 80.0F}, {112.0F, 112.0F}}));
     canvas.fillRect({{72.0F, 72.0F}, {120.0F, 120.0F}}, {0.90F, 0.72F, 0.12F, 1.0F});
     static_cast<void>(canvas.popClip());

@@ -20,7 +20,14 @@ HeniaUI is designed to avoid several common scaling traps in game overlays and n
 - no per-box CPU projection, antialias expansion, vertex generation, or index generation;
 - no assumption that one process has only one graphics context or swap chain.
 
-Shapes, images, and glyphs use one ordered UI pipeline. Each batch carries a small texture table, so alternating widget backgrounds and font glyphs can remain in one draw batch while preserving paint order. A batch boundary is introduced only for a clip, blend, pipeline, or texture-table capacity change.
+Shapes, images, and glyphs use one ordered UI pipeline. In addition to
+rectangles and lines, the same compact instance stream supports analytic
+circle/ellipse, arc, capsule, linear-gradient, rounded-shadow,
+independent-corner border, and single-instance nine-patch primitives. Each
+batch carries a small texture table, so alternating widget backgrounds and font
+glyphs can remain in one draw batch while preserving paint order. A batch
+boundary is introduced only for a clip, blend, pipeline, or texture-table
+capacity change.
 
 ## Current example
 
@@ -36,6 +43,16 @@ canvas.fillRect(
     {{20.0F, 20.0F}, {420.0F, 240.0F}},
     {0.03F, 0.05F, 0.08F, 1.0F},
     12.0F);
+canvas.gradientRect(
+    {{40.0F, 40.0F}, {260.0F, 68.0F}},
+    {0.12F, 0.65F, 0.95F, 1.0F},
+    {0.70F, 0.20F, 0.95F, 1.0F});
+canvas.arc(
+    {{320.0F, 72.0F}, {392.0F, 144.0F}},
+    -1.5707963F,
+    4.712389F,
+    {1.0F, 0.72F, 0.10F, 1.0F},
+    4.0F);
 canvas.line(
     {40.0F, 80.0F},
     {300.0F, 180.0F},

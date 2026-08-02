@@ -41,6 +41,15 @@ struct Color final {
     friend constexpr bool operator==(Color, Color) noexcept = default;
 };
 
+struct CornerRadii final {
+    float topLeft = 0.0F;
+    float topRight = 0.0F;
+    float bottomRight = 0.0F;
+    float bottomLeft = 0.0F;
+
+    friend constexpr bool operator==(CornerRadii, CornerRadii) noexcept = default;
+};
+
 struct TextMetrics final {
     float width  = 0.0F;
     float height = 0.0F;

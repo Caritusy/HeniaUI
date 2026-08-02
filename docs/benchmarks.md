@@ -8,7 +8,8 @@ versioned JSON document suitable for CI comparison.
 
 | Scenario | Workload |
 |---|---|
-| `imdrawlist_cpu_tessellation` | ImDrawList-style CPU expansion of 4,096 rounded rectangles into 32-edge fans, vertices, and indices. This is an explicit model, not a linked copy of Dear ImGui. |
+| `imdrawlist_cpu_tessellation` | ImDrawList-style CPU expansion of 4,096 circles into 32-edge fans, vertices, and indices. This is an explicit model, not a linked copy of Dear ImGui. |
+| `shader_analytic_ellipses` | The same 4,096 circles recorded as one shader-driven ellipse instance each, preserving one draw batch. |
 | `henia_many_primitives` | The same 4,096 rounded rectangles recorded as Henia draw instances and packet-compiled. |
 | `analytic_2d_fragment_bounds` | A 1 px viewport diagonal plus a large rounded rectangle stroke, tracking the conservative fragment-area bound of their generated quads. |
 | `retained_static_ui` | A 128-label retained widget tree returning its unchanged immutable packet. |
@@ -206,7 +207,7 @@ The #17 tight-geometry capture uses a 1,920 x 1,080 diagonal and a 1,720 x 880
 rounded stroke. Their former axis-aligned/full-interior quads bounded 3,612,641
 fragment pixels. The oriented line plus eight non-overlapping stroke regions
 bound 42,763 pixels, a 98.8% reduction, while remaining one draw batch. The
-Release capture compiled the two commands to nine 80-byte instances in 0.6 us
+Release capture compiled the two commands to nine 60-byte instances in 0.6 us
 median with zero steady-state allocations.
 
 For #19, base `0888076` and the paged candidate were built and run consecutively
@@ -246,3 +247,22 @@ with unchanged instance counts and draw calls. The text compile sample moved
 accepted the full suite. OpenGL and D3D12 output tests cover the extra join/flag
 decode and the removed attributes. The portable harness continues to report GPU
 timestamps unavailable rather than labeling a CPU proxy as shader time.
+
+## Shader-driven 2D primitive capture (#2)
+
+Recorded on the same MSVC Release/x64 workstation on 2026-08-02, with 25
+measured iterations after 5 warmups. Both scenarios represent 4,096 circles;
+the explicit CPU model expands each circle to a 32-edge vertex/index fan, while
+Henia records one analytic ellipse instance per circle.
+
+| Scenario | Median / p95 CPU | Upload | CPU resident | GPU buffer | Instances | Draws |
+|---|---:|---:|---:|---:|---:|---:|
+| CPU tessellated fans | 2,097.5 / 2,456.9 us | 4,176 KiB | 4,176 KiB | 4,176 KiB | expanded geometry | 1 |
+| Shader analytic ellipses | 604.6 / 615.6 us | 240 KiB | 592.3 KiB | 240 KiB | 4,096 | 1 |
+
+The analytic path reduced median producer work by 71.2% and upload bytes by
+94.3% (17.4x smaller) on this capture. It preserves one draw batch and performs
+zero measured steady-state allocations. The harness verifies the deterministic
+instance, batch, and byte counts and requires the CPU geometry upload to remain
+at least four times larger; elapsed time remains observational rather than a
+cross-machine pass/fail threshold.

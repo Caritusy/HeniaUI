@@ -13,8 +13,12 @@ int main() {
         return EXIT_FAILURE;
     }
     henia::ui::Frame frame;
-    frame.reserve(4, 1);
-    frame.begin().fillRect({{0.0F, 0.0F}, {8.0F, 8.0F}}, {});
+    frame.reserve(4, 4);
+    henia::ui::Canvas& canvas = frame.begin();
+    canvas.fillRect({{0.0F, 0.0F}, {8.0F, 8.0F}}, {});
+    canvas.circle({4.0F, 4.0F}, 2.0F, {});
+    canvas.arc({{1.0F, 1.0F}, {7.0F, 7.0F}}, 0.0F, 3.14F, {}, 1.0F);
+    canvas.border({{0.0F, 0.0F}, {8.0F, 8.0F}}, {}, {1.0F, 2.0F, 3.0F, 4.0F}, 1.0F);
     const henia::ui::RenderPacket packet = frame.finish();
 
     henia::gfx::ShapeBatch3D shapes;
@@ -22,7 +26,7 @@ int main() {
     const henia::gfx::InstanceBatch boxes = shapes.snapshot();
     henia::gfx::Mat4 projection{};
     henia::ui::ScissorRect scissor{};
-    return packet.instances().size() == 1 && boxes.boxes().size() == 1
+    return packet.instances().size() == 4 && boxes.boxes().size() == 1
         && henia::gfx::tryPerspective(1.0F, 1.0F, 0.1F, 100.0F, projection)
         && henia::gfx::finite(projection)
         && henia::ui::makeScissorRect({{0.25F, 0.25F}, {7.25F, 7.25F}}, 8, 8, scissor)
