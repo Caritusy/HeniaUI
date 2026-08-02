@@ -93,10 +93,21 @@ add_library(HeniaUI STATIC
     src/widget/UiDocument.cpp
     src/widget/Widget.cpp
     src/widget/controls/Button.cpp
+    src/widget/controls/ColorPicker.cpp
+    src/widget/controls/ComboBox.cpp
+    src/widget/controls/KeyBindingEditor.cpp
     src/widget/controls/Label.cpp
+    src/widget/controls/ListView.cpp
     src/widget/controls/NumericInput.cpp
     src/widget/controls/Panel.cpp
+    src/widget/controls/PopupLayer.cpp
+    src/widget/controls/ScrollContainer.cpp
+    src/widget/controls/Slider.cpp
+    src/widget/controls/TabBar.cpp
     src/widget/controls/TextInput.cpp
+    src/widget/controls/Tooltip.cpp
+    src/widget/controls/Toggle.cpp
+    src/widget/controls/TreeView.cpp
 )
 add_library(HeniaUI::Core ALIAS HeniaUI)
 

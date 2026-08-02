@@ -214,6 +214,11 @@ void Widget::arrange(TextPainter& text, Rect arrangedFrame) {
     if (frameChanged) {
         mFrame = arrangedFrame;
         markPaintDirty();
+        if (clipsChildren()) {
+            for (const std::unique_ptr<Widget>& child : mChildren) {
+                child->markPaintDirtyRecursive();
+            }
+        }
     }
     onArrange(text, arrangedFrame);
     if (mHasMeasuredConstraints) {
@@ -248,6 +253,8 @@ Widget* Widget::hitTest(Vec2 point) noexcept {
 bool Widget::acceptsPointerInput() const noexcept { return false; }
 
 bool Widget::acceptsKeyboardFocus() const noexcept { return false; }
+
+bool Widget::wantsTabKey() const noexcept { return false; }
 
 bool Widget::handleInput(const InputEvent&) { return false; }
 
@@ -284,6 +291,10 @@ void Widget::onArrange(TextPainter& text, Rect arrangedFrame) {
 }
 
 void Widget::onPaint(Canvas&, TextPainter&, const Theme&) {}
+
+bool Widget::clipsChildren() const noexcept { return false; }
+
+Rect Widget::childrenClipRect() const noexcept { return mFrame; }
 
 bool Widget::contains(Vec2 point) const noexcept {
     return point.x >= mFrame.min.x && point.y >= mFrame.min.y

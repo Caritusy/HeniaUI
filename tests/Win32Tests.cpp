@@ -51,6 +51,9 @@ public:
             case InputEventKind::CompositionCancel:
                 ++compositionCancels;
                 return true;
+            case InputEventKind::KeyDown:
+                lastKey = event.key;
+                return true;
             case InputEventKind::FocusLost:
                 ++focusLostCalls;
                 return true;
@@ -65,6 +68,7 @@ public:
     int compositionStarts = 0;
     int compositionCommits = 0;
     int compositionCancels = 0;
+    KeyCode lastKey = KeyCode::Unknown;
     bool throwOnPointerUp = false;
 };
 
@@ -195,6 +199,12 @@ void verifyWin32InputAdapter(TextPainter& painter) {
     }
 
     focusProbe(adapter, window);
+    if (!adapter.handleMessage(window, WM_KEYDOWN, VK_F5, 0)
+        || probe.lastKey != KeyCode::F5
+        || !adapter.handleMessage(window, WM_KEYDOWN, VK_SPACE, 0)
+        || probe.lastKey != KeyCode::Space) {
+        fail("Expanded Win32 overlay key mapping did not reach the focused widget");
+    }
     probe.text.clear();
     if (!adapter.handleMessage(window, WM_CHAR, 0xD83D, 0)
         || !adapter.handleMessage(window, WM_CHAR, 0xDE00, 0)

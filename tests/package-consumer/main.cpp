@@ -6,6 +6,17 @@
 #include <henia/ui/text/TextEditor.h>
 #include <henia/ui/Validation.h>
 #include <henia/ui/widget/controls/TextInput.h>
+#include <henia/ui/widget/controls/ColorPicker.h>
+#include <henia/ui/widget/controls/ComboBox.h>
+#include <henia/ui/widget/controls/KeyBindingEditor.h>
+#include <henia/ui/widget/controls/ListView.h>
+#include <henia/ui/widget/controls/PopupLayer.h>
+#include <henia/ui/widget/controls/ScrollContainer.h>
+#include <henia/ui/widget/controls/Slider.h>
+#include <henia/ui/widget/controls/TabBar.h>
+#include <henia/ui/widget/controls/Toggle.h>
+#include <henia/ui/widget/controls/Tooltip.h>
+#include <henia/ui/widget/controls/TreeView.h>
 
 #include <cstdlib>
 #include <string>
@@ -27,6 +38,18 @@ int main() {
     henia::ui::TextEditorState editor("A");
     static_cast<void>(editor.insert(U'\u4E2D'));
     henia::ui::TextInput textInput(std::string(editor.text()));
+    henia::ui::Checkbox checkbox("Enabled", true);
+    henia::ui::Toggle toggle("Mode", true);
+    henia::ui::Slider slider(0.5);
+    henia::ui::ComboBox combo({"A", "B"});
+    henia::ui::TabBar tabs({"One", "Two"});
+    henia::ui::ListView list({"First", "Second"});
+    henia::ui::TreeView tree({{"Root"}});
+    henia::ui::ColorPicker picker;
+    henia::ui::KeyBindingEditor binding(henia::ui::KeyCode::F1);
+    henia::ui::Tooltip tooltip("Tip");
+    henia::ui::ScrollContainer scroll;
+    henia::ui::PopupLayer popup;
 
     henia::gfx::ShapeBatch3D shapes;
     static_cast<void>(shapes.addBox({}));
@@ -35,6 +58,11 @@ int main() {
     henia::ui::ScissorRect scissor{};
     return packet.instances().size() == 4 && boxes.boxes().size() == 1
         && textInput.text() == "A\xE4\xB8\xAD"
+        && checkbox.checked() && toggle.checked() && slider.value() == 0.5
+        && combo.itemCount() == 2 && tabs.tabCount() == 2 && list.itemCount() == 2
+        && tree.nodeCount() == 1 && picker.color().alpha == 1.0F
+        && binding.binding() == henia::ui::KeyCode::F1 && tooltip.text() == "Tip"
+        && scroll.content() == nullptr && popup.popup() == nullptr
         && henia::gfx::tryPerspective(1.0F, 1.0F, 0.1F, 100.0F, projection)
         && henia::gfx::finite(projection)
         && henia::ui::makeScissorRect({{0.25F, 0.25F}, {7.25F, 7.25F}}, 8, 8, scissor)

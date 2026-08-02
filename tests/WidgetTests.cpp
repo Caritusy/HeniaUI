@@ -3,11 +3,23 @@
 #include "henia/ui/text/TextLayout.h"
 #include "henia/ui/widget/UiDocument.h"
 #include "henia/ui/widget/controls/Button.h"
+#include "henia/ui/widget/controls/ColorPicker.h"
+#include "henia/ui/widget/controls/ComboBox.h"
+#include "henia/ui/widget/controls/KeyBindingEditor.h"
 #include "henia/ui/widget/controls/Label.h"
+#include "henia/ui/widget/controls/ListView.h"
 #include "henia/ui/widget/controls/NumericInput.h"
 #include "henia/ui/widget/controls/Panel.h"
+#include "henia/ui/widget/controls/PopupLayer.h"
+#include "henia/ui/widget/controls/ScrollContainer.h"
+#include "henia/ui/widget/controls/Slider.h"
+#include "henia/ui/widget/controls/TabBar.h"
 #include "henia/ui/widget/controls/TextInput.h"
+#include "henia/ui/widget/controls/Toggle.h"
+#include "henia/ui/widget/controls/Tooltip.h"
+#include "henia/ui/widget/controls/TreeView.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <iostream>
@@ -47,6 +59,44 @@ struct TextRecorder final {
     }
     std::string value;
     int calls = 0;
+};
+
+struct BoolRecorder final {
+    void changed(bool next) { value = next; ++calls; }
+    bool value = false;
+    int calls = 0;
+};
+
+struct IndexRecorder final {
+    void changed(std::size_t next) { value = next; ++calls; }
+    std::size_t value = 0;
+    int calls = 0;
+};
+
+struct KeyRecorder final {
+    void changed(KeyCode next) { value = next; ++calls; }
+    KeyCode value = KeyCode::Unknown;
+    int calls = 0;
+};
+
+struct ColorRecorder final {
+    void changed(Color next) { value = next; ++calls; }
+    Color value{};
+    int calls = 0;
+};
+
+struct ExpansionRecorder final {
+    void changed(std::size_t next, bool open) { index = next; expanded = open; ++calls; }
+    std::size_t index = 0;
+    bool expanded = false;
+    int calls = 0;
+};
+
+struct VirtualLabels final {
+    [[nodiscard]] std::string_view label(std::size_t index) {
+        return labels[index % labels.size()];
+    }
+    std::array<std::string_view, 4> labels{"Alpha", "Bravo", "Charlie", "Delta"};
 };
 
 struct ThrowingCallbacks final {
@@ -192,6 +242,20 @@ public:
 
     Widget* disableOnFocusLost = nullptr;
     int focusLostCalls = 0;
+};
+
+class TallPaintProbe final : public Widget {
+public:
+    explicit TallPaintProbe(float height) noexcept : mHeight(height) {}
+protected:
+    [[nodiscard]] Vec2 onMeasure(TextPainter&, Constraints constraints) override {
+        return {constraints.maximum.x, mHeight};
+    }
+    void onPaint(Canvas& canvas, TextPainter&, const Theme&) override {
+        canvas.fillRect(frame(), {0.2F, 0.4F, 0.6F, 1.0F}, 0.0F);
+    }
+private:
+    float mHeight = 0.0F;
 };
 
 void verifyConstraintSensitiveLayout(TextPainter& painter) {
@@ -604,6 +668,202 @@ void verifyEditorGradeTextInput(TextPainter& painter, FontHandle font) {
     }
 }
 
+void verifyProductionOverlayWidgets(TextPainter& painter, FontHandle font) {
+    {
+        UiDocument document(painter);
+        document.reserve(1024, 64);
+        document.setViewport({360.0F, 420.0F});
+        auto root = std::make_unique<Panel>(PanelStyle{
+            .padding = {8.0F, 8.0F, 8.0F, 8.0F},
+            .gap = 6.0F,
+            .direction = LayoutDirection::Column,
+        });
+        Checkbox& checkbox = root->emplaceChild<Checkbox>(
+            "Enable overlay", false, ToggleStyle{.font = font});
+        Toggle& toggle = root->emplaceChild<Toggle>(
+            "Streamer mode", false, ToggleStyle{.font = font});
+        Slider& slider = root->emplaceChild<Slider>(0.0, 0.0, 100.0, 1.0);
+        ComboBox& combo = root->emplaceChild<ComboBox>(
+            std::vector<std::string>{"Low", "Medium", "High"}, 0,
+            ComboBoxStyle{.font = font});
+        TabBar& tabs = root->emplaceChild<TabBar>(
+            std::vector<std::string>{"Aim", "Visual", "World"}, 0,
+            TabBarStyle{.font = font});
+        ColorPicker& picker = root->emplaceChild<ColorPicker>(
+            Color{1.0F, 0.0F, 0.0F, 1.0F}, ColorPickerStyle{.height = 110.0F});
+        BoolRecorder checkboxRecorder;
+        BoolRecorder toggleRecorder;
+        ValueRecorder sliderRecorder;
+        IndexRecorder comboRecorder;
+        IndexRecorder tabRecorder;
+        ColorRecorder colorRecorder;
+        checkbox.setOnChanged(Callback<bool>::bind<BoolRecorder, &BoolRecorder::changed>(checkboxRecorder));
+        toggle.setOnChanged(Callback<bool>::bind<BoolRecorder, &BoolRecorder::changed>(toggleRecorder));
+        slider.setOnValueChanged(Callback<double>::bind<ValueRecorder, &ValueRecorder::changed>(sliderRecorder));
+        combo.setOnSelectionChanged(Callback<std::size_t>::bind<IndexRecorder, &IndexRecorder::changed>(comboRecorder));
+        tabs.setOnSelectionChanged(Callback<std::size_t>::bind<IndexRecorder, &IndexRecorder::changed>(tabRecorder));
+        picker.setOnColorChanged(Callback<Color>::bind<ColorRecorder, &ColorRecorder::changed>(colorRecorder));
+        document.setRoot(std::move(root));
+        static_cast<void>(document.compose());
+
+        if (!document.dispatch({.kind = InputEventKind::KeyDown, .key = KeyCode::Tab})
+            || !checkbox.focused()) {
+            fail("Tab traversal did not focus the first production control");
+        }
+        static_cast<void>(document.dispatch({.kind = InputEventKind::KeyDown, .key = KeyCode::Space}));
+        static_cast<void>(document.dispatch({.kind = InputEventKind::KeyDown, .key = KeyCode::Tab}));
+        if (!checkbox.checked() || checkboxRecorder.calls != 1 || !toggle.focused()) {
+            fail("Checkbox activation or forward keyboard traversal failed");
+        }
+        static_cast<void>(document.dispatch({
+            .kind = InputEventKind::KeyDown, .key = KeyCode::Tab, .shift = true}));
+        if (!checkbox.focused()) fail("Shift+Tab did not traverse focus backwards");
+
+        click(document, rectCenter(toggle.frame()));
+        click(document, {slider.frame().min.x + slider.frame().width() * 0.75F,
+                         (slider.frame().min.y + slider.frame().max.y) * 0.5F});
+        click(document, rectCenter(combo.frame()));
+        static_cast<void>(document.compose());
+        click(document, {combo.frame().min.x + 20.0F,
+                         combo.frame().min.y + combo.style().rowHeight * 2.5F});
+        click(document, rectCenter(tabs.frame()));
+        click(document, {picker.frame().min.x + picker.frame().width() * 0.5F,
+                         picker.frame().max.y - 5.0F});
+        if (!toggle.checked() || toggleRecorder.calls != 1
+            || slider.value() < 70.0 || sliderRecorder.calls == 0
+            || combo.selectedIndex() != 1 || comboRecorder.value != 1
+            || tabRecorder.calls == 0 || colorRecorder.calls == 0) {
+            fail("Production toggle/slider/combo/tab/color interactions failed");
+        }
+    }
+
+    {
+        UiDocument document(painter);
+        document.reserve(256, 24);
+        document.setViewport({260.0F, 100.0F});
+        auto root = std::make_unique<Panel>(PanelStyle{.gap = 6.0F, .direction = LayoutDirection::Column});
+        KeyBindingEditor& editor = root->emplaceChild<KeyBindingEditor>(
+            KeyCode::F1, KeyBindingEditorStyle{.font = font});
+        Button& next = root->emplaceChild<Button>("Next", ButtonStyle{.font = font});
+        KeyRecorder recorder;
+        editor.setOnBindingChanged(Callback<KeyCode>::bind<KeyRecorder, &KeyRecorder::changed>(recorder));
+        document.setRoot(std::move(root));
+        static_cast<void>(document.compose());
+        click(document, rectCenter(editor.frame()));
+        static_cast<void>(document.dispatch({.kind = InputEventKind::KeyDown, .key = KeyCode::Tab}));
+        if (editor.binding() != KeyCode::Tab || recorder.value != KeyCode::Tab || recorder.calls != 1) {
+            fail("Key binding capture did not retain Tab instead of traversing focus");
+        }
+        static_cast<void>(document.dispatch({.kind = InputEventKind::KeyDown, .key = KeyCode::Tab}));
+        if (!next.focused()) fail("Focus traversal did not resume after key capture");
+    }
+
+    {
+        UiDocument document(painter);
+        document.reserve(256, 24);
+        document.setViewport({140.0F, 100.0F});
+        auto list = std::make_unique<ListView>(std::vector<std::string>{}, ListViewStyle{
+            .font = font, .width = 140.0F, .height = 100.0F, .rowHeight = 20.0F});
+        ListView* listPointer = list.get();
+        VirtualLabels labels;
+        IndexRecorder recorder;
+        list->setVirtualItems(10'000,
+            ValueCallback<std::string_view, std::size_t>::bind<VirtualLabels, &VirtualLabels::label>(labels));
+        list->setOnSelectionChanged(
+            Callback<std::size_t>::bind<IndexRecorder, &IndexRecorder::changed>(recorder));
+        document.setRoot(std::move(list));
+        const RenderPacket packet = document.compose();
+        if (listPointer->lastPaintedRowCount() > 6 || packet.instances().size() > 64) {
+            fail("Virtual ListView rendered rows outside its viewport");
+        }
+        click(document, {30.0F, 50.0F});
+        static_cast<void>(document.dispatch({.kind = InputEventKind::KeyDown, .key = KeyCode::End}));
+        if (listPointer->selectedIndex() != 9'999 || recorder.value != 9'999
+            || listPointer->scrollOffset() <= 0.0F) {
+            fail("Virtual ListView selection/reveal keyboard path failed");
+        }
+    }
+
+    {
+        UiDocument document(painter);
+        document.reserve(128, 16);
+        document.setViewport({120.0F, 80.0F});
+        auto scroll = std::make_unique<ScrollContainer>(
+            std::make_unique<TallPaintProbe>(400.0F),
+            ScrollContainerStyle{.width = 120.0F, .height = 80.0F});
+        ScrollContainer* scrollPointer = scroll.get();
+        document.setRoot(std::move(scroll));
+        const RenderPacket packet = document.compose();
+        const bool clippedChild = std::any_of(packet.batches().begin(), packet.batches().end(),
+            [](const DrawBatch& batch) { return batch.clip.enabled; });
+        static_cast<void>(document.dispatch({
+            .kind = InputEventKind::PointerScroll,
+            .position = {50.0F, 40.0F},
+            .scrollY = -1.0F,
+        }));
+        static_cast<void>(document.compose());
+        if (!clippedChild || scrollPointer->contentExtent() != 400.0F
+            || scrollPointer->scrollOffset() <= 0.0F) {
+            fail("ScrollContainer did not clip descendants or consume bubbled wheel input");
+        }
+    }
+
+    {
+        UiDocument document(painter);
+        document.reserve(256, 24);
+        document.setViewport({200.0F, 140.0F});
+        auto content = std::make_unique<Panel>(PanelStyle{.background = {0.08F, 0.10F, 0.14F, 1.0F}});
+        auto popup = std::make_unique<Panel>(PanelStyle{.background = {0.16F, 0.22F, 0.28F, 1.0F}});
+        auto layer = std::make_unique<PopupLayer>(
+            std::move(content), std::move(popup), Rect{{50.0F, 40.0F}, {150.0F, 100.0F}});
+        PopupLayer* layerPointer = layer.get();
+        ClickCounter dismissed;
+        layer->setOnDismissed(Callback<>::bind<ClickCounter, &ClickCounter::clicked>(dismissed));
+        layer->setOpen(true);
+        document.setRoot(std::move(layer));
+        const RenderPacket open = document.compose();
+        click(document, {10.0F, 10.0F});
+        if (open.instances().size() < 3 || layerPointer->open() || dismissed.count != 1) {
+            fail("Modal PopupLayer paint order or backdrop dismissal failed");
+        }
+    }
+
+    {
+        UiDocument document(painter);
+        document.reserve(256, 24);
+        document.setViewport({180.0F, 80.0F});
+        std::vector<TreeViewNode> nodes{
+            {"Root", kTreeRoot, true},
+            {"Child A", 0, true},
+            {"Child B", 0, true},
+            {"Other", kTreeRoot, true},
+        };
+        auto tree = std::make_unique<TreeView>(std::move(nodes), TreeViewStyle{
+            .font = font, .width = 180.0F, .height = 80.0F, .rowHeight = 20.0F});
+        TreeView* treePointer = tree.get();
+        ExpansionRecorder expansion;
+        tree->setOnExpansionChanged(
+            Callback<std::size_t, bool>::bind<ExpansionRecorder, &ExpansionRecorder::changed>(expansion));
+        document.setRoot(std::move(tree));
+        static_cast<void>(document.compose());
+        click(document, {12.0F, 10.0F});
+        static_cast<void>(document.compose());
+        if (treePointer->visibleNodeCount() != 2 || treePointer->lastPaintedRowCount() > 4
+            || expansion.index != 0 || expansion.expanded || expansion.calls != 1) {
+            fail("TreeView expansion or visible-row virtualization failed");
+        }
+    }
+
+    {
+        UiDocument document(painter);
+        document.reserve(64, 8);
+        document.setViewport({160.0F, 40.0F});
+        document.setRoot(std::make_unique<Tooltip>(
+            "Explicit hover delay", TooltipStyle{.font = font}));
+        if (document.compose().instances().empty()) fail("Tooltip did not produce a passive bubble");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -620,6 +880,7 @@ int main() {
     verifyConstraintSensitiveLayout(painter);
     verifyInteractionCapabilities(painter, font);
     verifyEditorGradeTextInput(painter, font);
+    verifyProductionOverlayWidgets(painter, font);
     UiDocument document(painter);
     document.reserve(512, 32);
     document.setViewport({320.0F, 200.0F});
