@@ -188,6 +188,15 @@ if(HENIAUI_BUILD_TESTS)
     set_target_properties(HeniaUIGfxTests PROPERTIES FOLDER "HeniaUI/Tests")
     add_test(NAME HeniaUI.Gfx COMMAND HeniaUIGfxTests)
 
+    add_executable(HeniaUIOpenGlUploadRingTests tests/OpenGlUploadRingTests.cpp)
+    target_include_directories(
+        HeniaUIOpenGlUploadRingTests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/opengl
+    )
+    target_compile_features(HeniaUIOpenGlUploadRingTests PRIVATE cxx_std_23)
+    set_target_properties(HeniaUIOpenGlUploadRingTests PROPERTIES FOLDER "HeniaUI/Tests")
+    add_test(NAME HeniaUI.OpenGL.UploadRing COMMAND HeniaUIOpenGlUploadRingTests)
+
     if(WIN32)
         add_executable(HeniaUIWin32Tests tests/Win32Tests.cpp)
         target_link_libraries(HeniaUIWin32Tests PRIVATE HeniaUI::Core HeniaUI::Win32)

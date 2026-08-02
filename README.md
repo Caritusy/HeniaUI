@@ -14,6 +14,8 @@ HeniaUI is designed to avoid several common scaling traps in game overlays and n
 - no dependency on an immediate-mode debug UI in production builds;
 - no GPU-buffer destruction or growth from inside a presentation callback;
 - no render-thread locks for routine UI updates;
+- fence-owned OpenGL upload rings with zero-timeout polling and explicit
+  slot-exhaustion reporting;
 - no rebuilding of stable layout and paint data without a dirty reason;
 - no per-box CPU projection, antialias expansion, vertex generation, or index generation;
 - no assumption that one process has only one graphics context or swap chain.

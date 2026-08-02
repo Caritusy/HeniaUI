@@ -15,6 +15,10 @@ struct OpenGlGfxStatistics final {
     std::uint64_t submittedInstances = 0;
     std::uint64_t fullInstanceUploads = 0;
     std::uint64_t partialInstanceUploads = 0;
+    std::uint64_t uploadedInstanceBytes = 0;
+    std::uint64_t uploadSlotExhaustions = 0;
+    std::uint64_t fullUploadFallbacks = 0;
+    std::uint64_t uploadFenceFailures = 0;
     std::uint64_t viewUpdates = 0;
     std::uint64_t depthFallbacks = 0;
     std::uint64_t rejectedFrames = 0;
@@ -22,9 +26,11 @@ struct OpenGlGfxStatistics final {
 };
 
 // Host-owned OpenGL context contract. The device allocates only its own pipeline
-// and instance buffer; it never creates, switches, or presents a native context.
+// and instance-buffer ring; it never creates, switches, or presents a native context.
 // The device is not movable: its resources must be shut down on the owning
 // context and thread.
+// Instance upload slots are fence-owned and polled with zero timeout; render()
+// returns false rather than waiting when changed content has no safe slot.
 class OpenGlRenderDevice final {
 public:
     OpenGlRenderDevice();
@@ -35,7 +41,9 @@ public:
     OpenGlRenderDevice(OpenGlRenderDevice&&) = delete;
     OpenGlRenderDevice& operator=(OpenGlRenderDevice&&) = delete;
 
-    [[nodiscard]] bool initialize(std::size_t boxCapacity = 65536) noexcept;
+    [[nodiscard]] bool initialize(
+        std::size_t boxCapacity = 65536,
+        std::size_t uploadSlotCount = 3) noexcept;
     [[nodiscard]] bool render(
         const InstanceBatch& batch,
         const ViewParameters& view,
@@ -45,6 +53,7 @@ public:
 
     [[nodiscard]] bool initialized() const noexcept;
     [[nodiscard]] std::size_t boxCapacity() const noexcept;
+    [[nodiscard]] std::size_t uploadSlotCount() const noexcept;
     [[nodiscard]] OpenGlGfxStatistics statistics() const noexcept;
     [[nodiscard]] std::string_view lastError() const noexcept;
 
