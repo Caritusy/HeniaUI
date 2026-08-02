@@ -3,6 +3,8 @@
 #include "henia/ui/Validation.h"
 
 #include "../FixedError.h"
+#include "OpenGlFailure.h"
+#include "OpenGlTextureTransaction.h"
 #include "OpenGlUploadRing.h"
 
 #define NOMINMAX
@@ -23,6 +25,8 @@
 
 namespace henia::ui {
 namespace {
+
+using henia::detail::assignGlFailure;
 
 using GlChar = char;
 using GlSize = std::ptrdiff_t;
@@ -116,6 +120,7 @@ using BindSamplerFn = void(APIENTRYP)(GLuint, GLuint);
 using IsProgramFn = GLboolean(APIENTRYP)(GLuint);
 using GetBooleanIndexedFn = void(APIENTRYP)(GLenum, GLuint, GLboolean*);
 using ColorMaskIndexedFn = void(APIENTRYP)(GLuint, GLboolean, GLboolean, GLboolean, GLboolean);
+using TexStorage2DFn = void(APIENTRYP)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
 
 struct GlFunctions final {
     CreateShaderFn createShader = nullptr;
@@ -158,6 +163,7 @@ struct GlFunctions final {
     IsProgramFn isProgram = nullptr;
     GetBooleanIndexedFn getBooleanIndexed = nullptr;
     ColorMaskIndexedFn colorMaskIndexed = nullptr;
+    TexStorage2DFn texStorage2D = nullptr;
 };
 
 [[nodiscard]] void* loadOpenGlFunction(const char* name) noexcept {
@@ -178,7 +184,7 @@ template <typename Function>
 }
 
 [[nodiscard]] bool loadFunctions(GlFunctions& gl) noexcept {
-    return load(gl.createShader, "glCreateShader")
+    const bool loaded = load(gl.createShader, "glCreateShader")
         && load(gl.shaderSource, "glShaderSource")
         && load(gl.compileShader, "glCompileShader")
         && load(gl.getShaderIv, "glGetShaderiv")
@@ -218,6 +224,18 @@ template <typename Function>
         && load(gl.isProgram, "glIsProgram")
         && load(gl.getBooleanIndexed, "glGetBooleani_v")
         && load(gl.colorMaskIndexed, "glColorMaski");
+    if (loaded) {
+        gl.texStorage2D = reinterpret_cast<TexStorage2DFn>(loadOpenGlFunction("glTexStorage2D"));
+    }
+    return loaded;
+}
+
+[[nodiscard]] GLenum consumeOperationErrors() noexcept {
+    const GLenum first = glGetError();
+    if (first != GL_NO_ERROR) {
+        while (glGetError() != GL_NO_ERROR) {}
+    }
+    return first;
 }
 
 constexpr const char* kVertexShaderSource = R"glsl(
@@ -350,14 +368,19 @@ void main() {
     const char* source,
     henia::detail::FixedError& error) noexcept {
     const GLuint shader = gl.createShader(type);
-    if (shader == 0) {
-        error = "OpenGL failed to create a shader";
+    if (const GLenum glError = consumeOperationErrors(); shader == 0 || glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL UI shader creation failed", glError, "shaderType", type);
         return 0;
     }
     gl.shaderSource(shader, 1, &source, nullptr);
     gl.compileShader(shader);
     GLint compiled = GL_FALSE;
     gl.getShaderIv(shader, kCompileStatus, &compiled);
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL UI shader compilation failed", glError, "shader", shader);
+        gl.deleteShader(shader);
+        return 0;
+    }
     if (compiled == GL_TRUE) {
         return shader;
     }
@@ -408,11 +431,6 @@ struct GlState final {
 } // namespace
 
 struct OpenGlRenderer::Implementation final {
-    struct GpuTexture final {
-        GLuint object = 0;
-        std::uint64_t revision = 0;
-    };
-
     struct UploadSlot final {
         GLuint buffer = 0;
         GlSync fence = nullptr;
@@ -423,14 +441,16 @@ struct OpenGlRenderer::Implementation final {
     GLuint vertexArray = 0;
     GLint viewportLocation = -1;
     GLint texturesLocation = -1;
+    GLint maximumTextureSize = 0;
     std::size_t capacity = 0;
     std::size_t instanceBufferBytes = 0;
     std::vector<UploadSlot> uploadSlots;
     henia::detail::OpenGlUploadRing uploadRing;
-    std::vector<GpuTexture> textures;
+    std::vector<detail::OpenGlTextureState> textures;
     OpenGlRenderStatistics statistics{};
     henia::detail::FixedError error;
     HGLRC ownerContext = nullptr;
+    bool immutableTextureStorage = false;
     bool ready = false;
 
     [[nodiscard]] bool initialize(
@@ -479,6 +499,18 @@ bool OpenGlRenderer::Implementation::initialize(
         error = "OpenGL 3.3 entry points are unavailable";
         return false;
     }
+    immutableTextureStorage = gl.texStorage2D != nullptr;
+    discardHostErrors();
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximumTextureSize);
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR || maximumTextureSize <= 0) {
+        assignGlFailure(
+            error,
+            "OpenGL texture-limit query failed",
+            glError,
+            "maximumTextureSize",
+            static_cast<std::uint64_t>(std::max(maximumTextureSize, 0)));
+        return false;
+    }
 
     const GLuint vertexShader = compileShader(gl, kVertexShader, kVertexShaderSource, error);
     if (vertexShader == 0) {
@@ -491,11 +523,23 @@ bool OpenGlRenderer::Implementation::initialize(
     }
 
     program = gl.createProgram();
+    if (const GLenum glError = consumeOperationErrors(); program == 0 || glError != GL_NO_ERROR) {
+        gl.deleteShader(vertexShader);
+        gl.deleteShader(fragmentShader);
+        assignGlFailure(error, "OpenGL UI program creation failed", glError, "program", program);
+        program = 0;
+        return false;
+    }
     gl.attachShader(program, vertexShader);
     gl.attachShader(program, fragmentShader);
     gl.linkProgram(program);
     gl.deleteShader(vertexShader);
     gl.deleteShader(fragmentShader);
+
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL UI program link submission failed", glError, "program", program);
+        return false;
+    }
 
     GLint linked = GL_FALSE;
     gl.getProgramIv(program, kLinkStatus, &linked);
@@ -511,44 +555,81 @@ bool OpenGlRenderer::Implementation::initialize(
         program = 0;
         return false;
     }
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL UI program link-status query failed", glError, "program", program);
+        return false;
+    }
 
     viewportLocation = gl.getUniformLocation(program, "viewportSize");
     texturesLocation = gl.getUniformLocation(program, "textures");
+    const GLenum uniformError = consumeOperationErrors();
+    if (uniformError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL UI uniform lookup failed", uniformError, "program", program);
+        return false;
+    }
     if (viewportLocation < 0 || texturesLocation < 0) {
         error = "HeniaUI shader uniforms are unavailable";
         return false;
     }
 
     gl.genVertexArrays(1, &vertexArray);
-    for (UploadSlot& slot : uploadSlots) {
-        gl.genBuffers(1, &slot.buffer);
-    }
-    const bool buffersReady = std::all_of(
-        uploadSlots.begin(),
-        uploadSlots.end(),
-        [](const UploadSlot& slot) { return slot.buffer != 0; });
-    if (vertexArray == 0 || !buffersReady) {
-        error = "OpenGL failed to allocate renderer buffers";
+    if (const GLenum glError = consumeOperationErrors(); vertexArray == 0 || glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL UI vertex-array creation failed", glError, "object", vertexArray);
         return false;
+    }
+    for (std::size_t index = 0; index < uploadSlots.size(); ++index) {
+        UploadSlot& slot = uploadSlots[index];
+        gl.genBuffers(1, &slot.buffer);
+        if (const GLenum glError = consumeOperationErrors(); slot.buffer == 0 || glError != GL_NO_ERROR) {
+            assignGlFailure(error, "OpenGL UI instance-buffer creation failed", glError, "uploadSlot", index);
+            return false;
+        }
     }
 
     GLint previousVertexArray = 0;
     GLint previousArrayBuffer = 0;
     glGetIntegerv(kVertexArrayBinding, &previousVertexArray);
     glGetIntegerv(kArrayBufferBinding, &previousArrayBuffer);
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL UI initialization-state capture failed", glError, "object", 0);
+        return false;
+    }
     gl.bindVertexArray(vertexArray);
-    for (const UploadSlot& slot : uploadSlots) {
+    const auto restoreInitializationState = [&]() noexcept {
+        gl.bindBuffer(kArrayBuffer, static_cast<GLuint>(previousArrayBuffer));
+        gl.bindVertexArray(static_cast<GLuint>(previousVertexArray));
+    };
+    for (std::size_t index = 0; index < uploadSlots.size(); ++index) {
+        const UploadSlot& slot = uploadSlots[index];
         gl.bindBuffer(kArrayBuffer, slot.buffer);
         gl.bufferData(
             kArrayBuffer,
             static_cast<GlSize>(instanceBytes),
             nullptr,
             kDynamicDraw);
+        if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+            restoreInitializationState();
+            assignGlFailure(
+                error,
+                "OpenGL UI instance-buffer storage allocation failed",
+                glError,
+                "uploadSlot",
+                index);
+            return false;
+        }
     }
     gl.bindBuffer(kArrayBuffer, uploadSlots.front().buffer);
     configureAttributes(0);
-    gl.bindBuffer(kArrayBuffer, static_cast<GLuint>(previousArrayBuffer));
-    gl.bindVertexArray(static_cast<GLuint>(previousVertexArray));
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        restoreInitializationState();
+        assignGlFailure(error, "OpenGL UI vertex-layout setup failed", glError, "object", vertexArray);
+        return false;
+    }
+    restoreInitializationState();
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL UI initialization-state restoration failed", glError, "object", 0);
+        return false;
+    }
 
     capacity = requestedCapacity;
     instanceBufferBytes = instanceBytes;
@@ -570,20 +651,44 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& sto
         return false;
     }
 
+    bool requiresSynchronization = false;
     for (std::uint32_t value = 1; value <= store.size(); ++value) {
         const TextureView view = store.view(TextureHandle{value});
         const std::uint32_t pixelBytes = view.format == TextureFormat::Alpha8 ? 1U : 4U;
-        if (!view.handle.valid() || view.width == 0 || view.height == 0
-            || view.width > static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())
-            || view.height > static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())
+        std::size_t minimumPitch = 0;
+        std::size_t requiredBytes = 0;
+        if (!view.handle.valid() || view.revision == 0
+            || (view.format != TextureFormat::Alpha8 && view.format != TextureFormat::Rgba8)
+            || view.width == 0 || view.height == 0
+            || view.width > static_cast<std::uint32_t>(maximumTextureSize)
+            || view.height > static_cast<std::uint32_t>(maximumTextureSize)
+            || !checkedMultiply(
+                static_cast<std::size_t>(view.width),
+                static_cast<std::size_t>(pixelBytes),
+                minimumPitch)
+            || view.rowPitch < minimumPitch
             || view.rowPitch % pixelBytes != 0
             || view.rowPitch / pixelBytes
-                > static_cast<std::uint32_t>(std::numeric_limits<GLint>::max())) {
-            error = "OpenGL texture has an invalid width, height, or rowPitch";
+                > static_cast<std::uint32_t>(std::numeric_limits<GLint>::max())
+            || !checkedMultiply(
+                static_cast<std::size_t>(view.rowPitch),
+                static_cast<std::size_t>(view.height),
+                requiredBytes)
+            || requiredBytes != view.pixels.size() || view.pixels.data() == nullptr) {
+            ++statistics.textureSynchronizationFailures;
+            assignGlFailure(error, "OpenGL texture metadata is invalid", GL_INVALID_VALUE, "texture", value);
             return false;
         }
+        const detail::OpenGlTextureState& texture = textures[value - 1U];
+        requiresSynchronization = requiresSynchronization
+            || texture.object == 0 || texture.revision != view.revision;
+    }
+    if (!requiresSynchronization) {
+        error.clear();
+        return true;
     }
 
+    discardHostErrors();
     GLint previousTexture = 0;
     GLint previousUnpackAlignment = 0;
     GLint previousUnpackRowLength = 0;
@@ -592,55 +697,166 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& sto
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &previousUnpackAlignment);
     glGetIntegerv(kUnpackRowLength, &previousUnpackRowLength);
     glGetIntegerv(kPixelUnpackBufferBinding, &previousUnpackBuffer);
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        ++statistics.textureSynchronizationFailures;
+        assignGlFailure(error, "OpenGL texture upload-state capture failed", glError, "texture", 0);
+        return false;
+    }
     gl.bindBuffer(kPixelUnpackBuffer, 0);
-    const auto restoreUploadState = [&]() {
+    const auto restoreUploadState = [&]() noexcept {
         glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture));
         glPixelStorei(GL_UNPACK_ALIGNMENT, previousUnpackAlignment);
         glPixelStorei(kUnpackRowLength, previousUnpackRowLength);
         gl.bindBuffer(kPixelUnpackBuffer, static_cast<GLuint>(previousUnpackBuffer));
+        return consumeOperationErrors();
+    };
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        static_cast<void>(restoreUploadState());
+        ++statistics.textureSynchronizationFailures;
+        assignGlFailure(error, "OpenGL texture unpack-state setup failed", glError, "texture", 0);
+        return false;
+    }
+    detail::OpenGlTextureTransaction transaction(textures);
+    const auto destroyTexture = [](std::uint32_t object) noexcept {
+        const GLuint name = object;
+        glDeleteTextures(1, &name);
     };
 
     for (std::uint32_t value = 1; value <= store.size(); ++value) {
         const TextureView view = store.view(TextureHandle{value});
-        if (!view.handle.valid()) {
-            continue;
-        }
-        GpuTexture& texture = textures[value - 1U];
+        detail::OpenGlTextureState& texture = textures[value - 1U];
         if (texture.object != 0 && texture.revision == view.revision) {
             continue;
         }
-        if (texture.object == 0) {
-            glGenTextures(1, &texture.object);
-        }
-        if (texture.object == 0) {
-            error = "OpenGL failed to create a texture";
-            restoreUploadState();
+        const bool staged = transaction.stage(
+            value - 1U,
+            view.revision,
+            [&]() noexcept {
+                GLuint candidate = 0;
+                glGenTextures(1, &candidate);
+                const GLenum glError = consumeOperationErrors();
+                if (candidate == 0 || glError != GL_NO_ERROR) {
+                    if (candidate != 0) {
+                        glDeleteTextures(1, &candidate);
+                    }
+                    assignGlFailure(
+                        error,
+                        "OpenGL texture object creation failed",
+                        glError,
+                        "texture",
+                        value);
+                    return 0U;
+                }
+                return candidate;
+            },
+            [&](std::uint32_t candidate) noexcept {
+                glBindTexture(GL_TEXTURE_2D, candidate);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, kClampToEdge);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, kClampToEdge);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                const GLint bytesPerPixel = view.format == TextureFormat::Alpha8 ? 1 : 4;
+                glPixelStorei(kUnpackRowLength, static_cast<GLint>(view.rowPitch / bytesPerPixel));
+                if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+                    assignGlFailure(
+                        error,
+                        "OpenGL texture configuration failed",
+                        glError,
+                        "texture",
+                        value);
+                    return false;
+                }
+
+                const GLenum internalFormat = view.format == TextureFormat::Alpha8 ? kR8 : kRgba8;
+                const GLenum sourceFormat = view.format == TextureFormat::Alpha8 ? kRed : GL_RGBA;
+                if (immutableTextureStorage) {
+                    gl.texStorage2D(
+                        GL_TEXTURE_2D,
+                        1,
+                        internalFormat,
+                        static_cast<GLsizei>(view.width),
+                        static_cast<GLsizei>(view.height));
+                    const GLenum storageError = consumeOperationErrors();
+                    if (storageError == GL_INVALID_ENUM || storageError == GL_INVALID_OPERATION) {
+                        immutableTextureStorage = false;
+                    } else if (storageError != GL_NO_ERROR) {
+                        assignGlFailure(
+                            error,
+                            "OpenGL immutable texture storage allocation failed",
+                            storageError,
+                            "texture",
+                            value);
+                        return false;
+                    }
+                }
+                if (immutableTextureStorage) {
+                    glTexSubImage2D(
+                        GL_TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        static_cast<GLsizei>(view.width),
+                        static_cast<GLsizei>(view.height),
+                        sourceFormat,
+                        GL_UNSIGNED_BYTE,
+                        view.pixels.data());
+                } else {
+                    glTexImage2D(
+                        GL_TEXTURE_2D,
+                        0,
+                        static_cast<GLint>(internalFormat),
+                        static_cast<GLsizei>(view.width),
+                        static_cast<GLsizei>(view.height),
+                        0,
+                        sourceFormat,
+                        GL_UNSIGNED_BYTE,
+                        view.pixels.data());
+                }
+                if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+                    assignGlFailure(
+                        error,
+                        "OpenGL texture pixel upload failed",
+                        glError,
+                        "texture",
+                        value);
+                    return false;
+                }
+                return true;
+            },
+            destroyTexture);
+        if (!staged) {
+            const henia::detail::FixedError diagnostic = error;
+            transaction.rollback(destroyTexture);
+            if (restoreUploadState() != GL_NO_ERROR) {
+                ++statistics.stateRestoreFailures;
+            }
+            static_cast<void>(consumeOperationErrors());
+            error = diagnostic;
+            ++statistics.textureSynchronizationFailures;
             return false;
         }
-
-        glBindTexture(GL_TEXTURE_2D, texture.object);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, kClampToEdge);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, kClampToEdge);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        const GLint bytesPerPixel = view.format == TextureFormat::Alpha8 ? 1 : 4;
-        glPixelStorei(kUnpackRowLength, static_cast<GLint>(view.rowPitch / bytesPerPixel));
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            view.format == TextureFormat::Alpha8 ? static_cast<GLint>(kR8) : static_cast<GLint>(kRgba8),
-            static_cast<GLsizei>(view.width),
-            static_cast<GLsizei>(view.height),
-            0,
-            view.format == TextureFormat::Alpha8 ? kRed : GL_RGBA,
-            GL_UNSIGNED_BYTE,
-            view.pixels.data());
-        glPixelStorei(kUnpackRowLength, 0);
-        texture.revision = view.revision;
-        ++statistics.textureUploads;
     }
-    restoreUploadState();
+    if (const GLenum restoreError = restoreUploadState(); restoreError != GL_NO_ERROR) {
+        transaction.rollback(destroyTexture);
+        static_cast<void>(consumeOperationErrors());
+        ++statistics.stateRestoreFailures;
+        ++statistics.textureSynchronizationFailures;
+        assignGlFailure(error, "OpenGL texture upload-state restoration failed", restoreError, "texture", 0);
+        return false;
+    }
+    const std::size_t committed = transaction.commit(destroyTexture);
+    statistics.textureUploads += committed;
+    if (const GLenum cleanupError = consumeOperationErrors(); cleanupError != GL_NO_ERROR) {
+        ++statistics.textureSynchronizationFailures;
+        assignGlFailure(
+            error,
+            "OpenGL replaced-texture cleanup failed after commit",
+            cleanupError,
+            "texture",
+            0);
+        return false;
+    }
     error.clear();
     return true;
 }
@@ -735,7 +951,7 @@ bool OpenGlRenderer::Implementation::render(
 
     discardHostErrors();
     const GlState previous = captureState();
-    if (glGetError() != GL_NO_ERROR) {
+    if (consumeOperationErrors() != GL_NO_ERROR) {
         ++statistics.rejectedFrames;
         error = "OpenGL UI state capture failed";
         return false;
@@ -766,6 +982,19 @@ bool OpenGlRenderer::Implementation::render(
     }
     gl.bindVertexArray(vertexArray);
     gl.bindBuffer(kArrayBuffer, uploadSlot.buffer);
+    if (const GLenum setupError = consumeOperationErrors(); setupError != GL_NO_ERROR) {
+        const bool restored = restoreState(previous);
+        ++statistics.rejectedFrames;
+        if (restored) {
+            assignGlFailure(
+                error,
+                "OpenGL UI pipeline setup failed",
+                setupError,
+                "uploadSlot",
+                upload.slot);
+        }
+        return false;
+    }
 
     if (upload.requiresUpload()) {
         void* mapped = gl.mapBufferRange(
@@ -773,18 +1002,39 @@ bool OpenGlRenderer::Implementation::render(
             0,
             static_cast<GlSize>(packetBytes),
             kMapWriteBit | kMapUnsynchronizedBit);
-        if (mapped == nullptr) {
+        const GLenum mapError = consumeOperationErrors();
+        if (mapped == nullptr || mapError != GL_NO_ERROR) {
+            if (mapped != nullptr) {
+                static_cast<void>(gl.unmapBuffer(kArrayBuffer));
+                static_cast<void>(consumeOperationErrors());
+            }
             const bool restored = restoreState(previous);
             ++statistics.rejectedFrames;
-            if (restored) error = "OpenGL instance upload mapping failed";
+            if (restored) {
+                assignGlFailure(
+                    error,
+                    "OpenGL UI instance-buffer mapping failed",
+                    mapError,
+                    "uploadSlot",
+                    upload.slot);
+            }
             return false;
         }
         std::memcpy(mapped, packet.instances().data(), packetBytes);
-        if (gl.unmapBuffer(kArrayBuffer) != GL_TRUE) {
+        const GLboolean unmapped = gl.unmapBuffer(kArrayBuffer);
+        const GLenum unmapError = consumeOperationErrors();
+        if (unmapped != GL_TRUE || unmapError != GL_NO_ERROR) {
             uploadRing.invalidate(upload.slot);
             const bool restored = restoreState(previous);
             ++statistics.rejectedFrames;
-            if (restored) error = "OpenGL instance upload was corrupted";
+            if (restored) {
+                assignGlFailure(
+                    error,
+                    "OpenGL UI instance-buffer unmap failed",
+                    unmapError,
+                    "uploadSlot",
+                    upload.slot);
+            }
             return false;
         }
         uploadRing.markUploaded(upload.slot, packet.identity(), packet.revision());
@@ -834,10 +1084,17 @@ bool OpenGlRenderer::Implementation::render(
         statistics.submittedInstances += batch.instanceCount;
     }
 
-    if (glGetError() != GL_NO_ERROR) {
+    if (const GLenum submissionError = consumeOperationErrors(); submissionError != GL_NO_ERROR) {
         const bool restored = restoreState(previous);
         ++statistics.rejectedFrames;
-        if (restored) error = "OpenGL UI submission generated an error";
+        if (restored) {
+            assignGlFailure(
+                error,
+                "OpenGL UI batch draw submission failed",
+                submissionError,
+                "uploadSlot",
+                upload.slot);
+        }
         return false;
     }
 
@@ -880,14 +1137,20 @@ henia::detail::UploadFenceStatus OpenGlRenderer::Implementation::pollUploadSlot(
 bool OpenGlRenderer::Implementation::fenceUploadSlot(std::size_t index) noexcept {
     UploadSlot& slot = uploadSlots[index];
     GlSync fence = gl.fenceSync(kSyncGpuCommandsComplete, 0);
-    if (fence == nullptr) {
+    const GLenum fenceError = consumeOperationErrors();
+    if (fence == nullptr || fenceError != GL_NO_ERROR) {
         if (slot.fence != nullptr) {
             gl.deleteSync(slot.fence);
             slot.fence = nullptr;
         }
         uploadRing.markFenceFailed(index);
         ++statistics.uploadFenceFailures;
-        error = "OpenGL failed to fence the submitted instance upload slot";
+        assignGlFailure(
+            error,
+            "OpenGL UI upload fence creation failed",
+            fenceError,
+            "uploadSlot",
+            index);
         return false;
     }
     if (slot.fence != nullptr) {
@@ -907,9 +1170,14 @@ bool OpenGlRenderer::Implementation::shutdown() noexcept {
     }
     if (hadOwner) {
         discardHostErrors();
-        for (GpuTexture& texture : textures) {
+        for (detail::OpenGlTextureState& texture : textures) {
             if (texture.object != 0) {
-                glDeleteTextures(1, &texture.object);
+                const GLuint object = texture.object;
+                glDeleteTextures(1, &object);
+            }
+            if (texture.stagedObject != 0) {
+                const GLuint object = texture.stagedObject;
+                glDeleteTextures(1, &object);
             }
         }
         for (UploadSlot& slot : uploadSlots) {
@@ -935,11 +1203,13 @@ bool OpenGlRenderer::Implementation::shutdown() noexcept {
     vertexArray = 0;
     viewportLocation = -1;
     texturesLocation = -1;
+    maximumTextureSize = 0;
     capacity = 0;
     instanceBufferBytes = 0;
     ownerContext = nullptr;
+    immutableTextureStorage = false;
     ready = false;
-    if (hadOwner && glGetError() != GL_NO_ERROR) {
+    if (hadOwner && consumeOperationErrors() != GL_NO_ERROR) {
         error = "OpenGL UI resource destruction generated an error";
         return false;
     }
@@ -1062,7 +1332,7 @@ bool OpenGlRenderer::Implementation::restoreState(const GlState& state) noexcept
     (state.sampleCoverage == GL_TRUE ? glEnable : glDisable)(kSampleCoverage);
     glViewport(state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3]);
     glScissor(state.scissor[0], state.scissor[1], state.scissor[2], state.scissor[3]);
-    if (glGetError() != GL_NO_ERROR) {
+    if (consumeOperationErrors() != GL_NO_ERROR) {
         ++statistics.stateRestoreFailures;
         error = "OpenGL UI state restoration failed";
         return false;
@@ -1084,12 +1354,14 @@ bool OpenGlRenderer::initialize(
             textureCapacityValue,
             uploadSlotCountValue);
         if (!initialized) {
+            ++mImplementation->statistics.initializationFailures;
             const henia::detail::FixedError diagnostic = mImplementation->error;
             static_cast<void>(mImplementation->shutdown());
             mImplementation->error = diagnostic;
         }
         return initialized;
     } catch (...) {
+        ++mImplementation->statistics.initializationFailures;
         static_cast<void>(mImplementation->shutdown());
         mImplementation->error = "OpenGL renderer initialization exhausted CPU bookkeeping storage";
         return false;

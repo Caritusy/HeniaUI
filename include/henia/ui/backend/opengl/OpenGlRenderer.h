@@ -26,6 +26,8 @@ struct OpenGlRenderStatistics final {
     std::uint64_t wrongContextCalls = 0;
     std::uint64_t ignoredHostErrors = 0;
     std::uint64_t stateRestoreFailures = 0;
+    std::uint64_t initializationFailures = 0;
+    std::uint64_t textureSynchronizationFailures = 0;
 };
 
 // OpenGlRenderer never creates, binds, or swaps a native context. Its owner must
@@ -45,8 +47,10 @@ public:
     OpenGlRenderer(OpenGlRenderer&&) = delete;
     OpenGlRenderer& operator=(OpenGlRenderer&&) = delete;
 
-    // Initialization performs all CPU bookkeeping and upload-ring allocation.
-    // Texture synchronization rejects stores larger than textureCapacity.
+    // Initialization commits only after every GL object and buffer allocation
+    // succeeds. Texture synchronization rejects stores larger than
+    // textureCapacity and atomically replaces changed textures; a failed call
+    // keeps every previous texture usable and retryable.
     [[nodiscard]] bool initialize(
         std::size_t instanceCapacity = 16384,
         std::size_t textureCapacity = 256,

@@ -27,6 +27,7 @@ struct OpenGlGfxStatistics final {
     std::uint64_t wrongContextCalls = 0;
     std::uint64_t ignoredHostErrors = 0;
     std::uint64_t stateRestoreFailures = 0;
+    std::uint64_t initializationFailures = 0;
     RenderProfile profile{};
 };
 
