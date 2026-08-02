@@ -17,10 +17,14 @@ versioned JSON document suitable for CI comparison.
 | `text_heavy_ui` | 160 telemetry rows / 4,270 cached glyph instances. |
 | `large_3d_full_build` | Cold construction and snapshot of 32,768 3D boxes. |
 | `large_3d_dirty_update` | One changed box while the previous 32,768-box immutable snapshot remains live. |
+| `paged_3d_stable_snapshot_100k` | Stable publication of a 100,000-box paged snapshot. |
+| `paged_3d_one_edit_100k` | One edit in 100,000 boxes while the prior snapshot remains live. |
+| `paged_3d_clustered_edits_100k` | 32 adjacent edits contained by one 256-instance page. |
+| `paged_3d_sparse_edits_100k` | Four distant edits in four pages, retained as four upload ranges. |
 
-The final dirty-3D scenario intentionally exposes the current full-vector COW
-cost even though its backend upload range is one 64-byte instance. It is the
-baseline for #19 rather than an optimized target disguised as a benchmark.
+`large_3d_full_build` remains the full-replacement control. The paged scenarios
+separate stable, single, clustered, and sparse publication costs and keep the
+previous immutable revision live during every changed iteration.
 
 ## Metrics
 
@@ -29,6 +33,8 @@ paint/build, and packet-compilation medians when those phases exist. A scoped
 executable-wide allocation tracker reports median allocation count, median
 allocated bytes, and peak live transient bytes without modifying the library's
 allocators.
+`copied_box_instances` records producer-side box data copied into replacement or
+COW pages, independently of directory metadata and GPU upload bytes.
 
 GPU-work fields are deterministic submission facts: draw calls, submitted
 instances, steady-state upload bytes, cold upload bytes, configured GPU-buffer
@@ -74,7 +80,9 @@ instance upload bytes remain materially below tessellated bytes, one dirty UI
 leaf rebuilds one retained segment and is faster than the paired full repaint,
 the diagonal/stroke scene stays below one eighth of its former axis-aligned/full-
 interior fragment bound, and a one-box 3D update advertises one instance rather
-than a full GPU upload.
+than a full GPU upload. The 100k paged cases additionally require zero stable
+allocations, at most one copied page for single/clustered edits, four copied
+pages for four sparse edits, and exact 64 B / 2,048 B / 256 B upload ranges.
 
 To compare two runs captured on the same machine:
 
@@ -84,9 +92,12 @@ python3 tools/compare_benchmarks.py base.json candidate.json \
   --max-memory-regression-percent 5
 ```
 
-The comparator rejects increased draw/upload work, increased median allocation
-count, a cache-hit-rate loss greater than one percentage point, memory growth
-over the selected budget, and CPU regressions that exceed both 35% and 10 µs.
+The comparator rejects increased draw/upload work, allocated-byte or resident-
+memory growth over the selected budget, a cache-hit-rate loss greater than one
+percentage point, and CPU regressions that exceed both 35% and 10 µs. Allocation
+count increases are reported but accepted when total allocated bytes stay within
+the same memory budget; this permits bounded page metadata allocations while
+still rejecting allocation-volume regressions.
 The absolute floor prevents sub-microsecond retained lookups from failing on
 timer noise.
 
@@ -129,3 +140,15 @@ fragment pixels. The oriented line plus eight non-overlapping stroke regions
 bound 42,763 pixels, a 98.8% reduction, while remaining one draw batch. The
 Release capture compiled the two commands to nine 80-byte instances in 0.6 us
 median with zero steady-state allocations.
+
+For #19, base `0888076` and the paged candidate were built and run consecutively
+on the same machine. A live-snapshot edit in 32,768 boxes fell from 610.9 us to
+2.9 us (99.5%) while transient allocated bytes fell from 2,097,231 to 20,896;
+the producer copied 256 boxes and the backend upload remained 64 bytes. Cold
+32,768-box replacement moved from 1,942.7 us to 2,370.6 us (+22.0%, inside the
+35% budget) while allocated bytes changed by only +0.26%.
+
+At 100,000 boxes, stable snapshot publication measured 0.1 us with zero
+allocations. One edit measured 6.7 us / one copied page / 64 upload bytes;
+32 clustered edits measured 17.5 us / one copied page / 2,048 upload bytes;
+four distant edits measured 8.5 us / four copied pages / 256 upload bytes.

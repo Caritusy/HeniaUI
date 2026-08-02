@@ -584,7 +584,7 @@ bool OpenGlRenderDevice::Implementation::render(
     bool depthAttachmentAvailable) noexcept {
     ++statistics.frames;
     statistics.profile.cpuBuildNanoseconds = batch.cpuBuildNanoseconds();
-    const std::span<const BoxInstance> boxes = batch.boxes();
+    const BoxInstanceView boxes = batch.boxes();
     if (!ready) {
         ++statistics.rejectedFrames;
         error = "OpenGL gfx renderer is not initialized";
@@ -613,18 +613,31 @@ bool OpenGlRenderDevice::Implementation::render(
         error = "OpenGL gfx instance count exceeds boxCapacity";
         return false;
     }
-    for (const BoxInstance& box : boxes) {
-        if (const std::string_view issue = validate(box); !issue.empty()) {
-            ++statistics.rejectedFrames;
-            ++statistics.invalidInputFrames;
-            error.assign(issue.data(), issue.size());
-            return false;
+    for (std::size_t pageIndex = 0; pageIndex < batch.boxPageCount(); ++pageIndex) {
+        for (const BoxInstance& box : batch.boxPage(pageIndex)) {
+            if (const std::string_view issue = validate(box); !issue.empty()) {
+                ++statistics.rejectedFrames;
+                ++statistics.invalidInputFrames;
+                error.assign(issue.data(), issue.size());
+                return false;
+            }
         }
     }
 
-    const bool partialRequested = batch.revision() > 1 && batch.dirtyCount() > 0
-        && batch.dirtyOffset() <= boxes.size()
-        && batch.dirtyCount() <= boxes.size() - batch.dirtyOffset();
+    const std::span<const DirtyRange> dirtyRanges = batch.dirtyRanges();
+    bool dirtyRangesValid = !dirtyRanges.empty();
+    std::size_t previousEnd = 0;
+    for (const DirtyRange range : dirtyRanges) {
+        const bool valid = range.count > 0 && range.offset >= previousEnd
+            && range.offset <= boxes.size() && range.count <= boxes.size() - range.offset;
+        if (!valid) {
+            dirtyRangesValid = false;
+            break;
+        }
+        previousEnd = range.offset + range.count;
+    }
+    const bool partialRequested = batch.revision() > 1
+        && !batch.requiresFullUpload() && dirtyRangesValid;
     const henia::detail::UploadSelection upload = uploadRing.select(
         batch.identity(),
         batch.revision(),
@@ -653,20 +666,14 @@ bool OpenGlRenderDevice::Implementation::render(
     if (upload.requiresUpload()) {
         const auto uploadStarted = std::chrono::steady_clock::now();
         const bool partial = upload.kind == henia::detail::UploadSelectionKind::Partial;
-        const std::size_t offset = partial ? batch.dirtyOffset() : 0;
-        const std::size_t count = partial ? batch.dirtyCount() : boxes.size();
-        if (count > 0) {
+        const auto uploadRange = [&](DirtyRange range) noexcept {
             std::size_t offsetBytes = 0;
             std::size_t countBytes = 0;
-            if (!checkedMultiply(offset, sizeof(BoxInstance), offsetBytes)
-                || !checkedMultiply(count, sizeof(BoxInstance), countBytes)
+            if (!checkedMultiply(range.offset, sizeof(BoxInstance), offsetBytes)
+                || !checkedMultiply(range.count, sizeof(BoxInstance), countBytes)
                 || offsetBytes > static_cast<std::size_t>(std::numeric_limits<GlIntPtr>::max())
                 || countBytes > static_cast<std::size_t>(std::numeric_limits<GlSize>::max())) {
-                const bool restored = restoreState(state);
-                ++statistics.rejectedFrames;
-                ++statistics.capacityRejectedFrames;
-                if (restored) error = "OpenGL gfx upload byte range exceeds GLintptr/GLsizeiptr";
-                return false;
+                return 1;
             }
             constexpr GLbitfield flags = kMapWriteBit | kMapUnsynchronizedBit;
             void* destination = gl.mapBufferRange(
@@ -674,24 +681,57 @@ bool OpenGlRenderDevice::Implementation::render(
                 static_cast<GlIntPtr>(offsetBytes),
                 static_cast<GlSize>(countBytes),
                 flags);
-            if (destination == nullptr) {
-                const bool restored = restoreState(state);
-                ++statistics.rejectedFrames;
-                if (restored) error = "OpenGL failed to map the gfx instance buffer";
-                return false;
+            if (destination == nullptr) return 2;
+            std::size_t sourceOffset = range.offset;
+            std::size_t destinationOffset = 0;
+            std::size_t remaining = range.count;
+            while (remaining > 0) {
+                const std::span<const BoxInstance> page = batch.boxPage(
+                    sourceOffset / InstanceBatch::kBoxesPerPage);
+                const std::size_t localOffset = sourceOffset % InstanceBatch::kBoxesPerPage;
+                const std::size_t pageCount = std::min(remaining, page.size() - localOffset);
+                std::memcpy(
+                    static_cast<std::byte*>(destination)
+                        + destinationOffset * sizeof(BoxInstance),
+                    page.data() + localOffset,
+                    pageCount * sizeof(BoxInstance));
+                sourceOffset += pageCount;
+                destinationOffset += pageCount;
+                remaining -= pageCount;
             }
-            std::memcpy(destination, boxes.data() + offset, countBytes);
             if (gl.unmapBuffer(kArrayBuffer) != GL_TRUE) {
-                uploadRing.invalidate(upload.slot);
-                const bool restored = restoreState(state);
-                ++statistics.rejectedFrames;
-                if (restored) error = "OpenGL reported a corrupted gfx instance buffer";
-                return false;
+                return 3;
             }
+            uploadedBytes += countBytes;
+            return 0;
+        };
+        int uploadFailure = 0;
+        if (partial) {
+            for (const DirtyRange range : dirtyRanges) {
+                uploadFailure = uploadRange(range);
+                if (uploadFailure != 0) break;
+            }
+        } else if (!boxes.empty()) {
+            uploadFailure = uploadRange({0, boxes.size()});
+        }
+        if (uploadFailure != 0) {
+            uploadRing.invalidate(upload.slot);
+            const bool restored = restoreState(state);
+            ++statistics.rejectedFrames;
+            if (uploadFailure == 1) ++statistics.capacityRejectedFrames;
+            if (restored) {
+                if (uploadFailure == 1) {
+                    error = "OpenGL gfx upload byte range exceeds GLintptr/GLsizeiptr";
+                } else if (uploadFailure == 2) {
+                    error = "OpenGL failed to map the gfx instance buffer";
+                } else {
+                    error = "OpenGL reported a corrupted gfx instance buffer";
+                }
+            }
+            return false;
         }
         uploadRing.markUploaded(upload.slot, batch.identity(), batch.revision());
         partialUpload = partial;
-        static_cast<void>(checkedMultiply(count, sizeof(BoxInstance), uploadedBytes));
         statistics.profile.cpuUploadNanoseconds = elapsedNanoseconds(uploadStarted);
     } else {
         statistics.profile.cpuUploadNanoseconds = 0;

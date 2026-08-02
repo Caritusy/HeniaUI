@@ -720,7 +720,7 @@ int main() {
     const InstanceBatch boxBatch = shapes.snapshot();
     OpenGlRenderDevice gfx;
     glEnable(0xFFFFFFFFU);
-    if (!gfx.initialize(1, 1)) {
+    if (!gfx.initialize(512, 1)) {
         fail("OpenGL gfx validation renderer did not initialize");
     }
     if (gfx.statistics().ignoredHostErrors == 0) {
@@ -794,9 +794,34 @@ int main() {
         fail("OpenGL independent-context gfx shutdown failed");
     }
 
+    for (std::size_t index = 1; index < 512; ++index) {
+        if (shapes.addBox({}) == ShapeBatch3D::kInvalidIndex) {
+            fail("OpenGL gfx paged expansion rejected a valid box");
+        }
+    }
+    const InstanceBatch expandedBoxBatch = shapes.snapshot();
+    if (!gfx.render(expandedBoxBatch, validView)) {
+        fail("OpenGL gfx paged expansion render failed");
+    }
+    glFinish();
+    BoxInstance sparseFirst = expandedBoxBatch.boxes()[0];
+    BoxInstance sparseLast = expandedBoxBatch.boxes()[511];
+    sparseFirst.hueOffset = 1.0F;
+    sparseLast.hueOffset = 2.0F;
+    static_cast<void>(shapes.updateBox(0, sparseFirst));
+    static_cast<void>(shapes.updateBox(511, sparseLast));
+    const InstanceBatch sparseBoxBatch = shapes.snapshot();
+    if (sparseBoxBatch.dirtyRanges().size() != 2
+        || !gfx.render(sparseBoxBatch, validView)) {
+        fail("OpenGL gfx sparse paged render failed");
+    }
+    glFinish();
+
     const OpenGlGfxStatistics gfxStatistics = gfx.statistics();
     if (gfxStatistics.invalidInputFrames != 1 || gfxStatistics.capacityRejectedFrames != 0
-        || gfxStatistics.drawCalls != 33 || gfxStatistics.fullInstanceUploads != 1
+        || gfxStatistics.drawCalls != 35 || gfxStatistics.fullInstanceUploads != 1
+        || gfxStatistics.partialInstanceUploads != 2
+        || gfxStatistics.uploadedInstanceBytes != 514U * sizeof(BoxInstance)
         || gfxStatistics.wrongContextCalls != 2 || gfxStatistics.ignoredHostErrors == 0
         || gfxStatistics.stateRestoreFailures != 0 || gfxStatistics.initializationFailures != 0) {
         fail("OpenGL gfx isolation statistics are incorrect");

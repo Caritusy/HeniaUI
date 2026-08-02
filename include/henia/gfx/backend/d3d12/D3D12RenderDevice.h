@@ -27,6 +27,7 @@ struct D3D12GfxStatistics final {
     std::uint64_t submittedInstances = 0;
     std::uint64_t fullInstanceUploads = 0;
     std::uint64_t partialInstanceUploads = 0;
+    std::uint64_t uploadedInstanceBytes = 0;
     std::uint64_t viewUpdates = 0;
     std::uint64_t depthFallbacks = 0;
     std::uint64_t rejectedFrames = 0;

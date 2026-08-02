@@ -99,7 +99,18 @@ changes become visible only after the outer dispatch completes.
 
 ## 3D instance pipeline
 
-`ShapeBatch3D` is a producer-side builder. `snapshot()` publishes shareable immutable storage containing `BoxInstance` values, an identity, a content revision, and a dirty range. View matrices and animation time are deliberately absent from the instance revision.
+`ShapeBatch3D` is a producer-side builder. `snapshot()` publishes shareable,
+immutable 256-instance pages containing `BoxInstance` values, an identity, a
+content revision, and an ordered set of non-overlapping dirty ranges. View
+matrices and animation time are deliberately absent from the instance revision.
+
+The producer page directory is copied when a published revision is still live,
+but box data is copied only for pages that are changed. Initial full replacement
+uses multi-page allocation slabs to keep cold-build allocation count bounded.
+The snapshot exposes a segmented `BoxInstanceView`; indexed reads and iteration
+are lock-free, and backends consume page spans directly. Stable snapshots share
+the exact same directory/pages and allocate nothing. `copiedBoxCount()` makes
+producer data-copy amplification observable in tests and benchmarks.
 
 The box fast path uses twelve fixed edges. Each edge is represented by two triangles generated from the vertex ID; the vertex shader projects the endpoints and expands them in viewport space. Consequently:
 
@@ -119,14 +130,17 @@ statistics. Fence failures quarantine their slots from future writes.
 
 Both full 2D uploads and full/partial 3D uploads use this fence-owned model with
 `GL_MAP_UNSYNCHRONIZED_BIT`; the bit is safe because selection has already proven
-that the chosen buffer is no longer referenced by an in-flight draw. A 3D dirty
-range is uploaded partially only when the selected safe slot contains the same
-batch identity at exactly the previous revision. Otherwise the renderer performs
-a full upload and increments `fullUploadFallbacks`. Statistics also expose
-uploaded bytes, slot exhaustion, and fence failures.
+that the chosen buffer is no longer referenced by an in-flight draw. 3D dirty
+ranges are uploaded separately only when the selected safe slot contains the
+same batch identity at exactly the previous revision. Sparse edits therefore do
+not map/copy the bounding interval between them. Otherwise the renderer performs
+a full page-by-page upload and increments `fullUploadFallbacks`. Statistics also
+expose uploaded bytes, slot exhaustion, and fence failures.
 
 The D3D12 backend permanently maps one upload buffer per fence-owned submission
-slot. It never waits or allocates from `record()`.
+slot. `record()` copies full pages or the exact dirty ranges into that buffer; it
+never waits or allocates. Both 3D backends validate and traverse the segmented
+pages in place rather than materializing a contiguous CPU vector.
 
 ## Host ownership
 
