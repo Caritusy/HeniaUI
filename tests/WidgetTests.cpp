@@ -43,9 +43,72 @@ struct ThrowingCallbacks final {
     void changed(double) { throw std::runtime_error("numeric callback"); }
 };
 
+struct RootReplacingCallback final {
+    void clicked() {
+        nestedDispatchRejected = !document->dispatch({.kind = InputEventKind::KeyDown, .key = KeyCode::Enter});
+        static_cast<void>(document->compose());
+        composedDuringCallback = true;
+        document->setRoot(std::make_unique<Panel>());
+    }
+
+    UiDocument* document = nullptr;
+    bool nestedDispatchRejected = false;
+    bool composedDuringCallback = false;
+};
+
+struct ReparentingCallback final {
+    void clicked() { accepted = document->reparentWidget(*widget, *newParent); }
+
+    UiDocument* document = nullptr;
+    Widget* widget = nullptr;
+    Widget* newParent = nullptr;
+    bool accepted = false;
+};
+
+struct RemovingCallback final {
+    void clicked() { accepted = document->removeWidget(*widget); }
+
+    UiDocument* document = nullptr;
+    Widget* widget = nullptr;
+    bool accepted = false;
+};
+
+struct RemoveOnValueChange final {
+    void changed(double) {
+        ++calls;
+        accepted = document->removeWidget(*widget);
+    }
+
+    UiDocument* document = nullptr;
+    Widget* widget = nullptr;
+    int calls = 0;
+    bool accepted = false;
+};
+
 static_assert(!noexcept(std::declval<Button&>().handleInput(std::declval<const InputEvent&>())));
 static_assert(!noexcept(std::declval<NumericInput&>().handleInput(std::declval<const InputEvent&>())));
 static_assert(!noexcept(std::declval<UiDocument&>().dispatch(std::declval<const InputEvent&>())));
+
+[[nodiscard]] Vec2 rectCenter(Rect rect) noexcept {
+    return {
+        (rect.min.x + rect.max.x) * 0.5F,
+        (rect.min.y + rect.max.y) * 0.5F,
+    };
+}
+
+void click(UiDocument& document, Vec2 position) {
+    static_cast<void>(document.dispatch({.kind = InputEventKind::PointerMove, .position = position}));
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::PointerDown,
+        .position = position,
+        .button = PointerButton::Primary,
+    }));
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::PointerUp,
+        .position = position,
+        .button = PointerButton::Primary,
+    }));
+}
 
 [[nodiscard]] FontHandle createFont(TextureStore& textures, FontStore& fonts) {
     const std::array<std::byte, 16> pixels{};
@@ -228,6 +291,112 @@ int main() {
         }));
         fail("Numeric callback exception was swallowed");
     } catch (const std::runtime_error&) {
+    }
+
+    {
+        UiDocument replacingDocument(painter);
+        replacingDocument.reserve(128, 16, CapacityPolicy::Fixed);
+        replacingDocument.setViewport({240.0F, 120.0F});
+        auto replacingRoot = std::make_unique<Panel>();
+        Button& replacingButton = replacingRoot->emplaceChild<Button>(
+            "Replace root",
+            ButtonStyle{.font = font});
+        RootReplacingCallback callback{.document = &replacingDocument};
+        replacingButton.setOnClick(
+            Callback<>::bind<RootReplacingCallback, &RootReplacingCallback::clicked>(callback));
+        const std::uint64_t oldRootIdentity = replacingRoot->identity();
+        replacingDocument.setRoot(std::move(replacingRoot));
+        static_cast<void>(replacingDocument.compose());
+        click(replacingDocument, rectCenter(replacingButton.frame()));
+        if (!callback.nestedDispatchRejected || !callback.composedDuringCallback
+            || replacingDocument.root() == nullptr
+            || replacingDocument.root()->identity() == oldRootIdentity
+            || replacingDocument.statistics().rejectedNestedDispatches != 1) {
+            fail("Root replacement or nested-dispatch policy is unsafe");
+        }
+        static_cast<void>(replacingDocument.compose());
+    }
+
+    {
+        UiDocument reparentingDocument(painter);
+        reparentingDocument.reserve(128, 16, CapacityPolicy::Fixed);
+        reparentingDocument.setViewport({240.0F, 160.0F});
+        auto reparentingRoot = std::make_unique<Panel>();
+        Panel& source = reparentingRoot->emplaceChild<Panel>();
+        Panel& destination = reparentingRoot->emplaceChild<Panel>();
+        Button& movingButton = source.emplaceChild<Button>("Move", ButtonStyle{.font = font});
+        ReparentingCallback callback{
+            .document = &reparentingDocument,
+            .widget = &movingButton,
+            .newParent = &destination,
+        };
+        movingButton.setOnClick(
+            Callback<>::bind<ReparentingCallback, &ReparentingCallback::clicked>(callback));
+        reparentingDocument.setRoot(std::move(reparentingRoot));
+        static_cast<void>(reparentingDocument.compose());
+        click(reparentingDocument, rectCenter(movingButton.frame()));
+        if (!callback.accepted || movingButton.parent() != &destination
+            || !source.children().empty() || destination.children().size() != 1
+            || movingButton.pressed()) {
+            fail("Reparenting an interacted widget was unsafe");
+        }
+        static_cast<void>(reparentingDocument.compose());
+    }
+
+    {
+        UiDocument removingDocument(painter);
+        removingDocument.reserve(128, 16, CapacityPolicy::Fixed);
+        removingDocument.setViewport({240.0F, 120.0F});
+        auto removingRoot = std::make_unique<Panel>();
+        Panel* rootPointer = removingRoot.get();
+        Button& removingButton = removingRoot->emplaceChild<Button>(
+            "Remove",
+            ButtonStyle{.font = font});
+        RemovingCallback callback{
+            .document = &removingDocument,
+            .widget = &removingButton,
+        };
+        removingButton.setOnClick(
+            Callback<>::bind<RemovingCallback, &RemovingCallback::clicked>(callback));
+        removingDocument.setRoot(std::move(removingRoot));
+        static_cast<void>(removingDocument.compose());
+        click(removingDocument, rectCenter(removingButton.frame()));
+        if (!callback.accepted || !rootPointer->children().empty()) {
+            fail("Removing a hovered, focused, captured widget was unsafe");
+        }
+    }
+
+    {
+        UiDocument focusDocument(painter);
+        focusDocument.reserve(256, 16, CapacityPolicy::Fixed);
+        focusDocument.setViewport({240.0F, 160.0F});
+        auto focusRoot = std::make_unique<Panel>(PanelStyle{.direction = LayoutDirection::Column});
+        Panel* rootPointer = focusRoot.get();
+        NumericInput& focusedNumeric = focusRoot->emplaceChild<NumericInput>(
+            1.0,
+            NumericInputStyle{.font = font});
+        Button& focusTarget = focusRoot->emplaceChild<Button>("Focus next", ButtonStyle{.font = font});
+        RemoveOnValueChange callback{
+            .document = &focusDocument,
+            .widget = &focusedNumeric,
+        };
+        focusedNumeric.setOnValueChanged(
+            Callback<double>::bind<RemoveOnValueChange, &RemoveOnValueChange::changed>(callback));
+        focusDocument.setRoot(std::move(focusRoot));
+        static_cast<void>(focusDocument.compose());
+
+        click(focusDocument, rectCenter(focusedNumeric.frame()));
+        static_cast<void>(focusDocument.dispatch({.kind = InputEventKind::KeyDown, .key = KeyCode::Backspace}));
+        static_cast<void>(focusDocument.dispatch({.kind = InputEventKind::TextInput, .text = U'2'}));
+        static_cast<void>(focusDocument.dispatch({
+            .kind = InputEventKind::PointerDown,
+            .position = rectCenter(focusTarget.frame()),
+            .button = PointerButton::Primary,
+        }));
+        if (!callback.accepted || callback.calls != 1 || rootPointer->children().size() != 1
+            || rootPointer->children().front().get() != &focusTarget || !focusTarget.focused()) {
+            fail("Focus-loss callback removal left stale interaction state");
+        }
     }
 
     std::cout << "HeniaUI retained widget tests passed\n";

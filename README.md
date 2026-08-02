@@ -104,6 +104,12 @@ target_link_libraries(MyApplication PRIVATE
 
 `UiDocument` retains layout and paint output until a dirty reason occurs. `Panel`, `Label`, `Button`, and `NumericInput` use direct context/function-pointer callbacks and platform-neutral input events. The Win32 adapter translates an existing host `WndProc` message stream without subclassing or owning the window.
 
+Widget interaction uses stable identities. Root replacement, child removal, and
+reparenting requested by callbacks are deferred until the outer dispatch ends;
+recursive dispatch is rejected and counted, while immediate `compose()` remains
+available to callbacks. The complete ordering contract is documented in
+[docs/architecture.md](docs/architecture.md#widget-mutation-and-callback-ordering).
+
 Client callback exceptions propagate through `handleInput`, `UiDocument::dispatch`,
 and `Win32InputAdapter::handleMessage`; hosts that require a non-throwing native
 message boundary should catch there. HeniaUI does not convert a throwing callback

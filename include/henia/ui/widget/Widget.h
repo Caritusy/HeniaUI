@@ -50,6 +50,8 @@ public:
     Widget& operator=(const Widget&) = delete;
 
     [[nodiscard]] WidgetKind kind() const noexcept;
+    // Stable and non-zero for this widget's lifetime.
+    [[nodiscard]] std::uint64_t identity() const noexcept;
     [[nodiscard]] Widget* parent() const noexcept;
     [[nodiscard]] std::span<const std::unique_ptr<Widget>> children() const noexcept;
     [[nodiscard]] Rect frame() const noexcept;
@@ -95,12 +97,14 @@ protected:
 private:
     friend class UiDocument;
 
+    [[nodiscard]] std::unique_ptr<Widget> detachChild(std::uint64_t identity) noexcept;
     void setHovered(bool hovered) noexcept;
     void setPressed(bool pressed) noexcept;
     void setFocused(bool focused) noexcept;
     void clearDirtyRecursive() noexcept;
 
     WidgetKind mKind = WidgetKind::Generic;
+    std::uint64_t mIdentity = 0;
     Widget* mParent = nullptr;
     Rect mFrame{};
     LayoutParameters mLayout{};

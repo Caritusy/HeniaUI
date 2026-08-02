@@ -15,6 +15,28 @@ the same rejection path rather than escaping a `noexcept` boundary.
 Text is decoded as strict UTF-8, shaped into cached text runs, and rendered from texture atlases. The Win32 font loader is optional and is not part of the platform-neutral core.
 The text-run cache has a configurable maximum entry count and reuses old slots, so rapidly changing telemetry strings cannot cause unbounded process-lifetime growth.
 
+### Widget mutation and callback ordering
+
+`UiDocument` identifies hovered, captured, and focused widgets by stable widget
+identity rather than by pointers retained across callbacks. `setRoot()`,
+`removeWidget()`, and `reparentWidget()` requests made by an input or focus
+callback are queued and applied in request order after the outer dispatch
+returns. Invalidated requests become no-ops when the queue is drained. If a
+callback throws, its queued structural changes are discarded and interaction
+state is cancelled before the exception propagates.
+
+Pointer-down establishes capture and then changes focus before delivering the
+pointer event. Focus cancellation clears the document's focus identity and the
+widget's focused flag before delivering `FocusLost`. Pointer-up delivers to the
+captured widget, releases its pressed/captured state, updates hover, and only
+then applies deferred mutations. Removing a subtree clears hover, capture, and
+focus flags before delivering `FocusLost` and destroying the subtree.
+
+Recursive `dispatch()` calls are rejected deterministically, return `false`,
+and increment `UiDocumentStatistics::rejectedNestedDispatches`. `compose()` is
+allowed during a callback and observes the current tree; queued structural
+changes become visible only after the outer dispatch completes.
+
 ## 3D instance pipeline
 
 `ShapeBatch3D` is a producer-side builder. `snapshot()` publishes shareable immutable storage containing `BoxInstance` values, an identity, a content revision, and a dirty range. View matrices and animation time are deliberately absent from the instance revision.
