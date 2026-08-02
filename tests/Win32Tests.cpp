@@ -42,7 +42,7 @@ int main() {
     Canvas& canvas = frame.begin();
     canvas.fillRect({{0.0F, 0.0F}, {220.0F, 40.0F}}, {}, 6.0F);
     painter.draw(canvas, font, 18.0F, {8.0F, 8.0F}, {}, "HeniaUI 0123456789");
-    const RenderPacket& packet = frame.finish();
+    const RenderPacket packet = frame.finish();
     if (packet.batches().size() != 1 || packet.instances().size() <= 1) {
         std::cerr << "Win32 text did not merge with the UI batch\n";
         return EXIT_FAILURE;

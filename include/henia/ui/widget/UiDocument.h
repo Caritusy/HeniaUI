@@ -14,6 +14,7 @@ struct UiDocumentStatistics final {
     std::uint64_t layoutPasses = 0;
     std::uint64_t paintPasses = 0;
     std::uint64_t cachedFrames = 0;
+    std::uint64_t rejectedCompositions = 0;
     std::uint64_t inputEvents = 0;
     std::uint64_t rejectedNestedDispatches = 0;
     std::uint64_t revision = 0;
@@ -26,7 +27,8 @@ public:
     void reserve(
         std::size_t commandCapacity,
         std::size_t batchCapacity,
-        CapacityPolicy capacityPolicy = CapacityPolicy::Grow);
+        CapacityPolicy capacityPolicy = CapacityPolicy::Grow,
+        std::size_t snapshotSlots = RenderPacketBuilder::kDefaultSnapshotSlots);
     void setRoot(std::unique_ptr<Widget> root);
     // Structural changes requested from an input/focus callback are applied in
     // request order after the outer callback returns. A false result means the
@@ -39,7 +41,8 @@ public:
     void setTheme(Theme theme) noexcept;
     [[nodiscard]] const Theme& theme() const noexcept;
 
-    [[nodiscard]] const RenderPacket& compose();
+    // Stable documents return a handle to the same immutable snapshot storage.
+    [[nodiscard]] RenderPacket compose();
     // Exceptions raised by client callbacks propagate to the host boundary.
     // Recursive dispatch is rejected and counted; compose() remains valid during
     // callbacks. Deferred structural mutations are discarded if a callback throws.

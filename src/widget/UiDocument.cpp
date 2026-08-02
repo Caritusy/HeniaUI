@@ -9,8 +9,9 @@ UiDocument::UiDocument(TextPainter& text, Theme theme) : mText(&text), mTheme(th
 void UiDocument::reserve(
     std::size_t commandCapacity,
     std::size_t batchCapacity,
-    CapacityPolicy capacityPolicy) {
-    mFrame.reserve(commandCapacity, batchCapacity, capacityPolicy);
+    CapacityPolicy capacityPolicy,
+    std::size_t snapshotSlots) {
+    mFrame.reserve(commandCapacity, batchCapacity, capacityPolicy, snapshotSlots);
 }
 
 void UiDocument::setRoot(std::unique_ptr<Widget> rootWidget) {
@@ -80,11 +81,15 @@ void UiDocument::setTheme(Theme themeValue) noexcept {
 
 const Theme& UiDocument::theme() const noexcept { return mTheme; }
 
-const RenderPacket& UiDocument::compose() {
+RenderPacket UiDocument::compose() {
     if (mRoot == nullptr || mViewport.x <= 0.0F || mViewport.y <= 0.0F) {
         Canvas& canvas = mFrame.begin();
         static_cast<void>(canvas);
-        return mFrame.finish();
+        RenderPacket packet = mFrame.finish();
+        if (!mFrame.lastBuildPublished()) {
+            ++mStatistics.rejectedCompositions;
+        }
+        return packet;
     }
 
     if (mRoot->layoutDirty()) {
@@ -96,7 +101,11 @@ const RenderPacket& UiDocument::compose() {
     if (mRoot->paintDirty() || mStatistics.revision == 0) {
         Canvas& canvas = mFrame.begin();
         mRoot->paint(canvas, *mText, mTheme);
-        const RenderPacket& packet = mFrame.finish();
+        RenderPacket packet = mFrame.finish();
+        if (!mFrame.lastBuildPublished()) {
+            ++mStatistics.rejectedCompositions;
+            return packet;
+        }
         mRoot->clearDirtyRecursive();
         ++mStatistics.paintPasses;
         ++mStatistics.revision;

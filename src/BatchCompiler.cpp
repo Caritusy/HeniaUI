@@ -18,27 +18,23 @@ constexpr std::uint32_t kNoTextureSlot = std::numeric_limits<std::uint32_t>::max
 
 } // namespace
 
-bool BatchCompiler::compile(const DisplayList& displayList, RenderPacket& output) const noexcept {
-    output.clear();
-    output.mStatistics.sourceCommands = displayList.size();
-
-    const auto rejectPacket = [&]() noexcept {
-        const std::uint64_t sourceCommands = output.mStatistics.sourceCommands;
-        output.clear();
-        output.mStatistics.sourceCommands = sourceCommands;
-        output.mStatistics.rejectedCommands = sourceCommands;
-        ++output.mRevision;
+bool BatchCompiler::compile(
+    const DisplayList& displayList,
+    RenderPacketBuilder& output) const noexcept {
+    if (!output.active()) {
         return false;
-    };
+    }
+    output.clear();
+    output.setSourceCommands(displayList.size());
 
     for (const DrawCommand& command : displayList.commands()) {
-        DrawBatch* batch = output.mBatches.empty() ? nullptr : &output.mBatches.back();
+        DrawBatch* batch = output.lastBatch();
         if (batch == nullptr || !compatible(*batch, command)) {
             batch = output.appendBatch(makeBatch(
                 command,
-                static_cast<std::uint32_t>(output.mInstances.size())));
+                static_cast<std::uint32_t>(output.instanceCount())));
             if (batch == nullptr) {
-                return rejectPacket();
+                return output.rejectPacket();
             }
         }
 
@@ -46,28 +42,23 @@ bool BatchCompiler::compile(const DisplayList& displayList, RenderPacket& output
         if (!resolveTextureSlot(*batch, command.texture, textureSlot)) {
             batch = output.appendBatch(makeBatch(
                 command,
-                static_cast<std::uint32_t>(output.mInstances.size())));
+                static_cast<std::uint32_t>(output.instanceCount())));
             if (batch == nullptr) {
-                return rejectPacket();
+                return output.rejectPacket();
             }
             const bool resolved = resolveTextureSlot(*batch, command.texture, textureSlot);
             if (!resolved) {
-                return rejectPacket();
+                return output.rejectPacket();
             }
         }
 
         if (!output.appendInstance(makeInstance(command, textureSlot))) {
-            return rejectPacket();
+            return output.rejectPacket();
         }
         ++batch->instanceCount;
     }
 
-    output.mStatistics.instances = output.mInstances.size();
-    output.mStatistics.batches = output.mBatches.size();
-    output.mStatistics.mergedCommands = output.mStatistics.instances > output.mStatistics.batches
-        ? output.mStatistics.instances - output.mStatistics.batches
-        : 0;
-    ++output.mRevision;
+    output.completePacket();
     return true;
 }
 

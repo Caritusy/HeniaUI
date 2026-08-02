@@ -34,16 +34,18 @@ canvas.fillRect(
     {0.03F, 0.05F, 0.08F, 1.0F},
     12.0F);
 
-const henia::ui::RenderPacket& packet = frame.finish();
+henia::ui::RenderPacket packet = frame.finish();
 ```
 
-`Frame::reserve` establishes reusable capacities. `CapacityPolicy::Fixed` makes
-recording and packet compilation reject overflow without allocating or throwing;
-the default `Grow` policy permits capacity growth but still converts allocation
-failure into rejected work. `begin` clears logical contents without releasing
-memory, and `finish` compiles the ordered display list while coalescing compatible
-commands. Rejected command and packet-overflow counts are observable through the
-canvas and packet statistics.
+`Frame::reserve` establishes reusable capacities and prewarms three immutable
+snapshot slots by default. `CapacityPolicy::Fixed` makes recording, packet
+compilation, and snapshot-slot exhaustion reject work without allocating or
+throwing; the default `Grow` policy permits capacity or slot growth but still
+converts allocation failure into rejected work. `begin` clears mutable builder
+contents without releasing memory, and `finish` publishes a cheap `RenderPacket`
+snapshot handle while coalescing compatible commands. Rejected command and
+packet-overflow counts are observable through the canvas and packet statistics;
+slot count, growth, and rejected builds are observable through `Frame`.
 
 ## Build
 

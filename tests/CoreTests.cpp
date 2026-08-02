@@ -8,9 +8,12 @@
 #include "henia/ui/text/Utf8.h"
 
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -20,6 +23,9 @@ using namespace henia::ui;
 
 static_assert(!std::is_move_constructible_v<OpenGlRenderer>);
 static_assert(!std::is_move_assignable_v<OpenGlRenderer>);
+static_assert(std::is_nothrow_copy_constructible_v<RenderPacket>);
+static_assert(std::is_nothrow_move_constructible_v<RenderPacket>);
+static_assert(!std::is_copy_constructible_v<RenderPacketBuilder>);
 
 [[noreturn]] void fail(std::string_view message) {
     std::cerr << "FAILED: " << message << '\n';
@@ -53,7 +59,7 @@ void testMixedUiUsesOneBatch() {
     canvas.glyphs(TextureHandle{1}, glyphs, {0.92F, 0.96F, 1.0F, 1.0F});
     canvas.fillRect({{20.0F, 270.0F}, {200.0F, 290.0F}}, {0.20F, 0.75F, 0.55F, 1.0F}, 5.0F);
 
-    const RenderPacket& packet = frame.finish();
+    const RenderPacket packet = frame.finish();
     require(packet.statistics().sourceCommands == 1027, "unexpected source command count");
     require(packet.instances().size() == 1027, "unexpected instance count");
     require(packet.batches().size() == 1, "shape and glyph work did not merge into one UI batch");
@@ -74,7 +80,7 @@ void testClipAndBlendPreserveOrdering() {
     require(canvas.popClip(), "clip pop failed");
     canvas.fillRect({{60.0F, 0.0F}, {90.0F, 30.0F}}, {}, 0.0F);
 
-    const RenderPacket& packet = frame.finish();
+    const RenderPacket packet = frame.finish();
     require(packet.batches().size() == 4, "clip or blend boundary was merged incorrectly");
     require(!packet.batches()[0].clip.enabled, "first batch unexpectedly clipped");
     require(packet.batches()[1].clip.enabled, "second batch lost its clip");
@@ -92,7 +98,7 @@ void testTextureTableOverflowStartsOneNewBatch() {
         canvas.image(TextureHandle{texture}, {{x, 0.0F}, {x + 8.0F, 8.0F}});
     }
 
-    const RenderPacket& packet = frame.finish();
+    const RenderPacket packet = frame.finish();
     require(packet.batches().size() == 2, "texture table overflow did not start exactly one new batch");
     require(packet.batches()[0].textureCount == DrawBatch::kTextureCapacity, "first texture table was not filled");
     require(packet.batches()[1].textureCount == 1, "overflow texture was not retained");
@@ -154,13 +160,150 @@ void testFixedCapacityOverflowIsRejected() {
     displayList.reserve(2);
     DrawCommand command{};
     require(displayList.append(command) && displayList.append(command), "test commands were not recorded");
-    RenderPacket packet;
-    packet.reserve(1, 1, CapacityPolicy::Fixed);
+    RenderPacketBuilder builder;
+    builder.reserve(1, 1, CapacityPolicy::Fixed);
+    require(builder.begin(), "packet builder did not acquire a snapshot slot");
     BatchCompiler compiler;
-    require(!compiler.compile(displayList, packet), "fixed packet overflow unexpectedly compiled");
+    require(!compiler.compile(displayList, builder), "fixed packet overflow unexpectedly compiled");
+    const RenderPacket packet = builder.publish();
     require(packet.instances().empty() && packet.batches().empty(), "packet overflow published partial work");
     require(packet.statistics().sourceCommands == 2 && packet.statistics().rejectedCommands == 2,
         "packet overflow statistics are incorrect");
+}
+
+void testPacketSnapshotsRemainImmutable() {
+    Frame frame;
+    frame.reserve(16, 4, CapacityPolicy::Fixed);
+
+    Canvas& firstCanvas = frame.begin();
+    firstCanvas.fillRect({{1.0F, 2.0F}, {3.0F, 4.0F}}, {0.25F, 0.5F, 0.75F, 1.0F});
+    const RenderPacket first = frame.finish();
+    const DrawInstance original = first.instances().front();
+    const std::uint64_t identity = first.identity();
+    const std::uint64_t revision = first.revision();
+
+    for (int frameIndex = 0; frameIndex < 8; ++frameIndex) {
+        Canvas& canvas = frame.begin();
+        for (int instanceIndex = 0; instanceIndex <= frameIndex; ++instanceIndex) {
+            const float x = static_cast<float>(frameIndex * 10 + instanceIndex);
+            canvas.fillRect({{x, x}, {x + 1.0F, x + 1.0F}}, {});
+        }
+        const RenderPacket next = frame.finish();
+        require(next.revision() > revision, "new snapshot revision did not advance");
+        require(first.identity() == identity && first.revision() == revision,
+            "old snapshot identity or revision changed");
+        require(first.instances().size() == 1 && first.instances().front().bounds == original.bounds
+                && first.instances().front().color == original.color,
+            "old snapshot storage was mutated by a later composition");
+    }
+
+    const RenderPacket stable = frame.finish();
+    require(stable.identity() == frame.packet().identity()
+            && stable.revision() == frame.packet().revision(),
+        "stable frame did not reuse snapshot storage");
+    require(frame.snapshotSlotCount() == RenderPacketBuilder::kDefaultSnapshotSlots
+            && frame.snapshotSlotGrowths() == 0,
+        "warmed fixed snapshot pool unexpectedly grew");
+
+    RenderPacket survivingSnapshot;
+    {
+        Frame temporaryFrame;
+        temporaryFrame.reserve(4, 2, CapacityPolicy::Fixed);
+        temporaryFrame.begin().fillRect({{7.0F, 8.0F}, {9.0F, 10.0F}}, {});
+        survivingSnapshot = temporaryFrame.finish();
+    }
+    require(survivingSnapshot.instances().size() == 1
+            && survivingSnapshot.instances().front().bounds.min == Vec2{7.0F, 8.0F},
+        "snapshot storage did not outlive its producer frame");
+}
+
+void testFixedSnapshotPoolRejectsExhaustion() {
+    Frame frame;
+    frame.reserve(8, 2, CapacityPolicy::Fixed, 2);
+
+    frame.begin().fillRect({{1.0F, 0.0F}, {2.0F, 1.0F}}, {});
+    const RenderPacket first = frame.finish();
+    frame.begin().fillRect({{2.0F, 0.0F}, {3.0F, 1.0F}}, {});
+    const RenderPacket second = frame.finish();
+    frame.begin().fillRect({{3.0F, 0.0F}, {4.0F, 1.0F}}, {});
+    const RenderPacket rejected = frame.finish();
+
+    require(first.identity() != second.identity(), "concurrent snapshots shared mutable storage");
+    require(rejected.identity() == second.identity() && rejected.revision() == second.revision(),
+        "fixed snapshot exhaustion replaced the last valid packet");
+    require(frame.snapshotSlotCount() == 2 && frame.snapshotSlotGrowths() == 0
+            && frame.rejectedFrames() == 1 && !frame.lastBuildPublished(),
+        "fixed snapshot exhaustion was not reported deterministically");
+}
+
+void testPacketSnapshotsSupportConcurrentConsumption() {
+    Frame frame;
+    frame.reserve(96, 4, CapacityPolicy::Grow);
+    std::mutex publicationMutex;
+    RenderPacket published;
+    std::atomic_bool producerDone = false;
+    std::atomic_bool failed = false;
+    std::uint64_t consumedSnapshots = 0;
+
+    std::thread consumer([&]() {
+        for (;;) {
+            RenderPacket snapshot;
+            {
+                const std::scoped_lock lock(publicationMutex);
+                snapshot = published;
+            }
+            if (!snapshot) {
+                if (producerDone.load(std::memory_order_acquire)) {
+                    return;
+                }
+                std::this_thread::yield();
+                continue;
+            }
+            ++consumedSnapshots;
+            const std::uint64_t identity = snapshot.identity();
+            const std::uint64_t revision = snapshot.revision();
+            const std::span<const DrawInstance> instances = snapshot.instances();
+            const std::size_t count = instances.size();
+            const float marker = instances.empty() ? 0.0F : instances.front().bounds.min.x;
+            std::this_thread::yield();
+            if (snapshot.identity() != identity || snapshot.revision() != revision
+                || snapshot.instances().size() != count
+                || snapshot.statistics().instances != count) {
+                failed.store(true, std::memory_order_relaxed);
+                return;
+            }
+            for (const DrawInstance& instance : snapshot.instances()) {
+                if (instance.bounds.min.x != marker) {
+                    failed.store(true, std::memory_order_relaxed);
+                    return;
+                }
+            }
+            if (producerDone.load(std::memory_order_acquire)) {
+                return;
+            }
+        }
+    });
+
+    for (int frameIndex = 1; frameIndex <= 2000; ++frameIndex) {
+        Canvas& canvas = frame.begin();
+        const int count = 1 + frameIndex % 64;
+        const float marker = static_cast<float>(frameIndex);
+        for (int index = 0; index < count; ++index) {
+            canvas.fillRect({
+                {marker, static_cast<float>(index)},
+                {marker + 1.0F, static_cast<float>(index + 1)},
+            }, {});
+        }
+        RenderPacket snapshot = frame.finish();
+        {
+            const std::scoped_lock lock(publicationMutex);
+            published = std::move(snapshot);
+        }
+    }
+    producerDone.store(true, std::memory_order_release);
+    consumer.join();
+    require(consumedSnapshots != 0 && !failed.load(std::memory_order_relaxed),
+        "concurrent consumer observed a mutated packet snapshot");
 }
 
 void testUtf8Validation() {
@@ -224,7 +367,7 @@ void testTextRunsAreCachedAndBatched() {
     Canvas& canvas = frame.begin();
     canvas.fillRect({{0.0F, 0.0F}, {100.0F, 40.0F}}, {}, 4.0F);
     painter.draw(canvas, font, 20.0F, {4.0F, 4.0F}, {}, "AVA");
-    const RenderPacket& packet = frame.finish();
+    const RenderPacket packet = frame.finish();
     require(packet.instances().size() == 4, "text run did not emit three glyph instances");
     require(packet.batches().size() == 1, "text and shape did not share one batch");
 }
@@ -238,6 +381,9 @@ int main() {
     testWarmFrameDoesNotGrow();
     testNestedClipIntersection();
     testFixedCapacityOverflowIsRejected();
+    testPacketSnapshotsRemainImmutable();
+    testFixedSnapshotPoolRejectsExhaustion();
+    testPacketSnapshotsSupportConcurrentConsumption();
     testUtf8Validation();
     testTextRunsAreCachedAndBatched();
     std::cout << "HeniaUI core tests passed\n";

@@ -128,7 +128,7 @@ int main() {
         GlyphQuad{{{40.0F, 40.0F}, {88.0F, 88.0F}}, {{0.0F, 0.0F}, {1.0F, 1.0F}}},
     };
     canvas.glyphs(atlas, glyphs, {1.0F, 1.0F, 1.0F, 0.4F});
-    const RenderPacket& packet = frame.finish();
+    const RenderPacket packet = frame.finish();
     if (packet.batches().size() != 1) {
         fail("Test UI did not compile into one batch");
     }

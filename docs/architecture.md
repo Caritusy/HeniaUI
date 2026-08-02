@@ -4,7 +4,22 @@ HeniaUI deliberately separates retained 2D interface work from general-purpose 3
 
 ## 2D retained pipeline
 
-`UiDocument` owns a widget tree. Layout and paint dirtiness propagate to the root. A stable document returns the same immutable `RenderPacket`, so both CPU composition and backend instance upload are skipped. `Canvas` remains available as the low-level immediate recorder for custom widgets and generated diagrams.
+`UiDocument` owns a widget tree. Layout and paint dirtiness propagate to the root. A stable document returns a cheap handle to the same immutable `RenderPacket` storage, so both CPU composition and backend instance upload are skipped. `Canvas` remains available as the low-level immediate recorder for custom widgets and generated diagrams.
+
+`RenderPacketBuilder` is the single-producer mutable compile target;
+`RenderPacket` is a copyable, immutable snapshot handle. A builder owns a pool of
+three prewarmed storage slots by default. Atomic reader counts keep a published
+slot unavailable until every snapshot handle has released it, allowing producer
+composition and render-thread reads to overlap without locks or data races.
+Grow mode adds a slot only when all warmed slots are held. Fixed mode rejects the
+new build deterministically and keeps the last published packet; `UiDocument`
+keeps paint dirtiness set so the composition is retried. Each publication has a
+storage identity and a pool-monotonic revision. Stable retained frames reuse both,
+which preserves backend upload-revision caching and provides the lifetime model
+needed by future subtree caching. Snapshot spans remain valid only while their
+`RenderPacket` handle is alive; handles keep the underlying pool alive even after
+the producing `Frame` is destroyed. The host still supplies the synchronization
+that publishes a handle between threads.
 
 `Frame::reserve(..., CapacityPolicy::Fixed)` establishes a no-growth recording
 contract. Display-list overflow is rejected at the canvas, while packet-capacity
@@ -72,7 +87,13 @@ Statistics separate producer build time, instance upload time, draw-recording/su
 
 ## Threading
 
-The producer mutates `ShapeBatch3D` outside the render callback and publishes a new snapshot only when content changes. The callback consumes a `const InstanceBatch&` and `const RenderPacket&`. Routine submission has no event bus, `std::function`, per-primitive allocation, or lock wait.
+The producer mutates `ShapeBatch3D` or `RenderPacketBuilder` outside the render
+callback and publishes a new immutable snapshot only when content changes. The
+callback consumes a `const InstanceBatch&`, owns a `RenderPacket` snapshot handle,
+and passes it to a backend by const reference. Routine submission has no event
+bus, `std::function`, per-primitive allocation, or lock wait. Packet handles may
+be copied across threads through the host's normal publication primitive; all
+access through a published handle is read-only.
 
 Widget callbacks may throw. Exceptions propagate through the input-dispatch and
 Win32-adapter APIs so the host can choose its own exception boundary; no callback

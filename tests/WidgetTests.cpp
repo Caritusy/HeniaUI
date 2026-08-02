@@ -178,15 +178,16 @@ int main() {
     numeric.setOnValueChanged(Callback<double>::bind<ValueRecorder, &ValueRecorder::changed>(recorder));
     document.setRoot(std::move(root));
 
-    const RenderPacket& first = document.compose();
+    const RenderPacket first = document.compose();
     UiDocumentStatistics statistics = document.statistics();
     if (statistics.layoutPasses != 1 || statistics.paintPasses != 1 || first.batches().size() != 1) {
         fail("First retained document composition is incorrect");
     }
     const std::uint64_t firstInstances = first.statistics().instances;
-    const RenderPacket& cached = document.compose();
+    const RenderPacket cached = document.compose();
     statistics = document.statistics();
-    if (&cached != &first || statistics.cachedFrames != 1 || statistics.paintPasses != 1
+    if (cached.identity() != first.identity() || cached.revision() != first.revision()
+        || statistics.cachedFrames != 1 || statistics.paintPasses != 1
         || cached.statistics().instances != firstInstances) {
         fail("Stable retained document did not reuse the render packet");
     }
@@ -197,7 +198,7 @@ int main() {
         (buttonFrame.min.y + buttonFrame.max.y) * 0.5F,
     };
     static_cast<void>(document.dispatch({.kind = InputEventKind::PointerMove, .position = center}));
-    const RenderPacket& hovered = document.compose();
+    const RenderPacket hovered = document.compose();
     statistics = document.statistics();
     if (!button.hovered() || statistics.layoutPasses != 1 || statistics.paintPasses != 2
         || hovered.batches().size() != 1) {
@@ -396,6 +397,45 @@ int main() {
         if (!callback.accepted || callback.calls != 1 || rootPointer->children().size() != 1
             || rootPointer->children().front().get() != &focusTarget || !focusTarget.focused()) {
             fail("Focus-loss callback removal left stale interaction state");
+        }
+    }
+
+    {
+        UiDocument snapshotDocument(painter);
+        snapshotDocument.reserve(128, 16, CapacityPolicy::Fixed, 2);
+        snapshotDocument.setViewport({240.0F, 120.0F});
+        auto snapshotRoot = std::make_unique<Panel>();
+        Button& snapshotButton = snapshotRoot->emplaceChild<Button>(
+            "Snapshot pressure",
+            ButtonStyle{.font = font});
+        snapshotDocument.setRoot(std::move(snapshotRoot));
+        RenderPacket firstSnapshot = snapshotDocument.compose();
+        const Vec2 position = rectCenter(snapshotButton.frame());
+
+        static_cast<void>(snapshotDocument.dispatch({
+            .kind = InputEventKind::PointerMove,
+            .position = position,
+        }));
+        const RenderPacket secondSnapshot = snapshotDocument.compose();
+        static_cast<void>(snapshotDocument.dispatch({
+            .kind = InputEventKind::PointerDown,
+            .position = position,
+            .button = PointerButton::Primary,
+        }));
+        const RenderPacket rejectedSnapshot = snapshotDocument.compose();
+        if (rejectedSnapshot.identity() != secondSnapshot.identity()
+            || rejectedSnapshot.revision() != secondSnapshot.revision()
+            || !snapshotButton.paintDirty()) {
+            fail("Rejected snapshot publication lost retained paint dirtiness");
+        }
+
+        firstSnapshot = {};
+        const RenderPacket recoveredSnapshot = snapshotDocument.compose();
+        if (recoveredSnapshot.revision() <= secondSnapshot.revision()
+            || snapshotButton.paintDirty()
+            || snapshotDocument.statistics().paintPasses != 3
+            || snapshotDocument.statistics().rejectedCompositions != 1) {
+            fail("Retained document did not retry a rejected snapshot publication");
         }
     }
 
