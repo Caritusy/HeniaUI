@@ -1391,6 +1391,7 @@ bool D3D12Renderer::Implementation::record(
         return false;
     }
     bool usesTextures = false;
+    bool hasVisibleBatches = false;
     for (const DrawBatch& batch : packet.batches()) {
         const std::size_t first = batch.firstInstance;
         const std::size_t count = batch.instanceCount;
@@ -1401,15 +1402,21 @@ bool D3D12Renderer::Implementation::record(
             error = "Render packet batch instance/texture range is invalid";
             return false;
         }
-        usesTextures = usesTextures || batch.textureCount != 0;
         if (batch.clip.enabled) {
-            ScissorRect scissor{};
-            if (!makeScissorRect(batch.clip.area, width, height, scissor)) {
+            if (!validateRect(batch.clip.area, "clip.area").empty()) {
                 ++statistics.rejectedFrames;
                 ++statistics.invalidInputFrames;
                 error = "clip.area is invalid";
                 return false;
             }
+            ScissorRect scissor{};
+            const bool visible = batch.instanceCount != 0
+                && makeScissorRect(batch.clip.area, width, height, scissor);
+            hasVisibleBatches = hasVisibleBatches || visible;
+            usesTextures = usesTextures || (visible && batch.textureCount != 0);
+        } else {
+            hasVisibleBatches = hasVisibleBatches || batch.instanceCount != 0;
+            usesTextures = usesTextures || (batch.instanceCount != 0 && batch.textureCount != 0);
         }
     }
     if (!pollTextureUploads()) {
@@ -1421,7 +1428,7 @@ bool D3D12Renderer::Implementation::record(
         return false;
     }
     Submission& submission = submissions[submissionSlot];
-    if (packet.instances().empty() || packet.batches().empty()) {
+    if (packet.instances().empty() || packet.batches().empty() || !hasVisibleBatches) {
         for (ComPtr<ID3D12Resource>& retained : submission.retainedTextures) {
             retained.Reset();
         }
@@ -1430,6 +1437,10 @@ bool D3D12Renderer::Implementation::record(
         return true;
     }
     for (const DrawBatch& batch : packet.batches()) {
+        if (batch.clip.enabled) {
+            ScissorRect scissor{};
+            if (!makeScissorRect(batch.clip.area, width, height, scissor)) continue;
+        }
         for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
             const TextureHandle handle = batch.textures[slot];
             if (!handle.valid() || handle.value() > textures.size()
@@ -1450,6 +1461,10 @@ bool D3D12Renderer::Implementation::record(
         retained.Reset();
     }
     for (const DrawBatch& batch : packet.batches()) {
+        if (batch.clip.enabled) {
+            ScissorRect scissor{};
+            if (!makeScissorRect(batch.clip.area, width, height, scissor)) continue;
+        }
         for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
             const std::uint32_t index = batch.textures[slot].value() - 1U;
             submission.retainedTextures[index] = textures[index].resource;
@@ -1496,6 +1511,11 @@ bool D3D12Renderer::Implementation::record(
     for (std::size_t batchIndex = 0; batchIndex < packet.batches().size(); ++batchIndex) {
         const DrawBatch& batch = packet.batches()[batchIndex];
         if (batch.instanceCount == 0) {
+            continue;
+        }
+        ScissorRect converted{};
+        if (batch.clip.enabled
+            && !makeScissorRect(batch.clip.area, width, height, converted)) {
             continue;
         }
         if (activeBlend != batch.blend) {
@@ -1547,8 +1567,6 @@ bool D3D12Renderer::Implementation::record(
 
         D3D12_RECT scissor{};
         if (batch.clip.enabled) {
-            ScissorRect converted{};
-            static_cast<void>(makeScissorRect(batch.clip.area, width, height, converted));
             scissor = {converted.left, converted.top, converted.right, converted.bottom};
         } else {
             scissor = {0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};

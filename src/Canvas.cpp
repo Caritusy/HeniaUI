@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace henia::ui {
 namespace {
@@ -20,18 +21,54 @@ namespace {
 
 } // namespace
 
+Canvas::ClipScope::ClipScope(Canvas& canvas, std::uint64_t token) noexcept
+    : mCanvas(&canvas), mToken(token) {}
+
+Canvas::ClipScope::~ClipScope() { static_cast<void>(reset()); }
+
+Canvas::ClipScope::ClipScope(ClipScope&& other) noexcept
+    : mCanvas(std::exchange(other.mCanvas, nullptr)),
+      mToken(std::exchange(other.mToken, 0)) {}
+
+Canvas::ClipScope& Canvas::ClipScope::operator=(ClipScope&& other) noexcept {
+    if (this == &other) return *this;
+    static_cast<void>(reset());
+    mCanvas = std::exchange(other.mCanvas, nullptr);
+    mToken = std::exchange(other.mToken, 0);
+    return *this;
+}
+
+bool Canvas::ClipScope::active() const noexcept { return mCanvas != nullptr; }
+
+bool Canvas::ClipScope::reset() noexcept {
+    Canvas* canvas = std::exchange(mCanvas, nullptr);
+    const std::uint64_t token = std::exchange(mToken, 0);
+    return canvas != nullptr && canvas->releaseClip(token);
+}
+
 Canvas::Canvas(DisplayList& displayList) noexcept : mDisplayList(&displayList) {}
 
 void Canvas::reset() noexcept {
     mClipDepth = 0;
     mBlendMode = BlendMode::PremultipliedAlpha;
     mRejectedCommands = 0;
+    mClippedCommands = 0;
     mInvalidInputCommands = 0;
     mCapacityRejectedCommands = 0;
     mLastError = {};
 }
 
-bool Canvas::pushClip(Rect rect) noexcept {
+Canvas::ClipScope Canvas::scopedClip(Rect rect) noexcept {
+    std::uint64_t token = mNextClipToken++;
+    if (token == 0) {
+        token = mNextClipToken++;
+    }
+    return pushClip(rect, token) ? ClipScope(*this, token) : ClipScope{};
+}
+
+bool Canvas::pushClip(Rect rect) noexcept { return pushClip(rect, 0); }
+
+bool Canvas::pushClip(Rect rect, std::uint64_t token) noexcept {
     if (const std::string_view issue = validateRect(rect, "clip.area"); !issue.empty()) {
         rejectInvalid(issue);
         return false;
@@ -43,17 +80,26 @@ bool Canvas::pushClip(Rect rect) noexcept {
         return false;
     }
 
+    ClipEntry entry{
+        .clip = {rect, true},
+        .token = token,
+    };
     if (mClipDepth != 0) {
-        rect = intersect(mClips[mClipDepth - 1].area, rect);
-        if (!rect.valid()) {
-            ++mRejectedCommands;
-            ++mInvalidInputCommands;
-            mLastError = "clip.intersection";
-            return false;
+        const ClipEntry& parent = mClips[mClipDepth - 1];
+        if (parent.empty) {
+            entry.clip = parent.clip;
+            entry.empty = true;
+        } else {
+            const Rect intersection = intersect(parent.clip.area, rect);
+            if (intersection.valid()) {
+                entry.clip.area = intersection;
+            } else {
+                entry.empty = true;
+            }
         }
     }
 
-    mClips[mClipDepth++] = ClipRect{rect, true};
+    mClips[mClipDepth++] = entry;
     mLastError = {};
     return true;
 }
@@ -66,8 +112,27 @@ bool Canvas::popClip() noexcept {
         return false;
     }
     --mClipDepth;
+    collapseReleasedClips();
     mLastError = {};
     return true;
+}
+
+bool Canvas::releaseClip(std::uint64_t token) noexcept {
+    if (token == 0) return false;
+    for (std::size_t index = mClipDepth; index > 0; --index) {
+        ClipEntry& entry = mClips[index - 1];
+        if (entry.token != token) continue;
+        entry.releasePending = true;
+        collapseReleasedClips();
+        return true;
+    }
+    return false;
+}
+
+void Canvas::collapseReleasedClips() noexcept {
+    while (mClipDepth != 0 && mClips[mClipDepth - 1].releasePending) {
+        --mClipDepth;
+    }
 }
 
 void Canvas::line(
@@ -270,6 +335,8 @@ std::size_t Canvas::clipDepth() const noexcept { return mClipDepth; }
 
 std::uint64_t Canvas::rejectedCommands() const noexcept { return mRejectedCommands; }
 
+std::uint64_t Canvas::clippedCommands() const noexcept { return mClippedCommands; }
+
 std::uint64_t Canvas::invalidInputCommands() const noexcept { return mInvalidInputCommands; }
 
 std::uint64_t Canvas::capacityRejectedCommands() const noexcept {
@@ -285,7 +352,14 @@ void Canvas::rejectInvalid(std::string_view field) noexcept {
 }
 
 ClipRect Canvas::currentClip() const noexcept {
-    return mClipDepth == 0 ? ClipRect{} : mClips[mClipDepth - 1];
+    return mClipDepth == 0 ? ClipRect{} : mClips[mClipDepth - 1].clip;
+}
+
+bool Canvas::commandOverlapsCurrentClip(const DrawCommand& command) const noexcept {
+    if (mClipDepth == 0) return true;
+    const ClipEntry& entry = mClips[mClipDepth - 1];
+    if (entry.empty) return false;
+    return commandOverlapsClip(command);
 }
 
 void Canvas::append(DrawCommand command) noexcept {
@@ -293,6 +367,12 @@ void Canvas::append(DrawCommand command) noexcept {
     command.clip = currentClip();
     if (const std::string_view issue = validateDrawCommand(command); !issue.empty()) {
         rejectInvalid(issue);
+        return;
+    }
+    if (!commandOverlapsCurrentClip(command)) {
+        ++mRejectedCommands;
+        ++mClippedCommands;
+        mLastError = {};
         return;
     }
     if (!mDisplayList->append(command)) {

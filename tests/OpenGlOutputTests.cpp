@@ -534,6 +534,34 @@ int main() {
         fail("OpenGL invalid-input rejection issued work or used capacity statistics");
     }
 
+    Frame offscreenFrame;
+    Canvas& offscreenCanvas = offscreenFrame.begin();
+    {
+        Canvas::ClipScope clip = offscreenCanvas.scopedClip(
+            {{200.25F, 200.25F}, {220.75F, 220.75F}});
+        if (!clip.active()) fail("OpenGL off-screen clip setup failed");
+        offscreenCanvas.fillRect(
+            {{202.0F, 202.0F}, {218.0F, 218.0F}},
+            {1.0F, 1.0F, 1.0F, 1.0F});
+    }
+    const RenderPacket offscreenPacket = offscreenFrame.finish();
+    if (offscreenPacket.instances().size() != 1 || offscreenPacket.batches().size() != 1) {
+        fail("OpenGL off-screen scissor packet compiled unexpectedly");
+    }
+    const OpenGlRenderStatistics beforeOffscreen = renderer.statistics();
+    if (!renderer.render(
+            offscreenPacket,
+            henia::test::kVisualWidth,
+            henia::test::kVisualHeight)) {
+        fail("OpenGL rejected a valid fully off-screen scissor");
+    }
+    const OpenGlRenderStatistics afterOffscreen = renderer.statistics();
+    if (afterOffscreen.frames != beforeOffscreen.frames + 1U
+        || afterOffscreen.drawCalls != beforeOffscreen.drawCalls
+        || afterOffscreen.instanceUploads != beforeOffscreen.instanceUploads) {
+        fail("OpenGL submitted or uploaded a fully off-screen scissor batch");
+    }
+
     HiddenOpenGlContext wrongContext;
     if (!wrongContext.ready()) {
         fail("Unable to create the wrong-context validation context");
@@ -811,7 +839,7 @@ int main() {
         glFinish();
     }
     const OpenGlRenderStatistics statistics = renderer.statistics();
-    if (statistics.frames != 98 || statistics.instanceUploads != 65
+    if (statistics.frames != 99 || statistics.instanceUploads != 65
         || statistics.textureUploads != 3
         || statistics.fullTextureUploads != 2 || statistics.partialTextureUploads != 1
         || statistics.uploadedTextureBytes != 33 || statistics.gpuTextureBytes != 16

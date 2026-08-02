@@ -149,6 +149,98 @@ void testNestedClipIntersection() {
         "nested clip was not intersected");
 }
 
+void testFailureSafeClippingAndCulling() {
+    DisplayList displayList;
+    Canvas canvas(displayList);
+
+    require(canvas.pushClip({{0.0F, 0.0F}, {100.0F, 100.0F}}),
+        "outer manual clip push failed");
+    Canvas::ClipScope invalid = canvas.scopedClip({{5.0F, 5.0F}, {4.0F, 6.0F}});
+    require(!invalid.active() && canvas.clipDepth() == 1,
+        "failed scoped clip changed the parent depth");
+
+    Canvas::ClipScope empty = canvas.scopedClip({{120.0F, 120.0F}, {140.0F, 140.0F}});
+    require(empty.active() && canvas.clipDepth() == 2,
+        "empty intersection was not represented on the clip stack");
+    canvas.fillRect({{120.0F, 120.0F}, {130.0F, 130.0F}}, {});
+    require(displayList.size() == 0 && canvas.clippedCommands() == 1,
+        "drawing under an empty clip was not a recording no-op");
+    require(empty.reset() && canvas.clipDepth() == 1,
+        "empty clip scope did not restore its parent");
+
+    canvas.fillRect({{103.0F, 10.0F}, {120.0F, 20.0F}}, {});
+    canvas.line({104.0F, 30.0F}, {104.0F, 60.0F}, {}, 2.0F, LineCap::Butt);
+    canvas.image(TextureHandle{1}, {{100.25F, 82.0F}, {110.0F, 90.0F}});
+    canvas.fillRect({{101.0F, 70.0F}, {110.0F, 80.0F}}, {});
+    canvas.line({102.0F, 30.0F}, {102.0F, 60.0F}, {}, 2.0F, LineCap::Butt);
+    canvas.line({103.0F, 103.0F}, {110.0F, 110.0F}, {}, 2.0F, LineCap::Butt);
+    require(displayList.size() == 3 && canvas.clippedCommands() == 4,
+        "fully clipped commands were not rejected or AA-fringe commands were over-culled");
+    require(canvas.popClip() && canvas.clipDepth() == 0,
+        "parent manual clip was corrupted by nested scoped clipping");
+
+    Canvas::ClipScope outer = canvas.scopedClip({{0.0F, 0.0F}, {80.0F, 80.0F}});
+    Canvas::ClipScope inner = canvas.scopedClip({{10.0F, 10.0F}, {70.0F, 70.0F}});
+    require(outer.reset() && canvas.clipDepth() == 2,
+        "out-of-order scope release removed an active child");
+    require(inner.reset() && canvas.clipDepth() == 0,
+        "out-of-order scope release did not collapse pending parents safely");
+
+    require(canvas.pushClip({{0.0F, 0.0F}, {80.0F, 80.0F}}),
+        "manual parent setup failed");
+    Canvas::ClipScope manuallyPopped = canvas.scopedClip({{10.0F, 10.0F}, {70.0F, 70.0F}});
+    require(canvas.popClip() && !manuallyPopped.reset() && canvas.clipDepth() == 1,
+        "scope release after a manual pop removed its parent");
+    require(canvas.popClip(), "manual parent cleanup failed");
+    require(!canvas.popClip() && canvas.clipDepth() == 0
+            && canvas.lastError() == "clipDepth.underflow",
+        "clip stack underflow was not rejected without changing depth");
+
+    DisplayList deepDisplayList;
+    Canvas deepCanvas(deepDisplayList);
+    std::array<Canvas::ClipScope, Canvas::kMaximumClipDepth> scopes{};
+    for (Canvas::ClipScope& scope : scopes) {
+        scope = deepCanvas.scopedClip({{0.0F, 0.0F}, {10.0F, 10.0F}});
+        require(scope.active(), "maximum supported clip depth was rejected early");
+    }
+    Canvas::ClipScope overflow = deepCanvas.scopedClip({{0.0F, 0.0F}, {10.0F, 10.0F}});
+    require(!overflow.active() && deepCanvas.clipDepth() == Canvas::kMaximumClipDepth
+            && deepCanvas.capacityRejectedCommands() == 1,
+        "clip depth overflow did not fail without changing the stack");
+    for (std::size_t index = scopes.size(); index > 0; --index) {
+        require(scopes[index - 1].reset(), "clip scope did not release at maximum depth");
+    }
+    require(deepCanvas.clipDepth() == 0, "maximum-depth scopes did not balance");
+
+    DisplayList rawDisplayList;
+    DrawCommand clipped{};
+    clipped.bounds = {{20.0F, 20.0F}, {30.0F, 30.0F}};
+    clipped.clip = {{{0.0F, 0.0F}, {10.0F, 10.0F}}, true};
+    require(rawDisplayList.append(clipped), "raw clipped-command setup failed");
+    RenderPacketBuilder builder;
+    builder.reserve(1, 1, CapacityPolicy::Fixed);
+    require(builder.begin(), "raw clipped-command packet could not begin");
+    BatchCompiler compiler;
+    require(compiler.compile(rawDisplayList, builder), "raw clipped command failed compilation");
+    const RenderPacket packet = builder.publish();
+    require(packet.statistics().sourceCommands == 1 && packet.instances().empty()
+            && packet.batches().empty(),
+        "a fully clipped raw display-list command entered the render packet");
+
+    RenderPacketBuilder retainedBuilder;
+    retainedBuilder.reserve(1, 1, CapacityPolicy::Fixed);
+    require(retainedBuilder.begin(), "retained clipped-command packet could not begin");
+    const std::array segments{
+        DisplayListSegment{.identity = 27, .revision = 1, .commands = rawDisplayList.commands()},
+    };
+    require(compiler.compile(segments, retainedBuilder),
+        "retained fully clipped command failed compilation");
+    const RenderPacket retainedPacket = retainedBuilder.publish();
+    require(retainedPacket.statistics().sourceCommands == 1
+            && retainedPacket.instances().empty() && retainedPacket.batches().empty(),
+        "a fully clipped retained command entered the render packet");
+}
+
 void testTightAnalyticGeometryAndLineStyles() {
     static_assert(sizeof(DrawCommand) == 88, "source commands must remain compact");
     static_assert(sizeof(DrawInstance) == 60, "compiled instances must remain compact");
@@ -294,6 +386,15 @@ void testInvalidGeometryAndCheckedArithmetic() {
         "fractional scissor did not floor minima, ceil maxima, and clamp");
     require(!makeScissorRect({{0.0F, 0.0F}, {nan, 2.0F}}, 8, 8, scissor),
         "non-finite scissor was accepted");
+    scissor = {1, 2, 3, 4};
+    require(!makeScissorRect({{8.25F, 1.0F}, {9.0F, 2.0F}}, 8, 8, scissor)
+            && scissor.left == 0 && scissor.top == 0
+            && scissor.right == 0 && scissor.bottom == 0,
+        "fully off-screen scissor was not rejected as an empty rectangle");
+    require(makeScissorRect({{0.25F, 0.25F}, {0.75F, 0.75F}}, 8, 8, scissor)
+            && scissor.left == 0 && scissor.top == 0
+            && scissor.right == 1 && scissor.bottom == 1,
+        "subpixel scissor lost fractional edge coverage");
     const std::uint32_t maximumViewport = static_cast<std::uint32_t>(
         std::numeric_limits<std::int32_t>::max());
     require(makeScissorRect(
@@ -660,6 +761,7 @@ int main() {
     testTextureTableOverflowStartsOneNewBatch();
     testWarmFrameDoesNotGrow();
     testNestedClipIntersection();
+    testFailureSafeClippingAndCulling();
     testTightAnalyticGeometryAndLineStyles();
     testFixedCapacityOverflowIsRejected();
     testInvalidGeometryAndCheckedArithmetic();

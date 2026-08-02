@@ -317,6 +317,31 @@ int main() {
         fail("D3D12 invalid-input rejection issued work or used capacity statistics");
     }
 
+    Frame offscreenFrame;
+    Canvas& offscreenCanvas = offscreenFrame.begin();
+    {
+        Canvas::ClipScope clip = offscreenCanvas.scopedClip(
+            {{200.25F, 200.25F}, {220.75F, 220.75F}});
+        if (!clip.active()) fail("D3D12 off-screen clip setup failed");
+        offscreenCanvas.fillRect(
+            {{202.0F, 202.0F}, {218.0F, 218.0F}},
+            {1.0F, 1.0F, 1.0F, 1.0F});
+    }
+    const RenderPacket offscreenPacket = offscreenFrame.finish();
+    if (offscreenPacket.instances().size() != 1 || offscreenPacket.batches().size() != 1) {
+        fail("D3D12 off-screen scissor packet compiled unexpectedly");
+    }
+    const D3D12RenderStatistics beforeOffscreen = renderer.statistics();
+    if (!renderer.record(offscreenPacket, *commandList.Get(), 1, width, height)) {
+        fail("D3D12 rejected a valid fully off-screen scissor");
+    }
+    const D3D12RenderStatistics afterOffscreen = renderer.statistics();
+    if (afterOffscreen.recordedFrames != beforeOffscreen.recordedFrames + 1U
+        || afterOffscreen.drawCalls != beforeOffscreen.drawCalls
+        || afterOffscreen.instanceUploads != beforeOffscreen.instanceUploads) {
+        fail("D3D12 submitted or uploaded a fully off-screen scissor batch");
+    }
+
     ComPtr<ID3D12Fence> submissionReuseFence;
     if (FAILED(device->CreateFence(
             0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&submissionReuseFence)))) {
