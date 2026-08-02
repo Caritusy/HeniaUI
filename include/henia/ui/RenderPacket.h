@@ -39,6 +39,8 @@ struct PacketStatistics final {
     std::uint64_t batches = 0;
     std::uint64_t mergedCommands = 0;
     std::uint64_t rejectedCommands = 0;
+    std::uint64_t invalidInputCommands = 0;
+    std::uint64_t capacityRejectedCommands = 0;
     std::uint64_t instanceCapacityGrowths = 0;
     std::uint64_t batchCapacityGrowths = 0;
 };
@@ -120,7 +122,7 @@ private:
     [[nodiscard]] bool appendInstance(const DrawInstance& instance) noexcept;
     [[nodiscard]] DrawBatch* appendBatch(const DrawBatch& batch) noexcept;
     void setSourceCommands(std::size_t count) noexcept;
-    [[nodiscard]] bool rejectPacket() noexcept;
+    [[nodiscard]] bool rejectPacket(bool invalidInput = false) noexcept;
     void completePacket() noexcept;
 
     std::shared_ptr<detail::RenderPacketPool> mPool;

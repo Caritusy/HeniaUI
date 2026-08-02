@@ -1,4 +1,6 @@
 #include "henia/gfx/backend/opengl/OpenGlRenderDevice.h"
+#include "henia/CheckedArithmetic.h"
+#include "henia/gfx/Validation.h"
 
 #include "../FixedError.h"
 #include "OpenGlUploadRing.h"
@@ -372,10 +374,13 @@ bool OpenGlRenderDevice::Implementation::initialize(
     std::size_t requestedCapacity,
     std::size_t requestedUploadSlots) {
     if (ready) return true;
+    std::size_t instanceBytes = 0;
     if (wglGetCurrentContext() == nullptr || requestedCapacity == 0 || requestedUploadSlots == 0
         || requestedCapacity > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())
-        || requestedUploadSlots > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
-        error = "OpenGL 3.3 context and non-zero box/upload capacities are required";
+        || requestedUploadSlots > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())
+        || !checkedMultiply(requestedCapacity, sizeof(BoxInstance), instanceBytes)
+        || instanceBytes > static_cast<std::size_t>(std::numeric_limits<GlSize>::max())) {
+        error = "OpenGL gfx configuration has an invalid box/upload capacity";
         return false;
     }
     uploadSlots.resize(requestedUploadSlots);
@@ -437,7 +442,7 @@ bool OpenGlRenderDevice::Implementation::initialize(
         gl.bindBuffer(kArrayBuffer, slot.buffer);
         gl.bufferData(
             kArrayBuffer,
-            static_cast<GlSize>(requestedCapacity * sizeof(BoxInstance)),
+            static_cast<GlSize>(instanceBytes),
             nullptr,
             kDynamicDraw);
     }
@@ -458,11 +463,37 @@ bool OpenGlRenderDevice::Implementation::render(
     ++statistics.frames;
     statistics.profile.cpuBuildNanoseconds = batch.cpuBuildNanoseconds();
     const std::span<const BoxInstance> boxes = batch.boxes();
-    if (!ready || wglGetCurrentContext() == nullptr || view.viewport.x <= 0.0F || view.viewport.y <= 0.0F
-        || boxes.size() > capacity || boxes.size() > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
+    if (!ready || wglGetCurrentContext() == nullptr) {
         ++statistics.rejectedFrames;
-        error = "OpenGL gfx render rejected an invalid context, view, or instance count";
+        error = "OpenGL gfx render context is unavailable";
         return false;
+    }
+    if (const std::string_view issue = validate(view); !issue.empty()) {
+        ++statistics.rejectedFrames;
+        ++statistics.invalidInputFrames;
+        error.assign(issue.data(), issue.size());
+        return false;
+    }
+    if (const std::string_view issue = validate(batch.depthState()); !issue.empty()) {
+        ++statistics.rejectedFrames;
+        ++statistics.invalidInputFrames;
+        error.assign(issue.data(), issue.size());
+        return false;
+    }
+    if (boxes.size() > capacity
+        || boxes.size() > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
+        ++statistics.rejectedFrames;
+        ++statistics.capacityRejectedFrames;
+        error = "OpenGL gfx instance count exceeds boxCapacity";
+        return false;
+    }
+    for (const BoxInstance& box : boxes) {
+        if (const std::string_view issue = validate(box); !issue.empty()) {
+            ++statistics.rejectedFrames;
+            ++statistics.invalidInputFrames;
+            error.assign(issue.data(), issue.size());
+            return false;
+        }
     }
 
     const bool partialRequested = batch.revision() > 1 && batch.dirtyCount() > 0
@@ -498,11 +529,23 @@ bool OpenGlRenderDevice::Implementation::render(
         const std::size_t offset = partial ? batch.dirtyOffset() : 0;
         const std::size_t count = partial ? batch.dirtyCount() : boxes.size();
         if (count > 0) {
+            std::size_t offsetBytes = 0;
+            std::size_t countBytes = 0;
+            if (!checkedMultiply(offset, sizeof(BoxInstance), offsetBytes)
+                || !checkedMultiply(count, sizeof(BoxInstance), countBytes)
+                || offsetBytes > static_cast<std::size_t>(std::numeric_limits<GlIntPtr>::max())
+                || countBytes > static_cast<std::size_t>(std::numeric_limits<GlSize>::max())) {
+                restoreState(state);
+                ++statistics.rejectedFrames;
+                ++statistics.capacityRejectedFrames;
+                error = "OpenGL gfx upload byte range exceeds GLintptr/GLsizeiptr";
+                return false;
+            }
             constexpr GLbitfield flags = kMapWriteBit | kMapUnsynchronizedBit;
             void* destination = gl.mapBufferRange(
                 kArrayBuffer,
-                static_cast<GlIntPtr>(offset * sizeof(BoxInstance)),
-                static_cast<GlSize>(count * sizeof(BoxInstance)),
+                static_cast<GlIntPtr>(offsetBytes),
+                static_cast<GlSize>(countBytes),
                 flags);
             if (destination == nullptr) {
                 restoreState(state);
@@ -510,7 +553,7 @@ bool OpenGlRenderDevice::Implementation::render(
                 error = "OpenGL failed to map the gfx instance buffer";
                 return false;
             }
-            std::memcpy(destination, boxes.data() + offset, count * sizeof(BoxInstance));
+            std::memcpy(destination, boxes.data() + offset, countBytes);
             if (gl.unmapBuffer(kArrayBuffer) != GL_TRUE) {
                 uploadRing.invalidate(upload.slot);
                 restoreState(state);
@@ -521,7 +564,7 @@ bool OpenGlRenderDevice::Implementation::render(
         }
         uploadRing.markUploaded(upload.slot, batch.identity(), batch.revision());
         partialUpload = partial;
-        uploadedBytes = count * sizeof(BoxInstance);
+        static_cast<void>(checkedMultiply(count, sizeof(BoxInstance), uploadedBytes));
         statistics.profile.cpuUploadNanoseconds = elapsedNanoseconds(uploadStarted);
     } else {
         statistics.profile.cpuUploadNanoseconds = 0;

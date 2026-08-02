@@ -1,4 +1,6 @@
 #include "henia/gfx/ShapeBatch3D.h"
+#include "henia/CheckedArithmetic.h"
+#include "henia/gfx/Validation.h"
 
 #include <algorithm>
 #include <atomic>
@@ -48,26 +50,53 @@ void ShapeBatch3D::clear() {
     mPendingBuildNanoseconds += elapsedNanoseconds(started);
 }
 
-void ShapeBatch3D::replaceBoxes(std::span<const BoxInstance> boxesValue) {
+bool ShapeBatch3D::replaceBoxes(std::span<const BoxInstance> boxesValue) {
+    for (const BoxInstance& box : boxesValue) {
+        if (const std::string_view issue = validate(box); !issue.empty()) {
+            ++mRejectedBoxChanges;
+            mLastError = issue;
+            return false;
+        }
+    }
     const auto started = std::chrono::steady_clock::now();
     ensureWritable();
+    const std::size_t oldSize = mBoxes->size();
     mBoxes->assign(boxesValue.begin(), boxesValue.end());
-    markDirty(0, std::max(mBoxes->size(), boxesValue.size()));
+    markDirty(0, std::max(oldSize, boxesValue.size()));
     mPendingBuildNanoseconds += elapsedNanoseconds(started);
+    mLastError = {};
+    return true;
 }
 
 std::size_t ShapeBatch3D::addBox(BoxInstance box) {
+    if (const std::string_view issue = validate(box); !issue.empty()) {
+        ++mRejectedBoxChanges;
+        mLastError = issue;
+        return kInvalidIndex;
+    }
     const auto started = std::chrono::steady_clock::now();
     ensureWritable();
     const std::size_t index = mBoxes->size();
     mBoxes->push_back(std::move(box));
     markDirty(index, 1);
     mPendingBuildNanoseconds += elapsedNanoseconds(started);
+    mLastError = {};
     return index;
 }
 
 bool ShapeBatch3D::updateBox(std::size_t index, BoxInstance box) {
-    if (index >= mBoxes->size() || (*mBoxes)[index] == box) {
+    if (index >= mBoxes->size()) {
+        ++mRejectedBoxChanges;
+        mLastError = "box.index";
+        return false;
+    }
+    if (const std::string_view issue = validate(box); !issue.empty()) {
+        ++mRejectedBoxChanges;
+        mLastError = issue;
+        return false;
+    }
+    if ((*mBoxes)[index] == box) {
+        mLastError = {};
         return false;
     }
     const auto started = std::chrono::steady_clock::now();
@@ -75,12 +104,24 @@ bool ShapeBatch3D::updateBox(std::size_t index, BoxInstance box) {
     (*mBoxes)[index] = std::move(box);
     markDirty(index, 1);
     mPendingBuildNanoseconds += elapsedNanoseconds(started);
+    mLastError = {};
     return true;
 }
 
 std::size_t ShapeBatch3D::size() const noexcept { return mBoxes->size(); }
-void ShapeBatch3D::setDepthState(DepthState state) noexcept { mDepthState = state; }
+bool ShapeBatch3D::setDepthState(DepthState state) noexcept {
+    if (const std::string_view issue = validate(state); !issue.empty()) {
+        ++mRejectedBoxChanges;
+        mLastError = issue;
+        return false;
+    }
+    mDepthState = state;
+    mLastError = {};
+    return true;
+}
 DepthState ShapeBatch3D::depthState() const noexcept { return mDepthState; }
+std::uint64_t ShapeBatch3D::rejectedBoxChanges() const noexcept { return mRejectedBoxChanges; }
+std::string_view ShapeBatch3D::lastError() const noexcept { return mLastError; }
 
 InstanceBatch ShapeBatch3D::snapshot() {
     if (mDirty) {
@@ -108,7 +149,10 @@ void ShapeBatch3D::ensureWritable() {
 }
 
 void ShapeBatch3D::markDirty(std::size_t offset, std::size_t count) noexcept {
-    const std::size_t end = offset + count;
+    std::size_t end = 0;
+    if (!checkedAdd(offset, count, end)) {
+        end = std::numeric_limits<std::size_t>::max();
+    }
     if (!mDirty) {
         mDirtyOffset = offset;
         mDirtyEnd = end;

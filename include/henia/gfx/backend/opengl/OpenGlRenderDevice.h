@@ -22,6 +22,8 @@ struct OpenGlGfxStatistics final {
     std::uint64_t viewUpdates = 0;
     std::uint64_t depthFallbacks = 0;
     std::uint64_t rejectedFrames = 0;
+    std::uint64_t invalidInputFrames = 0;
+    std::uint64_t capacityRejectedFrames = 0;
     RenderProfile profile{};
 };
 

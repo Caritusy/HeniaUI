@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <type_traits>
 #include <vector>
 
@@ -110,6 +111,14 @@ int main() {
     std::array<std::byte, 16> alpha{};
     alpha.fill(std::byte{0xFF});
 
+    D3D12Renderer oversizedRenderer;
+    if (oversizedRenderer.initialize(
+            *device.Get(),
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            {.instanceCapacity = static_cast<std::size_t>(std::numeric_limits<UINT>::max())
+                    / sizeof(DrawInstance) + 1U})) {
+        fail("D3D12 renderer accepted a buffer-view byte capacity above UINT");
+    }
     D3D12Renderer renderer;
     if (!renderer.initialize(
             *device.Get(),
@@ -214,6 +223,22 @@ int main() {
             nullptr,
             IID_PPV_ARGS(&commandList)))) {
         fail("Unable to create D3D12 recording objects");
+    }
+
+    if (renderer.record(
+            packet,
+            *commandList.Get(),
+            0,
+            std::numeric_limits<std::uint32_t>::max(),
+            height)
+        || renderer.lastError() != "viewportWidth/viewportHeight is outside the LONG range") {
+        fail("D3D12 renderer accepted an out-of-range viewport");
+    }
+    const D3D12RenderStatistics invalidStatistics = renderer.statistics();
+    if (invalidStatistics.invalidInputFrames != 1
+        || invalidStatistics.capacityRejectedFrames != 0
+        || invalidStatistics.drawCalls != 0 || invalidStatistics.instanceUploads != 0) {
+        fail("D3D12 invalid-input rejection issued work or used capacity statistics");
     }
 
     constexpr std::array<float, 4> clearColor{0.0F, 0.0F, 0.0F, 1.0F};

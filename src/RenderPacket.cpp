@@ -351,12 +351,17 @@ void RenderPacketBuilder::setSourceCommands(std::size_t count) noexcept {
     mStorage->statistics.sourceCommands = count;
 }
 
-bool RenderPacketBuilder::rejectPacket() noexcept {
+bool RenderPacketBuilder::rejectPacket(bool invalidInput) noexcept {
     assert(mStorage != nullptr);
     const std::uint64_t sourceCommands = mStorage->statistics.sourceCommands;
     clear();
     mStorage->statistics.sourceCommands = sourceCommands;
     mStorage->statistics.rejectedCommands = sourceCommands;
+    if (invalidInput) {
+        mStorage->statistics.invalidInputCommands = 1;
+    } else {
+        mStorage->statistics.capacityRejectedCommands = sourceCommands;
+    }
     return false;
 }
 

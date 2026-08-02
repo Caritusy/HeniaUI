@@ -1,4 +1,6 @@
 #include "henia/gfx/backend/d3d12/D3D12RenderDevice.h"
+#include "henia/CheckedArithmetic.h"
+#include "henia/gfx/Validation.h"
 
 #include "../FixedError.h"
 
@@ -249,6 +251,7 @@ struct D3D12RenderDevice::Implementation final {
     D3D12GfxConfiguration configuration{};
     D3D12GfxStatistics statistics{};
     henia::detail::FixedError error;
+    std::uint32_t instanceBufferBytes = 0;
     bool ready = false;
 
     [[nodiscard]] bool initialize(ID3D12Device& device, D3D12GfxConfiguration value);
@@ -268,12 +271,16 @@ struct D3D12RenderDevice::Implementation final {
 bool D3D12RenderDevice::Implementation::initialize(
     ID3D12Device& device, D3D12GfxConfiguration value) {
     if (ready) return true;
+    std::size_t instanceBytes = 0;
     if (value.boxCapacity == 0 || value.submissionCapacity == 0 || value.sampleCount == 0
-        || value.boxCapacity > static_cast<std::size_t>(std::numeric_limits<UINT>::max())) {
-        error = "D3D12 gfx configuration is invalid";
+        || value.renderTargetFormat == DXGI_FORMAT_UNKNOWN
+        || !checkedMultiply(value.boxCapacity, sizeof(BoxInstance), instanceBytes)
+        || instanceBytes > static_cast<std::size_t>(std::numeric_limits<UINT>::max())) {
+        error = "D3D12 gfx configuration has an invalid box capacity, sample count, or format";
         return false;
     }
     configuration = value;
+    instanceBufferBytes = static_cast<std::uint32_t>(instanceBytes);
     submissions.resize(configuration.submissionCapacity);
     ComPtr<ID3DBlob> vertexShader;
     ComPtr<ID3DBlob> pixelShader;
@@ -313,7 +320,7 @@ bool D3D12RenderDevice::Implementation::initialize(
         }
     }
 
-    const std::uint64_t bufferBytes = static_cast<std::uint64_t>(configuration.boxCapacity * sizeof(BoxInstance));
+    const std::uint64_t bufferBytes = instanceBufferBytes;
     const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
     const D3D12_RESOURCE_DESC buffer = bufferDescription(bufferBytes);
     for (Submission& submission : submissions) {
@@ -379,12 +386,37 @@ bool D3D12RenderDevice::Implementation::record(
     ++statistics.recordedFrames;
     statistics.profile.cpuBuildNanoseconds = batch.cpuBuildNanoseconds();
     const std::span<const BoxInstance> boxes = batch.boxes();
-    if (!ready || submissionSlot >= submissions.size() || boxes.size() > configuration.boxCapacity
-        || boxes.size() > static_cast<std::size_t>(std::numeric_limits<UINT>::max())
-        || view.viewport.x <= 0.0F || view.viewport.y <= 0.0F) {
+    if (!ready || submissionSlot >= submissions.size()) {
         ++statistics.rejectedFrames;
-        error = "D3D12 gfx recording rejected an invalid slot, view, or instance count";
+        error = "D3D12 gfx renderer or submissionSlot is unavailable";
         return false;
+    }
+    if (const std::string_view issue = validate(view); !issue.empty()) {
+        ++statistics.rejectedFrames;
+        ++statistics.invalidInputFrames;
+        error.assign(issue.data(), issue.size());
+        return false;
+    }
+    if (const std::string_view issue = validate(batch.depthState()); !issue.empty()) {
+        ++statistics.rejectedFrames;
+        ++statistics.invalidInputFrames;
+        error.assign(issue.data(), issue.size());
+        return false;
+    }
+    if (boxes.size() > configuration.boxCapacity
+        || boxes.size() > static_cast<std::size_t>(std::numeric_limits<UINT>::max())) {
+        ++statistics.rejectedFrames;
+        ++statistics.capacityRejectedFrames;
+        error = "D3D12 gfx instance count exceeds boxCapacity";
+        return false;
+    }
+    for (const BoxInstance& box : boxes) {
+        if (const std::string_view issue = validate(box); !issue.empty()) {
+            ++statistics.rejectedFrames;
+            ++statistics.invalidInputFrames;
+            error.assign(issue.data(), issue.size());
+            return false;
+        }
     }
     Submission& submission = submissions[submissionSlot];
     if (submission.uploadedIdentity != batch.identity() || submission.uploadedRevision != batch.revision()) {
@@ -392,14 +424,26 @@ bool D3D12RenderDevice::Implementation::record(
         const bool partial = submission.uploadedIdentity == batch.identity()
             && submission.uploadedRevision + 1 == batch.revision()
             && batch.dirtyCount() > 0
-            && batch.dirtyOffset() + batch.dirtyCount() <= boxes.size();
+            && batch.dirtyOffset() <= boxes.size()
+            && batch.dirtyCount() <= boxes.size() - batch.dirtyOffset();
         const std::size_t offset = partial ? batch.dirtyOffset() : 0;
         const std::size_t count = partial ? batch.dirtyCount() : boxes.size();
         if (count > 0) {
+            std::size_t offsetBytes = 0;
+            std::size_t countBytes = 0;
+            if (!checkedMultiply(offset, sizeof(BoxInstance), offsetBytes)
+                || !checkedMultiply(count, sizeof(BoxInstance), countBytes)
+                || offsetBytes > instanceBufferBytes
+                || countBytes > instanceBufferBytes - offsetBytes) {
+                ++statistics.rejectedFrames;
+                ++statistics.capacityRejectedFrames;
+                error = "D3D12 gfx upload byte range exceeds the instance buffer";
+                return false;
+            }
             std::memcpy(
-                submission.mapped + offset * sizeof(BoxInstance),
+                submission.mapped + offsetBytes,
                 boxes.data() + offset,
-                count * sizeof(BoxInstance));
+                countBytes);
         }
         submission.uploadedIdentity = batch.identity();
         submission.uploadedRevision = batch.revision();
@@ -434,13 +478,17 @@ bool D3D12RenderDevice::Implementation::record(
     commandList.SetGraphicsRoot32BitConstants(0, sizeof(constants) / sizeof(std::uint32_t), &constants, 0);
     const D3D12_VIEWPORT viewport{0.0F, 0.0F, view.viewport.x, view.viewport.y, 0.0F, 1.0F};
     const D3D12_RECT scissor{
-        0, 0, static_cast<LONG>(view.viewport.x), static_cast<LONG>(view.viewport.y)};
+        0,
+        0,
+        static_cast<LONG>(std::ceil(view.viewport.x)),
+        static_cast<LONG>(std::ceil(view.viewport.y)),
+    };
     commandList.RSSetViewports(1, &viewport);
     commandList.RSSetScissorRects(1, &scissor);
     commandList.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const D3D12_VERTEX_BUFFER_VIEW bufferView{
         submission.instances->GetGPUVirtualAddress(),
-        static_cast<UINT>(configuration.boxCapacity * sizeof(BoxInstance)),
+        instanceBufferBytes,
         static_cast<UINT>(sizeof(BoxInstance)),
     };
     commandList.IASetVertexBuffers(0, 1, &bufferView);
@@ -464,6 +512,7 @@ void D3D12RenderDevice::Implementation::shutdown() noexcept {
     submissions.clear();
     for (ComPtr<ID3D12PipelineState>& pipeline : pipelines) pipeline.Reset();
     rootSignature.Reset();
+    instanceBufferBytes = 0;
     ready = false;
 }
 

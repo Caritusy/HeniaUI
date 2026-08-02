@@ -1,4 +1,5 @@
 #include "henia/ui/Canvas.h"
+#include "henia/ui/Validation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,11 +25,20 @@ void Canvas::reset() noexcept {
     mClipDepth = 0;
     mBlendMode = BlendMode::PremultipliedAlpha;
     mRejectedCommands = 0;
+    mInvalidInputCommands = 0;
+    mCapacityRejectedCommands = 0;
+    mLastError = {};
 }
 
 bool Canvas::pushClip(Rect rect) noexcept {
-    if (!rect.valid() || mClipDepth == mClips.size()) {
+    if (const std::string_view issue = validateRect(rect, "clip.area"); !issue.empty()) {
+        rejectInvalid(issue);
+        return false;
+    }
+    if (mClipDepth == mClips.size()) {
         ++mRejectedCommands;
+        ++mCapacityRejectedCommands;
+        mLastError = "clipDepth.capacity";
         return false;
     }
 
@@ -36,28 +46,38 @@ bool Canvas::pushClip(Rect rect) noexcept {
         rect = intersect(mClips[mClipDepth - 1].area, rect);
         if (!rect.valid()) {
             ++mRejectedCommands;
+            ++mInvalidInputCommands;
+            mLastError = "clip.intersection";
             return false;
         }
     }
 
     mClips[mClipDepth++] = ClipRect{rect, true};
+    mLastError = {};
     return true;
 }
 
 bool Canvas::popClip() noexcept {
     if (mClipDepth == 0) {
         ++mRejectedCommands;
+        ++mInvalidInputCommands;
+        mLastError = "clipDepth.underflow";
         return false;
     }
     --mClipDepth;
+    mLastError = {};
     return true;
 }
 
 void Canvas::line(Vec2 from, Vec2 to, Color color, float thickness) noexcept {
-    if (!visible(color) || thickness <= 0.0F || from == to) {
-        ++mRejectedCommands;
-        return;
-    }
+    if (!std::isfinite(from.x)) return rejectInvalid("from.x");
+    if (!std::isfinite(from.y)) return rejectInvalid("from.y");
+    if (!std::isfinite(to.x)) return rejectInvalid("to.x");
+    if (!std::isfinite(to.y)) return rejectInvalid("to.y");
+    if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
+    if (!std::isfinite(thickness) || thickness <= 0.0F) return rejectInvalid("thickness");
+    if (!visible(color)) return rejectInvalid("color.alpha");
+    if (from == to) return rejectInvalid("line.endpoints");
 
     DrawCommand command{};
     command.kind = PrimitiveKind::Line;
@@ -74,9 +94,13 @@ void Canvas::polyline(
     Color color,
     float thickness,
     bool closed) noexcept {
-    if (points.size() < 2 || !visible(color) || thickness <= 0.0F) {
-        ++mRejectedCommands;
-        return;
+    if (points.size() < 2) return rejectInvalid("points.size");
+    if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
+    if (!std::isfinite(thickness) || thickness <= 0.0F) return rejectInvalid("thickness");
+    if (!visible(color)) return rejectInvalid("color.alpha");
+    for (const Vec2 point : points) {
+        if (!std::isfinite(point.x)) return rejectInvalid("points.x");
+        if (!std::isfinite(point.y)) return rejectInvalid("points.y");
     }
 
     for (std::size_t index = 1; index < points.size(); ++index) {
@@ -88,10 +112,10 @@ void Canvas::polyline(
 }
 
 void Canvas::fillRect(Rect rect, Color color, float rounding) noexcept {
-    if (!rect.valid() || !visible(color)) {
-        ++mRejectedCommands;
-        return;
-    }
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) return rejectInvalid(issue);
+    if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
+    if (!std::isfinite(rounding)) return rejectInvalid("rounding");
+    if (!visible(color)) return rejectInvalid("color.alpha");
 
     DrawCommand command{};
     command.kind = PrimitiveKind::SolidRect;
@@ -102,10 +126,11 @@ void Canvas::fillRect(Rect rect, Color color, float rounding) noexcept {
 }
 
 void Canvas::strokeRect(Rect rect, Color color, float rounding, float thickness) noexcept {
-    if (!rect.valid() || !visible(color) || thickness <= 0.0F) {
-        ++mRejectedCommands;
-        return;
-    }
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) return rejectInvalid(issue);
+    if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
+    if (!std::isfinite(rounding)) return rejectInvalid("rounding");
+    if (!std::isfinite(thickness) || thickness <= 0.0F) return rejectInvalid("thickness");
+    if (!visible(color)) return rejectInvalid("color.alpha");
 
     DrawCommand command{};
     command.kind = PrimitiveKind::StrokeRect;
@@ -117,10 +142,10 @@ void Canvas::strokeRect(Rect rect, Color color, float rounding, float thickness)
 }
 
 void Canvas::image(TextureHandle texture, Rect rect, Color tint) noexcept {
-    if (!texture.valid() || !rect.valid() || !visible(tint)) {
-        ++mRejectedCommands;
-        return;
-    }
+    if (!texture.valid()) return rejectInvalid("texture");
+    if (const std::string_view issue = validateRect(rect, "bounds"); !issue.empty()) return rejectInvalid(issue);
+    if (const std::string_view issue = validateColor(tint); !issue.empty()) return rejectInvalid(issue);
+    if (!visible(tint)) return rejectInvalid("color.alpha");
 
     DrawCommand command{};
     command.kind = PrimitiveKind::Image;
@@ -142,14 +167,21 @@ void Canvas::glyphs(
     Vec2 origin,
     std::span<const GlyphQuad> glyphQuads,
     Color color) noexcept {
-    if (!atlas.valid() || !visible(color)) {
-        ++mRejectedCommands;
-        return;
-    }
+    if (!atlas.valid()) return rejectInvalid("atlas");
+    if (const std::string_view issue = validateColor(color); !issue.empty()) return rejectInvalid(issue);
+    if (!std::isfinite(origin.x)) return rejectInvalid("origin.x");
+    if (!std::isfinite(origin.y)) return rejectInvalid("origin.y");
+    if (!visible(color)) return rejectInvalid("color.alpha");
 
     for (const GlyphQuad& glyph : glyphQuads) {
-        if (!glyph.bounds.valid() || !glyph.uv.valid()) {
+        std::string_view issue = validateRect(glyph.bounds, "glyph.bounds");
+        if (issue.empty()) {
+            issue = validateRect(glyph.uv, "glyph.uv");
+        }
+        if (!issue.empty()) {
             ++mRejectedCommands;
+            ++mInvalidInputCommands;
+            mLastError = issue;
             continue;
         }
 
@@ -174,6 +206,20 @@ std::size_t Canvas::clipDepth() const noexcept { return mClipDepth; }
 
 std::uint64_t Canvas::rejectedCommands() const noexcept { return mRejectedCommands; }
 
+std::uint64_t Canvas::invalidInputCommands() const noexcept { return mInvalidInputCommands; }
+
+std::uint64_t Canvas::capacityRejectedCommands() const noexcept {
+    return mCapacityRejectedCommands;
+}
+
+std::string_view Canvas::lastError() const noexcept { return mLastError; }
+
+void Canvas::rejectInvalid(std::string_view field) noexcept {
+    ++mRejectedCommands;
+    ++mInvalidInputCommands;
+    mLastError = field;
+}
+
 ClipRect Canvas::currentClip() const noexcept {
     return mClipDepth == 0 ? ClipRect{} : mClips[mClipDepth - 1];
 }
@@ -181,8 +227,16 @@ ClipRect Canvas::currentClip() const noexcept {
 void Canvas::append(DrawCommand command) noexcept {
     command.blend = mBlendMode;
     command.clip = currentClip();
+    if (const std::string_view issue = validateDrawCommand(command); !issue.empty()) {
+        rejectInvalid(issue);
+        return;
+    }
     if (!mDisplayList->append(command)) {
         ++mRejectedCommands;
+        ++mCapacityRejectedCommands;
+        mLastError = "displayList.capacity";
+    } else {
+        mLastError = {};
     }
 }
 
