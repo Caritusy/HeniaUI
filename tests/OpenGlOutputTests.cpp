@@ -471,12 +471,15 @@ int main() {
     testGl.bindVertexArray(hostVertexArray);
     testGl.bindBuffer(kArrayBuffer, hostArrayBuffer);
     testGl.bufferData(kArrayBuffer, 64, nullptr, kStreamDraw);
+    glEnable(0xFFFFFFFFU);
 
     TextureStore textures;
     Frame frame;
     const RenderPacket packet = henia::test::buildUiVisualScene(textures, frame);
     OpenGlRenderer oversizedRenderer;
-    if (oversizedRenderer.initialize(std::numeric_limits<std::size_t>::max(), 1, 1)) {
+    if (oversizedRenderer.initialize(std::numeric_limits<std::size_t>::max(), 1, 1)
+        || oversizedRenderer.initialized()
+        || oversizedRenderer.statistics().initializationFailures != 1) {
         fail("OpenGL renderer accepted an overflowing instance capacity");
     }
     OpenGlRenderer renderer;
@@ -484,6 +487,9 @@ int main() {
         std::cout << "OpenGL 3.3 renderer unavailable (" << version << "): "
                   << renderer.lastError() << "\n";
         return 77;
+    }
+    if (renderer.statistics().ignoredHostErrors == 0) {
+        fail("OpenGL initialization attributed a pre-existing host error to resource setup");
     }
     GLint initializedVertexArray = 0;
     GLint initializedArrayBuffer = 0;
@@ -537,7 +543,8 @@ int main() {
     glPixelStorei(GL_UNPACK_ALIGNMENT, 8);
     glPixelStorei(kUnpackRowLength, 17);
     const TextureView atlasView = textures.view(TextureHandle{1});
-    if (!textures.update(atlasView.handle, atlasView.rowPitch, atlasView.pixels)
+    const std::vector<std::byte> atlasPixels(atlasView.pixels.begin(), atlasView.pixels.end());
+    if (!textures.update(atlasView.handle, atlasView.rowPitch, atlasPixels)
         || !renderer.synchronizeTextures(textures)) {
         fail("OpenGL texture synchronization failed with a host unpack buffer");
     }
@@ -572,6 +579,13 @@ int main() {
             henia::test::kVisualHeight)) {
         std::cerr << renderer.lastError() << '\n';
         return EXIT_FAILURE;
+    }
+    const TextureView inFlightView = textures.view(TextureHandle{1});
+    const std::vector<std::byte> inFlightPixels(
+        inFlightView.pixels.begin(), inFlightView.pixels.end());
+    if (!textures.update(inFlightView.handle, inFlightView.rowPitch, inFlightPixels)
+        || !renderer.synchronizeTextures(textures)) {
+        fail("OpenGL could not transactionally replace an in-flight texture");
     }
     const GlState after = captureState(testGl);
     if (!sameState(before, after)) {
@@ -660,16 +674,20 @@ int main() {
     }
     const OpenGlRenderStatistics statistics = renderer.statistics();
     if (statistics.frames != 98 || statistics.instanceUploads != 65
+        || statistics.textureUploads != 3
         || statistics.uploadFenceFailures != 0 || statistics.rejectedFrames != 2
         || statistics.invalidInputFrames != 1 || statistics.capacityRejectedFrames != 0
         || statistics.wrongContextCalls != 3 || statistics.ignoredHostErrors == 0
-        || statistics.stateRestoreFailures != 0) {
+        || statistics.stateRestoreFailures != 0 || statistics.initializationFailures != 0
+        || statistics.textureSynchronizationFailures != 0) {
         fail("OpenGL multi-slot stress statistics are incorrect");
     }
 
     using namespace henia::gfx;
     OpenGlRenderDevice oversizedGfx;
-    if (oversizedGfx.initialize(std::numeric_limits<std::size_t>::max(), 1)) {
+    if (oversizedGfx.initialize(std::numeric_limits<std::size_t>::max(), 1)
+        || oversizedGfx.initialized()
+        || oversizedGfx.statistics().initializationFailures != 1) {
         fail("OpenGL gfx accepted an overflowing box capacity");
     }
     ShapeBatch3D shapes;
@@ -678,8 +696,12 @@ int main() {
     }
     const InstanceBatch boxBatch = shapes.snapshot();
     OpenGlRenderDevice gfx;
+    glEnable(0xFFFFFFFFU);
     if (!gfx.initialize(1, 1)) {
         fail("OpenGL gfx validation renderer did not initialize");
+    }
+    if (gfx.statistics().ignoredHostErrors == 0) {
+        fail("OpenGL gfx initialization attributed a pre-existing host error to resource setup");
     }
     ViewParameters invalidView{.viewport = {128.0F, 128.0F}};
     invalidView.timeSeconds = std::numeric_limits<float>::quiet_NaN();
@@ -734,7 +756,7 @@ int main() {
     if (gfxStatistics.invalidInputFrames != 1 || gfxStatistics.capacityRejectedFrames != 0
         || gfxStatistics.drawCalls != 33 || gfxStatistics.fullInstanceUploads != 1
         || gfxStatistics.wrongContextCalls != 2 || gfxStatistics.ignoredHostErrors == 0
-        || gfxStatistics.stateRestoreFailures != 0) {
+        || gfxStatistics.stateRestoreFailures != 0 || gfxStatistics.initializationFailures != 0) {
         fail("OpenGL gfx isolation statistics are incorrect");
     }
 

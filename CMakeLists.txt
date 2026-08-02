@@ -279,6 +279,24 @@ if(HENIAUI_BUILD_TESTS)
     add_test(NAME HeniaUI.OpenGL.UploadRing COMMAND HeniaUIOpenGlUploadRingTests)
 
     add_executable(
+        HeniaUIOpenGlTextureTransactionTests
+        tests/OpenGlTextureTransactionTests.cpp
+    )
+    target_include_directories(
+        HeniaUIOpenGlTextureTransactionTests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/opengl
+    )
+    target_compile_features(HeniaUIOpenGlTextureTransactionTests PRIVATE cxx_std_23)
+    set_target_properties(
+        HeniaUIOpenGlTextureTransactionTests
+        PROPERTIES FOLDER "HeniaUI/Tests"
+    )
+    add_test(
+        NAME HeniaUI.OpenGL.TextureTransaction
+        COMMAND HeniaUIOpenGlTextureTransactionTests
+    )
+
+    add_executable(
         HeniaUID3D12TextureUploadTransactionTests
         tests/D3D12TextureUploadTransactionTests.cpp
     )

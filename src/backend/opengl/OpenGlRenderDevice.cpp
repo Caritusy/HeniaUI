@@ -3,6 +3,7 @@
 #include "henia/gfx/Validation.h"
 
 #include "../FixedError.h"
+#include "OpenGlFailure.h"
 #include "OpenGlUploadRing.h"
 
 #define NOMINMAX
@@ -25,6 +26,8 @@
 
 namespace henia::gfx {
 namespace {
+
+using henia::detail::assignGlFailure;
 
 using GlChar = char;
 using GlSize = std::ptrdiff_t;
@@ -200,6 +203,14 @@ template <typename Function>
         && load(gl.colorMaskIndexed, "glColorMaski");
 }
 
+[[nodiscard]] GLenum consumeOperationErrors() noexcept {
+    const GLenum first = glGetError();
+    if (first != GL_NO_ERROR) {
+        while (glGetError() != GL_NO_ERROR) {}
+    }
+    return first;
+}
+
 constexpr const char* kVertexShaderSource = R"glsl(
 #version 330 core
 layout(location = 0) in vec4 instanceMinimumAndWidth;
@@ -299,14 +310,19 @@ void main() {
     const char* source,
     henia::detail::FixedError& error) noexcept {
     const GLuint shader = gl.createShader(type);
-    if (shader == 0) {
-        error = "OpenGL failed to create a gfx shader";
+    if (const GLenum glError = consumeOperationErrors(); shader == 0 || glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL gfx shader creation failed", glError, "shaderType", type);
         return 0;
     }
     gl.shaderSource(shader, 1, &source, nullptr);
     gl.compileShader(shader);
     GLint compiled = GL_FALSE;
     gl.getShaderIv(shader, kCompileStatus, &compiled);
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL gfx shader compilation failed", glError, "shader", shader);
+        gl.deleteShader(shader);
+        return 0;
+    }
     if (compiled == GL_TRUE) {
         return shader;
     }
@@ -432,6 +448,7 @@ bool OpenGlRenderDevice::Implementation::initialize(
         error = "OpenGL 3.3 gfx entry points are unavailable";
         return false;
     }
+    discardHostErrors();
     const GLuint vertexShader = compileShader(gl, kVertexShader, kVertexShaderSource, error);
     if (vertexShader == 0) return false;
     const GLuint fragmentShader = compileShader(gl, kFragmentShader, kFragmentShaderSource, error);
@@ -440,11 +457,22 @@ bool OpenGlRenderDevice::Implementation::initialize(
         return false;
     }
     program = gl.createProgram();
+    if (const GLenum glError = consumeOperationErrors(); program == 0 || glError != GL_NO_ERROR) {
+        gl.deleteShader(vertexShader);
+        gl.deleteShader(fragmentShader);
+        assignGlFailure(error, "OpenGL gfx program creation failed", glError, "program", program);
+        program = 0;
+        return false;
+    }
     gl.attachShader(program, vertexShader);
     gl.attachShader(program, fragmentShader);
     gl.linkProgram(program);
     gl.deleteShader(vertexShader);
     gl.deleteShader(fragmentShader);
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL gfx program link submission failed", glError, "program", program);
+        return false;
+    }
     GLint linked = GL_FALSE;
     gl.getProgramIv(program, kLinkStatus, &linked);
     if (linked != GL_TRUE) {
@@ -457,43 +485,80 @@ bool OpenGlRenderDevice::Implementation::initialize(
         error.assign(log.data(), static_cast<std::size_t>(std::max(written, 0)));
         return false;
     }
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL gfx program link-status query failed", glError, "program", program);
+        return false;
+    }
     viewProjectionLocation = gl.getUniformLocation(program, "viewProjection");
     viewportLocation = gl.getUniformLocation(program, "viewportSize");
     timeLocation = gl.getUniformLocation(program, "timeSeconds");
     depthRangeLocation = gl.getUniformLocation(program, "zeroToOneDepth");
+    const GLenum uniformError = consumeOperationErrors();
+    if (uniformError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL gfx uniform lookup failed", uniformError, "program", program);
+        return false;
+    }
     if (viewProjectionLocation < 0 || viewportLocation < 0 || timeLocation < 0 || depthRangeLocation < 0) {
         error = "OpenGL gfx shader uniforms are unavailable";
         return false;
     }
     gl.genVertexArrays(1, &vertexArray);
-    for (UploadSlot& slot : uploadSlots) {
-        gl.genBuffers(1, &slot.buffer);
-    }
-    const bool buffersReady = std::all_of(
-        uploadSlots.begin(),
-        uploadSlots.end(),
-        [](const UploadSlot& slot) { return slot.buffer != 0; });
-    if (vertexArray == 0 || !buffersReady) {
-        error = "OpenGL failed to allocate the gfx instance buffer";
+    if (const GLenum glError = consumeOperationErrors(); vertexArray == 0 || glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL gfx vertex-array creation failed", glError, "object", vertexArray);
         return false;
+    }
+    for (std::size_t index = 0; index < uploadSlots.size(); ++index) {
+        UploadSlot& slot = uploadSlots[index];
+        gl.genBuffers(1, &slot.buffer);
+        if (const GLenum glError = consumeOperationErrors(); slot.buffer == 0 || glError != GL_NO_ERROR) {
+            assignGlFailure(error, "OpenGL gfx instance-buffer creation failed", glError, "uploadSlot", index);
+            return false;
+        }
     }
     GLint previousVertexArray = 0;
     GLint previousArrayBuffer = 0;
     glGetIntegerv(kVertexArrayBinding, &previousVertexArray);
     glGetIntegerv(kArrayBufferBinding, &previousArrayBuffer);
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL gfx initialization-state capture failed", glError, "object", 0);
+        return false;
+    }
     gl.bindVertexArray(vertexArray);
-    for (const UploadSlot& slot : uploadSlots) {
+    const auto restoreInitializationState = [&]() noexcept {
+        gl.bindBuffer(kArrayBuffer, static_cast<GLuint>(previousArrayBuffer));
+        gl.bindVertexArray(static_cast<GLuint>(previousVertexArray));
+    };
+    for (std::size_t index = 0; index < uploadSlots.size(); ++index) {
+        const UploadSlot& slot = uploadSlots[index];
         gl.bindBuffer(kArrayBuffer, slot.buffer);
         gl.bufferData(
             kArrayBuffer,
             static_cast<GlSize>(instanceBytes),
             nullptr,
             kDynamicDraw);
+        if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+            restoreInitializationState();
+            assignGlFailure(
+                error,
+                "OpenGL gfx instance-buffer storage allocation failed",
+                glError,
+                "uploadSlot",
+                index);
+            return false;
+        }
     }
     gl.bindBuffer(kArrayBuffer, uploadSlots.front().buffer);
     configureAttributes();
-    gl.bindBuffer(kArrayBuffer, static_cast<GLuint>(previousArrayBuffer));
-    gl.bindVertexArray(static_cast<GLuint>(previousVertexArray));
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        restoreInitializationState();
+        assignGlFailure(error, "OpenGL gfx vertex-layout setup failed", glError, "object", vertexArray);
+        return false;
+    }
+    restoreInitializationState();
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL gfx initialization-state restoration failed", glError, "object", 0);
+        return false;
+    }
     capacity = requestedCapacity;
     ready = true;
     error.clear();
@@ -562,7 +627,7 @@ bool OpenGlRenderDevice::Implementation::render(
 
     discardHostErrors();
     const GlState state = captureState();
-    if (glGetError() != GL_NO_ERROR) {
+    if (consumeOperationErrors() != GL_NO_ERROR) {
         ++statistics.rejectedFrames;
         error = "OpenGL gfx state capture failed";
         return false;
@@ -618,7 +683,7 @@ bool OpenGlRenderDevice::Implementation::render(
     } else {
         statistics.profile.cpuUploadNanoseconds = 0;
     }
-    if (glGetError() != GL_NO_ERROR) {
+    if (consumeOperationErrors() != GL_NO_ERROR) {
         if (upload.requiresUpload()) {
             uploadRing.invalidate(upload.slot);
         }
@@ -646,7 +711,7 @@ bool OpenGlRenderDevice::Implementation::render(
     gl.uniform1f(timeLocation, view.timeSeconds);
     gl.uniform1i(depthRangeLocation, view.clipDepthRange == ClipDepthRange::ZeroToOne ? 1 : 0);
     ++statistics.viewUpdates;
-    if (glGetError() != GL_NO_ERROR) {
+    if (consumeOperationErrors() != GL_NO_ERROR) {
         const bool restored = restoreState(state);
         ++statistics.rejectedFrames;
         if (restored) error = "OpenGL gfx view update failed";
@@ -674,7 +739,7 @@ bool OpenGlRenderDevice::Implementation::render(
     glEnable(GL_BLEND);
     gl.blendEquationSeparate(kFunctionAdd, kFunctionAdd);
     gl.blendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    if (glGetError() != GL_NO_ERROR) {
+    if (consumeOperationErrors() != GL_NO_ERROR) {
         const bool restored = restoreState(state);
         ++statistics.rejectedFrames;
         if (restored) error = "OpenGL gfx blend state failed";
@@ -689,7 +754,7 @@ bool OpenGlRenderDevice::Implementation::render(
     else glDisable(GL_DEPTH_TEST);
     glDepthMask(depth.enabled && depth.writeEnabled ? GL_TRUE : GL_FALSE);
     glDepthFunc(compareFunction(depth.compare));
-    if (glGetError() != GL_NO_ERROR) {
+    if (consumeOperationErrors() != GL_NO_ERROR) {
         const bool restored = restoreState(state);
         ++statistics.rejectedFrames;
         if (restored) error = "OpenGL gfx pipeline state failed";
@@ -700,7 +765,7 @@ bool OpenGlRenderDevice::Implementation::render(
         ++statistics.drawCalls;
         statistics.submittedInstances += boxes.size();
     }
-    const GLenum drawError = glGetError();
+    const GLenum drawError = consumeOperationErrors();
     const bool fenced = boxes.empty() || fenceUploadSlot(upload.slot);
     if (drawError != GL_NO_ERROR) {
         const bool restored = restoreState(state);
@@ -846,7 +911,7 @@ bool OpenGlRenderDevice::Implementation::restoreState(const GlState& state) noex
     state.sampleCoverage ? glEnable(kSampleCoverage) : glDisable(kSampleCoverage);
     glViewport(state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3]);
     glScissor(state.scissor[0], state.scissor[1], state.scissor[2], state.scissor[3]);
-    if (glGetError() != GL_NO_ERROR) {
+    if (consumeOperationErrors() != GL_NO_ERROR) {
         ++statistics.stateRestoreFailures;
         error = "OpenGL gfx state restoration failed";
         return false;
@@ -882,7 +947,7 @@ bool OpenGlRenderDevice::Implementation::shutdown() noexcept {
     capacity = 0;
     ownerContext = nullptr;
     ready = false;
-    if (hadOwner && glGetError() != GL_NO_ERROR) {
+    if (hadOwner && consumeOperationErrors() != GL_NO_ERROR) {
         error = "OpenGL gfx resource destruction generated an error";
         return false;
     }
@@ -916,12 +981,14 @@ bool OpenGlRenderDevice::initialize(
     try {
         const bool initialized = mImplementation->initialize(capacityValue, uploadSlotCountValue);
         if (!initialized) {
+            ++mImplementation->statistics.initializationFailures;
             const henia::detail::FixedError diagnostic = mImplementation->error;
             static_cast<void>(mImplementation->shutdown());
             mImplementation->error = diagnostic;
         }
         return initialized;
     } catch (...) {
+        ++mImplementation->statistics.initializationFailures;
         static_cast<void>(mImplementation->shutdown());
         mImplementation->error = "OpenGL gfx initialization exhausted upload-ring storage";
         return false;

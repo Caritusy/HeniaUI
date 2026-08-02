@@ -116,6 +116,24 @@ restoration failures are reported separately. The host explicitly tells
 `render()` whether the currently bound framebuffer has a compatible depth
 attachment; HeniaUI does not guess from deprecated global queries.
 
+OpenGL initialization is transactional: shader/program creation, VAO/VBO name
+creation, every buffer-storage allocation, and vertex-layout setup are checked
+before `initialized()` can become true. A failure destroys every name allocated
+by that attempt and preserves a stage-specific diagnostic containing the GL
+error and resource or upload-slot identifier.
+
+Texture synchronization never redefines a renderer-visible texture in place.
+Every changed texture is uploaded into a staged object; the whole call swaps
+objects and revisions only after all candidates succeed. Any failure deletes all
+candidates and leaves every previous object/revision usable and retryable.
+Immutable one-level storage plus `glTexSubImage2D` is used when
+`glTexStorage2D` is available; otherwise a newly created mutable object is
+populated with `glTexImage2D`. Retired objects are deleted only after the atomic
+swap. OpenGL deletion semantics retain storage needed by already submitted
+commands, so an update never mutates content referenced by an in-flight draw.
+This policy can transiently require both the old and replacement storage; an
+allocation failure rolls back rather than sacrificing the valid texture.
+
 Backend `lastError()` storage is fixed and bounded, so reporting an allocation
 failure cannot itself allocate. OpenGL and D3D12 texture/submission bookkeeping
 is sized during initialization and does not grow in routine synchronization or
