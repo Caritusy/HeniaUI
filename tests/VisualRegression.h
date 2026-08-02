@@ -391,6 +391,9 @@ inline constexpr std::array kUiGolden{
     GoldenProbe{86, 64, {51, 179, 230, 255}, 10},
     GoldenProbe{99, 64, {0, 0, 0, 255}, 2},
     GoldenProbe{97, 74, {157, 44, 122, 255}, 15},
+    GoldenProbe{109, 66, {22, 65, 108, 255}, 24},
+    GoldenProbe{113, 61, {102, 204, 255, 255}, 16},
+    GoldenProbe{118, 66, {36, 107, 179, 255}, 16},
     GoldenProbe{32, 88, {15, 45, 115, 255}, 12},
     GoldenProbe{22, 100, {15, 45, 115, 255}, 12},
     GoldenProbe{66, 91, {82, 18, 64, 255}, 10},
@@ -430,16 +433,17 @@ inline constexpr std::array kUiGolden{
         8.0F,
         4.0F,
         {3.0F, 3.0F});
-    canvas.fillRect({{8.0F, 8.0F}, {56.0F, 56.0F}}, {0.85F, 0.12F, 0.18F, 1.0F}, 8.0F);
+    canvas.tintRect({{8.0F, 8.0F}, {56.0F, 56.0F}}, {0.85F, 0.12F, 0.18F, 1.0F}, 8.0F);
     canvas.ellipse({{14.0F, 14.0F}, {30.0F, 28.0F}}, {0.12F, 0.45F, 0.95F, 1.0F});
     canvas.capsule({{34.0F, 14.0F}, {52.0F, 28.0F}}, {0.15F, 0.85F, 0.48F, 1.0F});
-    canvas.gradientRect(
+    canvas.animatedGradientRect(
         {{12.0F, 40.0F}, {52.0F, 52.0F}},
         {0.95F, 0.75F, 0.10F, 1.0F},
         {0.65F, 0.15F, 0.90F, 1.0F},
         {1.0F, 0.0F},
+        0.0F,
         3.0F);
-    canvas.strokeRect(
+    canvas.roundedOutline(
         {{72.0F, 8.0F}, {120.0F, 56.0F}},
         {0.12F, 0.85F, 0.25F, 1.0F},
         6.0F,
@@ -468,6 +472,24 @@ inline constexpr std::array kUiGolden{
     TextRunCache cache(fonts);
     TextPainter text(cache);
     text.draw(canvas, font, 16.0F, {24.0F, 64.0F}, {0.95F, 0.95F, 1.0F, 0.6F}, "A");
+    const std::array iconEffects{
+        EffectLayer{
+            .kind = EffectLayerKind::Glow,
+            .color = {0.20F, 0.60F, 1.0F, 0.70F},
+            .amount = 3.0F,
+        },
+        EffectLayer{
+            .kind = EffectLayerKind::Tint,
+            .color = {1.0F, 0.0F, 0.0F, 1.0F},
+            .enabled = false,
+        },
+    };
+    canvas.effectRect({{112.0F, 60.0F}, {124.0F, 72.0F}}, 3.0F, iconEffects);
+    canvas.sdfIcon(
+        panel,
+        {{112.0F, 60.0F}, {124.0F, 72.0F}},
+        {{0.0F, 0.0F}, {1.0F, 1.0F}},
+        {0.40F, 0.80F, 1.0F, 1.0F});
     canvas.line(
         {76.0F, 64.0F},
         {96.0F, 64.0F},

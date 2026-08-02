@@ -12,6 +12,7 @@ versioned JSON document suitable for CI comparison.
 | `shader_analytic_ellipses` | The same 4,096 circles recorded as one shader-driven ellipse instance each, preserving one draw batch. |
 | `henia_many_primitives` | The same 4,096 rounded rectangles recorded as Henia draw instances and packet-compiled. |
 | `analytic_2d_fragment_bounds` | A 1 px viewport diagonal plus a large rounded rectangle stroke, tracking the conservative fragment-area bound of their generated quads. |
+| `shader_effect_layers_4096` | 1,024 rectangles with four enabled ordered layers each (soft shadow, glow, animated gradient, outline) plus one disabled layer, all in one batch. |
 | `retained_static_ui` | A 128-label retained widget tree returning its unchanged immutable packet. |
 | `full_repaint_dynamic_ui` | One animated label color followed by the previous full-tree paint and packet-compilation path. |
 | `retained_dynamic_dirty_ui` | The same animation through `UiDocument`; stable sibling ranges and compiled segments are reused. |
@@ -62,6 +63,10 @@ table transitions are counted separately. No batching ratio is labeled as
 command or instance compression. Each JSON scenario includes a `batching`
 object; `available` is false for comparison models and 3D workloads that do not
 produce a 2D `RenderPacket`.
+Effect-producing packets additionally report effect instance count, adjacent
+shader-variant transitions, and an effect-only conservative fragment-area
+bound. A transition is observational and does not imply a draw, PSO, or texture
+table boundary.
 
 `cpu_resident_bytes` is the capacity-backed memory directly attributable to the
 scene's display list, packet/instance storage, or tessellated vectors. It is
@@ -324,3 +329,27 @@ test performs 1,000 distant scrolls, verifies unchanged physical widget
 identities, keeps a 120 px viewport pool at no more than 12 widgets, preserves
 selection by stable key after reordering, and confirms recycled child widgets
 cannot capture stale input.
+
+## Shader effect pipeline capture (#8)
+
+Recorded on the same MSVC Release/x64 workstation on 2026-08-02, with 100
+measured iterations after 10 warmups. The #7 merge `4e7b1ab` and candidate
+executables ran consecutively and passed `tools/compare_benchmarks.py` with the
+15% CPU and 5% memory limits.
+
+| Effect instances | Median / p95 CPU | Allocations | Upload | Draws | Variant transitions | Effect fragment bound | CPU resident |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4,096 | 585.7 / 864.4 us | 0 | 245,760 B | 1 | 4,095 | 1,785,856 px | 606,480 B |
+
+The scene records 1,024 rectangles with ordered soft-shadow, glow, animated-
+gradient, and outline layers; a fifth disabled tint layer emits no work. All
+four variants share one texture-free batch despite changing shader branch at
+every adjacent instance. The fragment figure is the conservative pre-clip sum
+for those effects, not a synthesized GPU timestamp.
+
+The common simple-UI workloads retained identical draw and upload counts.
+Full repaint moved by +0.3%, text-heavy UI by +2.2%, the one-kind 4,096-rectangle
+scene by +5.4%, and the virtualized list by +6.0% in this adjacent capture. The
+first implementation's extra end-of-packet instance scan was removed before
+this accepted capture; effect counters are accumulated in the existing append
+path instead.

@@ -27,7 +27,22 @@ enum class PrimitiveKind : std::uint8_t {
     RoundedShadow,
     BorderRadii,
     NinePatch,
+    TintRect,
+    AnimatedGradientRect,
+    RoundedGlow,
+    RoundedOutline,
+    SdfIcon,
 };
+
+[[nodiscard]] constexpr bool isEffectPrimitive(PrimitiveKind kind) noexcept {
+    return kind == PrimitiveKind::GradientRect
+        || kind == PrimitiveKind::RoundedShadow
+        || kind == PrimitiveKind::TintRect
+        || kind == PrimitiveKind::AnimatedGradientRect
+        || kind == PrimitiveKind::RoundedGlow
+        || kind == PrimitiveKind::RoundedOutline
+        || kind == PrimitiveKind::SdfIcon;
+}
 
 enum class LineCap : std::uint8_t {
     Butt,

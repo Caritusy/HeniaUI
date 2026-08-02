@@ -83,7 +83,11 @@ bool BatchCompiler::compile(
         const DrawInstance instance = makeInstance(command, textureSlot);
         if (!output.appendInstance(instance)) return output.rejectPacket();
         if (mTrackFragmentArea) {
-            output.addEstimatedFragmentArea(estimateFragmentArea(instance));
+            const std::uint64_t area = estimateFragmentArea(instance);
+            output.addEstimatedFragmentArea(area);
+            if (isEffectPrimitive(instance.kind)) {
+                output.addEffectEstimatedFragmentArea(area);
+            }
         }
         ++batch->instanceCount;
     }
@@ -272,7 +276,11 @@ bool BatchCompiler::append(
         return output.rejectPacket();
     }
     if (trackFragmentArea) {
-        output.addEstimatedFragmentArea(estimateFragmentArea(instance));
+        const std::uint64_t area = estimateFragmentArea(instance);
+        output.addEstimatedFragmentArea(area);
+        if (isEffectPrimitive(instance.kind)) {
+            output.addEffectEstimatedFragmentArea(area);
+        }
     }
     ++batch->instanceCount;
     return true;
@@ -328,7 +336,13 @@ DrawInstance BatchCompiler::makeInstance(
         .textureSlot = compactTextureSlot(textureSlot),
         .lineCap = command.lineCap,
     };
-    instance.setLineStyle(command.lineJoin, command.lineFlags);
+    if (command.kind == PrimitiveKind::Line) {
+        instance.setLineStyle(command.lineJoin, command.lineFlags);
+    } else if (command.kind == PrimitiveKind::AnimatedGradientRect) {
+        instance.setShaderParameter(command.lineFlags);
+    } else {
+        instance.setLineStyle(command.lineJoin, 0);
+    }
     return instance;
 }
 
@@ -356,7 +370,8 @@ std::uint64_t BatchCompiler::estimateFragmentArea(const DrawInstance& instance) 
             instance.lineJoin());
         area = (length + start + end + kAnalyticAaFringe * 2.0)
             * (static_cast<double>(instance.thickness) + kAnalyticAaFringe * 2.0);
-    } else if (instance.kind == PrimitiveKind::RoundedShadow) {
+    } else if (instance.kind == PrimitiveKind::RoundedShadow
+        || instance.kind == PrimitiveKind::RoundedGlow) {
         const double extent = static_cast<double>(instance.thickness) * 3.0
             + kAnalyticAaFringe;
         area = (static_cast<double>(instance.bounds.width()) + extent * 2.0)
@@ -366,7 +381,10 @@ std::uint64_t BatchCompiler::estimateFragmentArea(const DrawInstance& instance) 
         || instance.kind == PrimitiveKind::Arc
         || instance.kind == PrimitiveKind::Capsule
         || instance.kind == PrimitiveKind::GradientRect
-        || instance.kind == PrimitiveKind::BorderRadii) {
+        || instance.kind == PrimitiveKind::BorderRadii
+        || instance.kind == PrimitiveKind::TintRect
+        || instance.kind == PrimitiveKind::AnimatedGradientRect
+        || instance.kind == PrimitiveKind::RoundedOutline) {
         area = static_cast<double>(instance.bounds.width() + kAnalyticAaFringe * 2.0F)
             * (instance.bounds.height() + kAnalyticAaFringe * 2.0F);
     } else {

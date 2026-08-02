@@ -263,6 +263,7 @@ flat out uint primitiveKind;
 flat out uint lineCap;
 flat out uint lineJoin;
 flat out uint lineFlags;
+flat out uint shaderParameter;
 
 const vec2 corners[6] = vec2[6](
     vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
@@ -292,14 +293,16 @@ void main() {
         float along = mix(-startExtension, segmentLength + endExtension, corner.x);
         float across = mix(-halfWidth - 2.0, halfWidth + 2.0, corner.y);
         pixel = start + direction * along + normal * across;
-    } else if (kind == 9u) {
+    } else if (kind == 9u || kind == 14u) {
         float extent = instanceMetrics.y * 3.0 + 2.0;
+        vec2 offset = kind == 9u ? instanceUv.xy : vec2(0.0);
         pixel = mix(
-            instanceBounds.xy + instanceUv.xy - vec2(extent),
-            instanceBounds.zw + instanceUv.xy + vec2(extent),
+            instanceBounds.xy + offset - vec2(extent),
+            instanceBounds.zw + offset + vec2(extent),
             corner);
     } else if (kind == 0u || kind == 5u || kind == 6u || kind == 7u
-        || kind == 8u || kind == 10u) {
+        || kind == 8u || kind == 10u || kind == 12u || kind == 13u
+        || kind == 15u) {
         pixel = mix(
             instanceBounds.xy - vec2(2.0),
             instanceBounds.zw + vec2(2.0),
@@ -321,6 +324,7 @@ void main() {
     lineCap = instanceStyle.z;
     lineJoin = decodedLineJoin;
     lineFlags = decodedLineFlags;
+    shaderParameter = instanceStyle.w;
 }
 )glsl";
 
@@ -337,6 +341,7 @@ flat in uint primitiveKind;
 flat in uint lineCap;
 flat in uint lineJoin;
 flat in uint lineFlags;
+flat in uint shaderParameter;
 
 uniform sampler2D textures[8];
 out vec4 outputColor;
@@ -469,7 +474,8 @@ void main() {
     float coverage = 1.0;
     vec4 color = tintColor;
 
-    if (primitiveKind == 0u || primitiveKind == 1u) {
+    if (primitiveKind == 0u || primitiveKind == 1u
+        || primitiveKind == 12u || primitiveKind == 15u) {
         vec2 primitiveSize = linePoints.zw - linePoints.xy;
         vec2 centered = pixelPosition - (linePoints.xy + linePoints.zw) * 0.5;
         float distanceToEdge = roundedBoxDistance(
@@ -478,7 +484,7 @@ void main() {
             min(shapeMetrics.x, min(primitiveSize.x, primitiveSize.y) * 0.5));
         float antiAlias = max(fwidth(distanceToEdge), 0.75);
         float outer = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
-        if (primitiveKind == 1u) {
+        if (primitiveKind == 1u || primitiveKind == 15u) {
             float innerDistance = distanceToEdge + max(shapeMetrics.y, 0.0);
             float inner = 1.0 - smoothstep(-antiAlias, antiAlias, innerDistance);
             coverage = max(outer - inner, 0.0);
@@ -567,7 +573,7 @@ void main() {
             min(primitiveSize.x, primitiveSize.y) * 0.5);
         float antiAlias = max(fwidth(distanceToEdge), 0.75);
         coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
-    } else if (primitiveKind == 8u) {
+    } else if (primitiveKind == 8u || primitiveKind == 13u) {
         vec2 primitiveSize = linePoints.zw - linePoints.xy;
         vec2 halfSize = primitiveSize * 0.5;
         vec2 centered = pixelPosition - (linePoints.xy + linePoints.zw) * 0.5;
@@ -579,10 +585,17 @@ void main() {
         coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
         vec2 direction = vec2(cos(shapeMetrics.y), sin(shapeMetrics.y));
         float extent = max(dot(abs(direction), halfSize), 0.0001);
-        float amount = clamp(0.5 + dot(centered, direction) / (extent * 2.0), 0.0, 1.0);
+        float phaseShift = primitiveKind == 13u
+            ? sin(float(shaderParameter) / 255.0 * 6.28318530718) * 0.25
+            : 0.0;
+        float amount = clamp(
+            0.5 + dot(centered, direction) / (extent * 2.0) + phaseShift,
+            0.0,
+            1.0);
         color = mix(tintColor, lineNeighbors, amount);
-    } else if (primitiveKind == 9u) {
-        vec2 center = (linePoints.xy + linePoints.zw) * 0.5 + lineNeighbors.xy;
+    } else if (primitiveKind == 9u || primitiveKind == 14u) {
+        vec2 offset = primitiveKind == 9u ? lineNeighbors.xy : vec2(0.0);
+        vec2 center = (linePoints.xy + linePoints.zw) * 0.5 + offset;
         vec2 halfSize = (linePoints.zw - linePoints.xy) * 0.5;
         float distanceToEdge = roundedBoxDistance(
             pixelPosition - center,
@@ -622,6 +635,12 @@ void main() {
             ninePatchCoordinate(local.y, destinationBorder.y, shapeMetrics.y));
         vec2 uv = mix(lineNeighbors.xy, lineNeighbors.zw, mapped);
         color *= sampleTexture(textureSlot, uv);
+    } else if (primitiveKind == 16u) {
+        float distanceValue = sampleTexture(textureSlot, textureUv).r;
+        coverage = smoothstep(
+            shapeMetrics.x - shapeMetrics.y,
+            shapeMetrics.x + shapeMetrics.y,
+            distanceValue);
     }
 
     color.a *= coverage;

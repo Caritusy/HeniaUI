@@ -339,6 +339,12 @@ bool RenderPacketBuilder::appendInstance(const DrawInstance& instance) noexcept 
     if (mStorage->instances.capacity() != previous) {
         ++mStorage->statistics.instanceCapacityGrowths;
     }
+    PacketStatistics& statistics = mStorage->statistics;
+    statistics.effectInstances += isEffectPrimitive(instance.kind) ? 1U : 0U;
+    if (mStorage->instances.size() > 1U
+        && mStorage->instances[mStorage->instances.size() - 2U].kind != instance.kind) {
+        ++statistics.shaderVariantTransitions;
+    }
     return true;
 }
 
@@ -364,6 +370,15 @@ void RenderPacketBuilder::addEstimatedFragmentArea(std::uint64_t area) noexcept 
     assert(mStorage != nullptr);
     const std::uint64_t current = mStorage->statistics.estimatedFragmentArea;
     mStorage->statistics.estimatedFragmentArea =
+        area > std::numeric_limits<std::uint64_t>::max() - current
+        ? std::numeric_limits<std::uint64_t>::max()
+        : current + area;
+}
+
+void RenderPacketBuilder::addEffectEstimatedFragmentArea(std::uint64_t area) noexcept {
+    assert(mStorage != nullptr);
+    const std::uint64_t current = mStorage->statistics.effectEstimatedFragmentArea;
+    mStorage->statistics.effectEstimatedFragmentArea =
         area > std::numeric_limits<std::uint64_t>::max() - current
         ? std::numeric_limits<std::uint64_t>::max()
         : current + area;

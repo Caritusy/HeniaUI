@@ -360,7 +360,7 @@ void testShaderDrivenPrimitivePayloads() {
     static_assert(sizeof(DrawInstance) == 60, "advanced instances must reuse the compact payload");
 
     Frame frame;
-    frame.reserve(8, 8, 2, CapacityPolicy::Fixed);
+    frame.reserve(16, 16, 8, CapacityPolicy::Fixed);
     frame.setFragmentAreaTracking(true);
     Canvas& canvas = frame.begin();
     canvas.circle({10.0F, 10.0F}, 6.0F, {1.0F, 0.0F, 0.0F, 1.0F});
@@ -396,9 +396,56 @@ void testShaderDrivenPrimitivePayloads() {
         8.0F,
         0.25F,
         {1.0F, 1.0F, 1.0F, 1.0F});
+    canvas.tintRect(
+        {{122.0F, 2.0F}, {154.0F, 22.0F}},
+        {0.2F, 0.4F, 0.8F, 0.5F},
+        3.0F);
+    canvas.animatedGradientRect(
+        {{122.0F, 26.0F}, {162.0F, 42.0F}},
+        {1.0F, 0.0F, 0.0F, 1.0F},
+        {0.0F, 0.0F, 1.0F, 1.0F},
+        {0.0F, 1.0F},
+        0.25F,
+        4.0F);
+    canvas.roundedGlow(
+        {{122.0F, 48.0F}, {150.0F, 70.0F}},
+        {0.2F, 0.7F, 1.0F, 0.6F},
+        5.0F,
+        4.0F);
+    canvas.roundedOutline(
+        {{154.0F, 48.0F}, {194.0F, 68.0F}},
+        {0.8F, 0.3F, 1.0F, 1.0F},
+        6.0F,
+        2.0F);
+    canvas.sdfIcon(
+        TextureHandle{2},
+        {{166.0F, 2.0F}, {190.0F, 26.0F}},
+        {{0.0F, 0.0F}, {1.0F, 1.0F}},
+        {1.0F, 1.0F, 1.0F, 1.0F},
+        0.55F,
+        0.08F);
+    const std::array effectLayers{
+        EffectLayer{
+            .kind = EffectLayerKind::SoftShadow,
+            .color = {0.0F, 0.0F, 0.0F, 0.5F},
+            .vector = {2.0F, 3.0F},
+            .amount = 4.0F,
+        },
+        EffectLayer{
+            .kind = EffectLayerKind::Tint,
+            .color = {1.0F, 0.0F, 0.0F, 1.0F},
+            .enabled = false,
+        },
+        EffectLayer{
+            .kind = EffectLayerKind::Outline,
+            .color = {0.3F, 1.0F, 0.4F, 1.0F},
+            .amount = 1.5F,
+        },
+    };
+    canvas.effectRect({{122.0F, 74.0F}, {162.0F, 96.0F}}, 5.0F, effectLayers);
 
     const std::span<const DrawCommand> commands = frame.displayList().commands();
-    require(commands.size() == 8
+    require(commands.size() == 15
             && commands[0].kind == PrimitiveKind::Ellipse
             && commands[1].kind == PrimitiveKind::Ellipse
             && commands[2].kind == PrimitiveKind::Arc
@@ -406,7 +453,14 @@ void testShaderDrivenPrimitivePayloads() {
             && commands[4].kind == PrimitiveKind::GradientRect
             && commands[5].kind == PrimitiveKind::RoundedShadow
             && commands[6].kind == PrimitiveKind::BorderRadii
-            && commands[7].kind == PrimitiveKind::NinePatch,
+            && commands[7].kind == PrimitiveKind::NinePatch
+            && commands[8].kind == PrimitiveKind::TintRect
+            && commands[9].kind == PrimitiveKind::AnimatedGradientRect
+            && commands[10].kind == PrimitiveKind::RoundedGlow
+            && commands[11].kind == PrimitiveKind::RoundedOutline
+            && commands[12].kind == PrimitiveKind::SdfIcon
+            && commands[13].kind == PrimitiveKind::RoundedShadow
+            && commands[14].kind == PrimitiveKind::RoundedOutline,
         "shader-driven primitives did not retain one command per logical primitive");
     require(commands[4].uv == Rect{{0.0F, 0.0F}, {1.0F, 0.5F}}
             && commands[4].radius == 4.0F && commands[4].thickness == 0.0F,
@@ -416,20 +470,28 @@ void testShaderDrivenPrimitivePayloads() {
         "rounded shadow did not retain offset/blur parameters");
     require(commands[6].uv == Rect{{10.0F, 10.0F}, {10.0F, 10.0F}},
         "independent corner radii were not normalized against adjacent edges");
+    require(commands[9].lineFlags == 64U
+            && commands[9].thickness > 1.5707F && commands[9].thickness < 1.5709F,
+        "animated gradient did not quantize phase and retain direction compactly");
 
     const RenderPacket packet = frame.finish();
-    require(packet.instances().size() == 8 && packet.batches().size() == 1
-            && packet.batches()[0].textureCount == 1
-            && packet.statistics().sourceCommands == 8
-            && packet.statistics().instances == 8
-            && packet.statistics().estimatedFragmentArea > 0,
+    require(packet.instances().size() == 15 && packet.batches().size() == 1
+            && packet.batches()[0].textureCount == 2
+            && packet.statistics().sourceCommands == 15
+            && packet.statistics().instances == 15
+            && packet.statistics().effectInstances == 9
+            && packet.statistics().shaderVariantTransitions == 13
+            && packet.statistics().estimatedFragmentArea > 0
+            && packet.statistics().effectEstimatedFragmentArea > 0,
         "shader-driven primitives did not compile to one shared instance batch");
     require(packet.instances()[2].kind == PrimitiveKind::Arc
             && packet.instances()[2].uv.min == Vec2{0.25F, 3.0F}
             && packet.instances()[7].kind == PrimitiveKind::NinePatch
             && packet.instances()[7].textureSlot == 0
             && packet.instances()[7].radius == 8.0F
-            && packet.instances()[7].thickness == 0.25F,
+            && packet.instances()[7].thickness == 0.25F
+            && packet.instances()[9].shaderParameter() == 64U
+            && packet.instances()[12].textureSlot == 1,
         "advanced instance payload lost arc or nine-patch parameters");
 
     DisplayList invalidList;
@@ -448,8 +510,23 @@ void testShaderDrivenPrimitivePayloads() {
         {{0.0F, 0.0F}, {1.0F, 1.0F}},
         2.0F,
         0.5F);
-    require(invalidList.commands().empty() && invalid.rejectedCommands() == 6
-            && invalid.invalidInputCommands() == 6,
+    invalid.animatedGradientRect(
+        {{0.0F, 0.0F}, {10.0F, 10.0F}}, {}, {}, {1.0F, 0.0F},
+        std::numeric_limits<float>::infinity());
+    invalid.roundedGlow({{0.0F, 0.0F}, {10.0F, 10.0F}}, {}, 1.0F, 0.0F);
+    invalid.roundedOutline({{0.0F, 0.0F}, {10.0F, 10.0F}}, {}, 1.0F, 0.0F);
+    invalid.sdfIcon(
+        TextureHandle{1},
+        {{0.0F, 0.0F}, {10.0F, 10.0F}},
+        {{0.0F, 0.0F}, {1.0F, 1.0F}},
+        {},
+        1.5F);
+    const std::array invalidEffects{
+        EffectLayer{.kind = static_cast<EffectLayerKind>(0xFF)},
+    };
+    invalid.effectRect({{0.0F, 0.0F}, {10.0F, 10.0F}}, 1.0F, invalidEffects);
+    require(invalidList.commands().empty() && invalid.rejectedCommands() == 11
+            && invalid.invalidInputCommands() == 11,
         "invalid shader-driven primitive parameters were accepted");
 }
 
