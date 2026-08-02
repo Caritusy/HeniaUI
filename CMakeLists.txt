@@ -15,6 +15,9 @@ if(HENIAUI_ENABLE_ADDRESS_SANITIZER)
     if(MSVC)
         add_compile_options(/fsanitize=address /Zi)
         if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            # clang-cl ASan does not support the debug CRT (/MDd). Keep debug
+            # symbols while using the supported dynamic release CRT.
+            set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
             execute_process(
                 COMMAND ${CMAKE_CXX_COMPILER} --print-resource-dir
                 OUTPUT_VARIABLE HENIAUI_CLANG_RESOURCE_DIRECTORY
@@ -51,6 +54,13 @@ if(HENIAUI_ENABLE_UNDEFINED_SANITIZER)
     endif()
 endif()
 
+set(HENIAUI_DISABLE_RTTI_OPTION -fno-rtti)
+if(HENIAUI_ENABLE_UNDEFINED_SANITIZER)
+    # UBSan's vptr checks require RTTI. Sanitizer builds enable it so those
+    # checks remain active instead of suppressing a category of project bugs.
+    set(HENIAUI_DISABLE_RTTI_OPTION "")
+endif()
+
 add_library(HeniaUI STATIC
     src/BatchCompiler.cpp
     src/Canvas.cpp
@@ -81,7 +91,10 @@ target_include_directories(
 if(MSVC)
     target_compile_options(HeniaUI PRIVATE /W4 /permissive- /utf-8 /GR-)
 else()
-    target_compile_options(HeniaUI PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -fno-rtti)
+    target_compile_options(
+        HeniaUI
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow ${HENIAUI_DISABLE_RTTI_OPTION}
+    )
 endif()
 
 set_target_properties(HeniaUI PROPERTIES
@@ -104,7 +117,10 @@ target_include_directories(
 if(MSVC)
     target_compile_options(HeniaUIGfx PRIVATE /W4 /permissive- /utf-8 /GR-)
 else()
-    target_compile_options(HeniaUIGfx PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -fno-rtti)
+    target_compile_options(
+        HeniaUIGfx
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow ${HENIAUI_DISABLE_RTTI_OPTION}
+    )
 endif()
 set_target_properties(HeniaUIGfx PROPERTIES
     CXX_EXTENSIONS OFF
