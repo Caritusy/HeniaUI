@@ -108,16 +108,25 @@ int main() {
     if (!renderer.initialize(
             *device.Get(),
             DXGI_FORMAT_R8G8B8A8_UNORM,
-            {.instanceCapacity = 128, .submissionCapacity = 2, .batchCapacity = 8, .textureCapacity = 1})
+            {
+                .instanceCapacity = 128,
+                .submissionCapacity = 2,
+                .batchCapacity = 8,
+                .textureCapacity = 1,
+                .textureUploadBatchCapacity = 3,
+            })
         || !renderer.synchronizeTextures(textures, *queue.Get())) {
         std::cerr << renderer.lastError() << '\n';
         return EXIT_FAILURE;
     }
-
-    const TextureHandle overflowTexture = textures.create(TextureFormat::Alpha8, 4, 4, 4, alpha);
-    if (!overflowTexture.valid() || renderer.synchronizeTextures(textures, *queue.Get())
-        || renderer.lastError() != "D3D12 texture store exceeds configured capacity") {
-        fail("D3D12 texture bookkeeping overflow was not rejected deterministically");
+    if (renderer.pendingTextureUploadBatches() != 1
+        || renderer.statistics().textureUploads != 0) {
+        fail("D3D12 texture upload was committed before fence completion");
+    }
+    if (!waitForQueue(*device.Get(), *queue.Get()) || !renderer.pollTextureUploads()
+        || renderer.pendingTextureUploadBatches() != 0
+        || renderer.statistics().textureUploads != 1) {
+        fail("D3D12 texture upload did not commit after fence completion");
     }
 
     Frame frame;
@@ -267,8 +276,58 @@ int main() {
 
     const D3D12RenderStatistics statistics = renderer.statistics();
     if (statistics.drawCalls != 1 || statistics.submittedInstances != 2
-        || statistics.textureUploads != 1 || statistics.instanceUploads != 1) {
+        || statistics.textureUploads != 1 || statistics.textureUploadBatches != 1
+        || statistics.instanceUploads != 1) {
         fail("D3D12 renderer statistics are incorrect");
+    }
+
+    alpha.fill(std::byte{0x80});
+    if (!textures.update(atlas, 4, alpha)
+        || !renderer.synchronizeTextures(textures, *queue.Get())) {
+        fail("D3D12 renderer could not queue the first texture revision");
+    }
+    alpha.fill(std::byte{0x40});
+    if (!textures.update(atlas, 4, alpha)
+        || !renderer.synchronizeTextures(textures, *queue.Get())
+        || renderer.pendingTextureUploadBatches() != 2
+        || renderer.statistics().textureUploads != 1) {
+        fail("D3D12 renderer did not keep repeated revisions pending transactionally");
+    }
+    if (!waitForQueue(*device.Get(), *queue.Get()) || !renderer.pollTextureUploads()
+        || renderer.pendingTextureUploadBatches() != 0
+        || renderer.statistics().textureUploads != 3) {
+        fail("D3D12 renderer did not commit repeated revisions in fence order");
+    }
+
+    if (FAILED(allocator->Reset()) || FAILED(commandList->Reset(allocator.Get(), nullptr))) {
+        fail("Unable to reset D3D12 recording objects for the updated texture");
+    }
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    commandList->ResourceBarrier(1, &barrier);
+    commandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);
+    if (!renderer.record(packet, *commandList.Get(), 1, width, height)
+        || FAILED(commandList->Close())) {
+        fail("D3D12 renderer could not record an updated texture in another submission slot");
+    }
+    queue->ExecuteCommandLists(1, lists);
+    if (!waitForQueue(*device.Get(), *queue.Get())) {
+        fail("D3D12 updated-texture submission timed out");
+    }
+
+    const D3D12RenderStatistics updatedStatistics = renderer.statistics();
+    if (updatedStatistics.drawCalls != 2 || updatedStatistics.submittedInstances != 4
+        || updatedStatistics.instanceUploads != 2
+        || updatedStatistics.textureUploads != 3
+        || updatedStatistics.textureUploadBatches != 3
+        || updatedStatistics.failedTextureUploadBatches != 0) {
+        fail("D3D12 repeated texture update statistics are incorrect");
+    }
+
+    const TextureHandle overflowTexture = textures.create(TextureFormat::Alpha8, 4, 4, 4, alpha);
+    if (!overflowTexture.valid() || renderer.synchronizeTextures(textures, *queue.Get())
+        || renderer.lastError() != "D3D12 texture store exceeds configured capacity") {
+        fail("D3D12 texture bookkeeping overflow was not rejected deterministically");
     }
 
     renderer.shutdown();
