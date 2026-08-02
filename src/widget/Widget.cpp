@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <limits>
 
 namespace henia::ui {
 namespace {
@@ -14,6 +16,39 @@ std::atomic_uint64_t gNextWidgetIdentity{1};
         identity = gNextWidgetIdentity.fetch_add(1, std::memory_order_relaxed);
     }
     return identity;
+}
+
+[[nodiscard]] float normalizedMinimum(float value) noexcept {
+    return std::isfinite(value) ? std::max(value, 0.0F) : 0.0F;
+}
+
+[[nodiscard]] float normalizedMaximum(float value, float minimum) noexcept {
+    if (std::isinf(value) && value > 0.0F) {
+        return std::numeric_limits<float>::max();
+    }
+    if (!std::isfinite(value)) {
+        return minimum;
+    }
+    return std::max(std::max(value, 0.0F), minimum);
+}
+
+[[nodiscard]] Constraints normalized(Constraints constraints) noexcept {
+    Constraints result{};
+    result.minimum.x = normalizedMinimum(constraints.minimum.x);
+    result.minimum.y = normalizedMinimum(constraints.minimum.y);
+    result.maximum.x = normalizedMaximum(constraints.maximum.x, result.minimum.x);
+    result.maximum.y = normalizedMaximum(constraints.maximum.y, result.minimum.y);
+    return result;
+}
+
+[[nodiscard]] float clampMeasured(float value, float minimum, float maximum) noexcept {
+    if (std::isinf(value) && value > 0.0F) {
+        return maximum;
+    }
+    if (!std::isfinite(value)) {
+        return minimum;
+    }
+    return std::clamp(value, minimum, maximum);
 }
 
 } // namespace
@@ -106,9 +141,26 @@ Widget& Widget::addChild(std::unique_ptr<Widget> child) {
 Vec2 Widget::measure(TextPainter& text, Constraints constraints) {
     if (!mVisible) {
         mMeasured = {};
+        mMeasurementDirty = false;
         return {};
     }
-    if (mLayoutDirty) {
+    constraints = normalized(constraints);
+    if (mMeasurementDirty) {
+        for (MeasurementCacheEntry& entry : mMeasurementCache) {
+            entry.valid = false;
+        }
+        mNextMeasurementCacheEntry = 0;
+        mMeasurementDirty = false;
+    }
+    const auto cached = std::find_if(
+        mMeasurementCache.begin(),
+        mMeasurementCache.end(),
+        [constraints](const MeasurementCacheEntry& entry) {
+            return entry.valid && entry.constraints == constraints;
+        });
+    if (cached != mMeasurementCache.end()) {
+        mMeasured = cached->measured;
+    } else {
         mMeasured = onMeasure(text, constraints);
         if (mLayout.width >= 0.0F) {
             mMeasured.x = mLayout.width;
@@ -116,9 +168,16 @@ Vec2 Widget::measure(TextPainter& text, Constraints constraints) {
         if (mLayout.height >= 0.0F) {
             mMeasured.y = mLayout.height;
         }
-        mMeasured.x = std::clamp(mMeasured.x, constraints.minimum.x, constraints.maximum.x);
-        mMeasured.y = std::clamp(mMeasured.y, constraints.minimum.y, constraints.maximum.y);
+        mMeasured.x = clampMeasured(
+            mMeasured.x, constraints.minimum.x, constraints.maximum.x);
+        mMeasured.y = clampMeasured(
+            mMeasured.y, constraints.minimum.y, constraints.maximum.y);
+        MeasurementCacheEntry& entry = mMeasurementCache[mNextMeasurementCacheEntry];
+        entry = {.constraints = constraints, .measured = mMeasured, .valid = true};
+        mNextMeasurementCacheEntry = (mNextMeasurementCacheEntry + 1U) % mMeasurementCache.size();
     }
+    mMeasuredConstraints = constraints;
+    mHasMeasuredConstraints = true;
     return mMeasured;
 }
 
@@ -131,7 +190,10 @@ void Widget::arrange(TextPainter& text, Rect arrangedFrame) {
         return;
     }
     const bool frameChanged = !(mFrame == arrangedFrame);
-    if (!mLayoutDirty && !frameChanged) {
+    const bool measurementContextChanged = mHasMeasuredConstraints
+        && (!mHasArrangedMeasurementConstraints
+            || !(mArrangedMeasurementConstraints == mMeasuredConstraints));
+    if (!mLayoutDirty && !frameChanged && !measurementContextChanged) {
         return;
     }
     if (frameChanged) {
@@ -139,6 +201,10 @@ void Widget::arrange(TextPainter& text, Rect arrangedFrame) {
         markPaintDirty();
     }
     onArrange(text, arrangedFrame);
+    if (mHasMeasuredConstraints) {
+        mArrangedMeasurementConstraints = mMeasuredConstraints;
+        mHasArrangedMeasurementConstraints = true;
+    }
     mLayoutDirty = false;
 }
 
@@ -170,6 +236,7 @@ void Widget::markLayoutDirty() noexcept {
     mPaintDirty = true;
     for (Widget* current = this; current != nullptr; current = current->mParent) {
         current->mLayoutDirty = true;
+        current->mMeasurementDirty = true;
         current->mSubtreePaintDirty = true;
     }
 }

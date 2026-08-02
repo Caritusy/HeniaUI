@@ -92,6 +92,29 @@ query.
 Text is decoded as strict UTF-8, shaped into cached text runs, and rendered from texture atlases. The Win32 font loader is optional and is not part of the platform-neutral core.
 The text-run cache has a configurable maximum entry count and reuses old slots, so rapidly changing telemetry strings cannot cause unbounded process-lifetime growth.
 
+### Widget measurement and panel allocation
+
+Each widget caches its measured size by the normalized pair of minimum/maximum
+constraints, independently from the flag that says it still needs arranging.
+A content or layout-parameter change invalidates measurement for the widget and
+all ancestors. The two-entry constraint cache covers a panel's base and final
+allocation queries without remeasuring stable siblings. The final measurement
+context also ensures that `onArrange()` runs when needed even if the eventual
+rectangle is numerically unchanged.
+Constraint axes are normalized to nonnegative, ordered, finite ranges; positive
+infinity maps to the largest finite float, while NaN, negative infinity, and an
+inverted maximum collapse to the normalized minimum. Measurement results are
+likewise clamped without relying on an invalid `std::clamp` precondition.
+
+Rows and columns measure visible children in paint order against the remaining
+main-axis space after padding, gaps, and nonnegative margins. Arrangement first
+collects those constrained bases, distributes positive leftover space by
+`flexGrow`, then remeasures every child with its exact final main/cross size
+before arranging nested content. On the cross axis, an explicit child width
+(column) or height (row) takes precedence over `stretchCrossAxis`; automatic
+children stretch to the available size. Oversized content is constrained to
+the panel content rectangle instead of pushing later siblings beyond it.
+
 ### Widget mutation and callback ordering
 
 `UiDocument` identifies hovered, captured, and focused widgets by stable widget

@@ -5,6 +5,7 @@
 #include "henia/ui/text/TextLayout.h"
 #include "henia/ui/theme/Theme.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -26,6 +27,8 @@ struct Insets final {
 struct Constraints final {
     Vec2 minimum{};
     Vec2 maximum{};
+
+    friend constexpr bool operator==(Constraints, Constraints) noexcept = default;
 };
 
 struct LayoutParameters final {
@@ -85,6 +88,9 @@ public:
         return reference;
     }
 
+    // Measurement cache keys use normalized minimum and maximum constraints.
+    // Invalid axes collapse deterministically instead of reaching std::clamp
+    // with an inverted range.
     [[nodiscard]] Vec2 measure(TextPainter& text, Constraints constraints);
     void arrange(TextPainter& text, Rect frame);
     void paint(Canvas& canvas, TextPainter& text, const Theme& theme);
@@ -105,6 +111,12 @@ protected:
 private:
     friend class UiDocument;
 
+    struct MeasurementCacheEntry final {
+        Constraints constraints{};
+        Vec2 measured{};
+        bool valid = false;
+    };
+
     [[nodiscard]] std::unique_ptr<Widget> detachChild(std::uint64_t identity) noexcept;
     void setHovered(bool hovered) noexcept;
     void setPressed(bool pressed) noexcept;
@@ -119,6 +131,10 @@ private:
     Rect mFrame{};
     LayoutParameters mLayout{};
     Vec2 mMeasured{};
+    Constraints mMeasuredConstraints{};
+    Constraints mArrangedMeasurementConstraints{};
+    std::array<MeasurementCacheEntry, 2> mMeasurementCache{};
+    std::size_t mNextMeasurementCacheEntry = 0;
     DisplayList mPaintSegment;
     std::uint64_t mPaintRevision = 0;
     std::size_t mRetainedSegmentBegin = 0;
@@ -129,6 +145,9 @@ private:
     bool mPressed = false;
     bool mFocused = false;
     bool mLayoutDirty = true;
+    bool mMeasurementDirty = true;
+    bool mHasMeasuredConstraints = false;
+    bool mHasArrangedMeasurementConstraints = false;
     bool mPaintDirty = true;
     bool mSubtreePaintDirty = true;
     bool mSubtreePaintTopologyDirty = true;
