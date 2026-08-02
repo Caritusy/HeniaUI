@@ -1,6 +1,7 @@
 #include "henia/ui/Frame.h"
 
 #include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -37,18 +38,30 @@ int main() {
 
     const RenderPacket packet = frame.finish();
     const PacketStatistics& stats = packet.statistics();
+    const double averageInstances = stats.batches == 0
+        ? 0.0
+        : static_cast<double>(stats.instances) / static_cast<double>(stats.batches);
+    const std::uint64_t textureSlotCapacity = stats.texturedBatches
+        * DrawBatch::kTextureCapacity;
+    const double textureUtilization = textureSlotCapacity == 0
+        ? 0.0
+        : 100.0 * static_cast<double>(stats.textureSlotsUsed)
+            / static_cast<double>(textureSlotCapacity);
 
     std::cout << "HeniaUI batching sandbox\n"
               << "  source commands : " << stats.sourceCommands << '\n'
-              << "  GPU instances   : " << stats.instances << '\n'
+              << "  compiled inst.  : " << stats.instances << '\n'
               << "  draw batches    : " << stats.batches << '\n'
-              << "  merged commands : " << stats.mergedCommands << '\n'
-              << "  compression     : " << std::fixed << std::setprecision(2)
-              << (stats.sourceCommands == 0
-                      ? 0.0
-                      : 100.0 * static_cast<double>(stats.mergedCommands)
-                            / static_cast<double>(stats.sourceCommands))
-              << "%\n";
+              << "  inst./batch avg : " << std::fixed << std::setprecision(2)
+              << averageInstances << '\n'
+              << "  inst./batch max : " << stats.maxInstancesPerBatch << '\n'
+              << "  batched after 1 : " << stats.batchedInstancesBeyondFirst << '\n'
+              << "  texture slots   : " << stats.textureSlotsUsed << '/'
+              << textureSlotCapacity << " (" << textureUtilization << "%)\n"
+              << "  state boundaries: clip=" << stats.clipStateBoundaries
+              << ", blend=" << stats.blendStateBoundaries
+              << ", texture-full=" << stats.textureTableCapacityBoundaries << '\n'
+              << "  full upload     : " << stats.fullInstanceUploadBytes << " bytes\n";
 
     return stats.batches == 1 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

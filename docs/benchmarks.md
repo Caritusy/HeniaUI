@@ -46,6 +46,15 @@ benchmark with timestamp queries can populate the same fields from
 `RenderProfile::gpuNanoseconds`; HeniaUI never substitutes CPU time for a GPU
 timestamp.
 
+Packet-level batching diagnostics use the same literal definitions as the
+console sandbox: source commands and compiled instances are never conflated;
+instances beyond the first in a batch measure draw-call sharing; texture-table
+utilization excludes texture-free batches; and clip, blend, and full texture
+table transitions are counted separately. No batching ratio is labeled as
+command or instance compression. Each JSON scenario includes a `batching`
+object; `available` is false for comparison models and 3D workloads that do not
+produce a 2D `RenderPacket`.
+
 `cpu_resident_bytes` is the capacity-backed memory directly attributable to the
 scene's display list, packet/instance storage, or tessellated vectors. It is
 reported separately from transient allocation peaks and does not claim to be a

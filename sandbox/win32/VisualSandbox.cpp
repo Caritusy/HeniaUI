@@ -249,10 +249,11 @@ struct WindowInputAttachment final {
     const float available = width - contentLeft - 58.0F;
     const float cardGap = 16.0F;
     const float cardWidth = (available - cardGap * 2.0F) / 3.0F;
-    constexpr std::array<std::string_view, 3> cardTitles{"Draw batches", "UI instances", "Frame storage"};
-    constexpr std::array<std::string_view, 3> cardValues{"1", "4,178", "Stable"};
+    constexpr std::array<std::string_view, 3> cardTitles{
+        "Draw batches", "Compiled instances", "Frame storage"};
+    constexpr std::array<std::string_view, 3> cardValues{"1", "4,185", "Stable"};
     constexpr std::array<std::string_view, 3> cardNotes{
-        "shapes + glyph atlas", "ordered and merged", "zero growth after warm-up"};
+        "shapes + glyph atlas", "4,178 source commands", "zero growth after warm-up"};
     for (std::size_t index = 0; index < cardTitles.size(); ++index) {
         const float left = contentLeft + static_cast<float>(index) * (cardWidth + cardGap);
         const Rect card{{left, 145.0F}, {left + cardWidth, 275.0F}};

@@ -62,6 +62,14 @@ OpenGL and D3D12 both consume the same 60-byte, four-byte-aligned layout through
 five vertex attributes. Header and backend `static_assert`s lock its size,
 offsets, standard-layout property, and shader input compatibility.
 
+`PacketStatistics` keeps source commands, compiled instances, and draw batches
+as independent counts. `batchedInstancesBeyondFirst` is the sum of instances
+after the first in each batch; it describes draw-call sharing, not compression.
+Maximum instances per batch, texture slots used across textured batches,
+clip/blend/texture-capacity boundary counts, and cold full-instance-upload bytes
+make batch efficiency explicit. Actual backend upload bytes remain separate
+because a stable immutable packet can be submitted without another upload.
+
 ### Analytic 2D geometry
 
 Analytic shape instances keep logical SDF bounds separate from raster geometry.

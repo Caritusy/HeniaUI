@@ -27,6 +27,7 @@ struct D3D12RenderStatistics final {
     std::uint64_t drawCalls = 0;
     std::uint64_t submittedInstances = 0;
     std::uint64_t instanceUploads = 0;
+    std::uint64_t uploadedInstanceBytes = 0;
     std::uint64_t textureUploads = 0;
     std::uint64_t fullTextureUploads = 0;
     std::uint64_t partialTextureUploads = 0;
