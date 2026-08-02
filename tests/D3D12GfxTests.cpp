@@ -176,6 +176,7 @@ int main() {
             .boxCapacity = boxes.size(),
             .submissionCapacity = 2,
             .renderTargetFormat = DXGI_FORMAT_R8G8B8A8_UNORM,
+            .instanceStorage = henia::backend::d3d12::InstanceStorageStrategy::GpuLocal,
     };
     if (!renderer.initialize(*device.Get(), rendererConfiguration)) {
         std::cerr << renderer.lastError() << '\n';
@@ -253,6 +254,7 @@ int main() {
     }
     if (renderer.statistics().fullInstanceUploads != 0
         || renderer.statistics().partialInstanceUploads != 0
+        || renderer.statistics().instanceCopyOperations != 0
         || renderer.statistics().drawCalls != 0) {
         fail("D3D12 gfx fence-busy rejection touched submission resources");
     }
@@ -344,6 +346,13 @@ int main() {
     if (statistics.drawCalls != 2 || statistics.submittedInstances != boxes.size() * 2U
         || statistics.fullInstanceUploads != 1 || statistics.partialInstanceUploads != 0
         || statistics.uploadedInstanceBytes != boxes.size() * sizeof(BoxInstance)
+        || statistics.instanceCopyOperations != 1
+        || statistics.copiedInstanceBytes != statistics.uploadedInstanceBytes
+        || statistics.uploadHeapReadBytes != 0
+        || statistics.gpuLocalResidentBytes
+            != rendererConfiguration.boxCapacity * sizeof(BoxInstance)
+                * rendererConfiguration.submissionCapacity
+        || statistics.gpuLocalFrames != 2 || statistics.directUploadFrames != 0
         || statistics.viewUpdates != 2 || statistics.commandListValidationFailures != 1
         || statistics.submissionFenceChecks != 2
         || statistics.submissionSlotBusyRejections != 1
@@ -449,6 +458,17 @@ int main() {
             return EXIT_FAILURE;
         }
     }
+    const D3D12GfxStatistics automaticStatistics = clipRenderer.statistics();
+    if (automaticStatistics.instanceCopyOperations != 0
+        || automaticStatistics.copiedInstanceBytes != 0
+        || automaticStatistics.gpuLocalResidentBytes != 0
+        || automaticStatistics.gpuLocalFrames != 0
+        || automaticStatistics.directUploadFrames == 0
+        || automaticStatistics.uploadHeapReadBytes == 0
+        || (automaticStatistics.adapterArchitectureKnown
+            && !automaticStatistics.adapterUma)) {
+        fail("D3D12 gfx automatic storage did not keep WARP/UMA frames on upload memory");
+    }
     clipRenderer.shutdown();
 
     BoxInstance changed = boxes[7];
@@ -469,7 +489,9 @@ int main() {
     if (!waitForQueue(*device.Get(), *queue.Get())) fail("D3D12 gfx partial-update queue timed out");
     statistics = renderer.statistics();
     if (statistics.partialInstanceUploads != 1 || statistics.drawCalls != 3
-        || statistics.uploadedInstanceBytes != (boxes.size() + 1U) * sizeof(BoxInstance)) {
+        || statistics.uploadedInstanceBytes != (boxes.size() + 1U) * sizeof(BoxInstance)
+        || statistics.instanceCopyOperations != 2
+        || statistics.copiedInstanceBytes != statistics.uploadedInstanceBytes) {
         fail("D3D12 gfx did not upload only the changed instance range");
     }
 
@@ -496,7 +518,9 @@ int main() {
     if (!waitForQueue(*device.Get(), *queue.Get())) fail("D3D12 gfx sparse-update queue timed out");
     statistics = renderer.statistics();
     if (statistics.partialInstanceUploads != 2 || statistics.drawCalls != 4
-        || statistics.uploadedInstanceBytes != (boxes.size() + 3U) * sizeof(BoxInstance)) {
+        || statistics.uploadedInstanceBytes != (boxes.size() + 3U) * sizeof(BoxInstance)
+        || statistics.instanceCopyOperations != 4
+        || statistics.copiedInstanceBytes != statistics.uploadedInstanceBytes) {
         fail("D3D12 gfx sparse update copied the bounding interval instead of two boxes");
     }
 

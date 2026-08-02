@@ -316,6 +316,37 @@ float4 pixelMain(PixelInput input) : SV_Target {
     return description;
 }
 
+struct AdapterArchitecture final {
+    bool known = false;
+    bool uma = true;
+};
+
+[[nodiscard]] AdapterArchitecture queryAdapterArchitecture(ID3D12Device& device) noexcept {
+    D3D12_FEATURE_DATA_ARCHITECTURE1 architecture1{.NodeIndex = 0};
+    if (SUCCEEDED(device.CheckFeatureSupport(
+            D3D12_FEATURE_ARCHITECTURE1,
+            &architecture1,
+            sizeof(architecture1)))) {
+        return {.known = true, .uma = architecture1.UMA != FALSE};
+    }
+    D3D12_FEATURE_DATA_ARCHITECTURE architecture{.NodeIndex = 0};
+    if (SUCCEEDED(device.CheckFeatureSupport(
+            D3D12_FEATURE_ARCHITECTURE,
+            &architecture,
+            sizeof(architecture)))) {
+        return {.known = true, .uma = architecture.UMA != FALSE};
+    }
+    return {};
+}
+
+[[nodiscard]] bool validInstanceStorageStrategy(
+    henia::backend::d3d12::InstanceStorageStrategy strategy) noexcept {
+    using Strategy = henia::backend::d3d12::InstanceStorageStrategy;
+    return strategy == Strategy::Automatic
+        || strategy == Strategy::DirectUpload
+        || strategy == Strategy::GpuLocal;
+}
+
 [[nodiscard]] D3D12_RESOURCE_DESC textureDescription(const TextureView& view) noexcept {
     D3D12_RESOURCE_DESC description{};
     description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -417,10 +448,13 @@ struct D3D12Renderer::Implementation final {
     };
 
     struct Submission final {
-        ComPtr<ID3D12Resource> instances;
+        ComPtr<ID3D12Resource> uploadInstances;
+        ComPtr<ID3D12Resource> gpuLocalInstances;
         std::byte* mapped = nullptr;
-        std::uint64_t uploadedIdentity = 0;
-        std::uint64_t uploadedRevision = 0;
+        std::uint64_t directUploadedIdentity = 0;
+        std::uint64_t directUploadedRevision = 0;
+        std::uint64_t gpuLocalUploadedIdentity = 0;
+        std::uint64_t gpuLocalUploadedRevision = 0;
         std::vector<ComPtr<ID3D12Resource>> retainedTextures;
         std::vector<DescriptorTableCache> descriptorTables;
     };
@@ -481,6 +515,9 @@ struct D3D12Renderer::Implementation final {
     henia::detail::FixedError error;
     std::uint64_t nextTextureUploadFenceValue = 1;
     std::uint64_t nextDescriptorRevision = 1;
+    bool adapterArchitectureKnown = false;
+    bool adapterUma = true;
+    bool gpuLocalResourcesEnabled = false;
     bool ready = false;
 
     [[nodiscard]] bool initialize(
@@ -539,7 +576,10 @@ bool D3D12Renderer::Implementation::initialize(
             || requested.submissionCapacity != configuration.submissionCapacity
             || requested.batchCapacity != configuration.batchCapacity
             || requested.textureCapacity != configuration.textureCapacity
-            || requested.textureUploadBatchCapacity != configuration.textureUploadBatchCapacity) {
+            || requested.textureUploadBatchCapacity != configuration.textureUploadBatchCapacity
+            || requested.instanceStorage != configuration.instanceStorage
+            || requested.gpuLocalInstanceThresholdBytes
+                != configuration.gpuLocalInstanceThresholdBytes) {
             ++statistics.lifecycleRejections;
             error = "D3D12 renderer is already initialized with a different configuration";
             return false;
@@ -571,6 +611,7 @@ bool D3D12Renderer::Implementation::initialize(
             gpuDescriptors)
         || gpuDescriptors > std::numeric_limits<std::uint32_t>::max()
         || !checkedAdd(requested.textureCapacity, 1U, cpuDescriptors)
+        || !validInstanceStorageStrategy(requested.instanceStorage)
         || format == DXGI_FORMAT_UNKNOWN) {
         error = "D3D12 renderer configuration has an invalid capacity or format";
         return false;
@@ -587,6 +628,14 @@ bool D3D12Renderer::Implementation::initialize(
 
     device = &nativeDevice;
     configuration = requested;
+    const AdapterArchitecture architecture = queryAdapterArchitecture(nativeDevice);
+    adapterArchitectureKnown = architecture.known;
+    adapterUma = architecture.uma;
+    using Strategy = henia::backend::d3d12::InstanceStorageStrategy;
+    gpuLocalResourcesEnabled = requested.instanceStorage == Strategy::GpuLocal
+        || (requested.instanceStorage == Strategy::Automatic
+            && architecture.known && !architecture.uma
+            && instanceBytes >= requested.gpuLocalInstanceThresholdBytes);
     renderTargetFormat = format;
     instanceBufferBytes = static_cast<std::uint32_t>(instanceBytes);
     cpuDescriptorCapacity = cpuDescriptors;
@@ -610,6 +659,12 @@ bool D3D12Renderer::Implementation::initialize(
         return false;
     }
     statistics = {};
+    statistics.adapterArchitectureKnown = adapterArchitectureKnown;
+    statistics.adapterUma = adapterUma;
+    if (gpuLocalResourcesEnabled) {
+        statistics.gpuLocalResidentBytes = static_cast<std::uint64_t>(instanceBufferBytes)
+            * configuration.submissionCapacity;
+    }
     nextTextureUploadFenceValue = 1;
     nextDescriptorRevision = 1;
     ready = true;
@@ -820,6 +875,7 @@ bool D3D12Renderer::Implementation::createDescriptorHeaps() noexcept {
 bool D3D12Renderer::Implementation::createSubmissionBuffers() noexcept {
     const std::uint64_t bufferSize = instanceBufferBytes;
     const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
+    const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
     const D3D12_RESOURCE_DESC description = bufferDescription(bufferSize);
     for (Submission& submission : submissions) {
         if (FAILED(device->CreateCommittedResource(
@@ -828,17 +884,28 @@ bool D3D12Renderer::Implementation::createSubmissionBuffers() noexcept {
                 &description,
                 D3D12_RESOURCE_STATE_GENERIC_READ,
                 nullptr,
-                IID_PPV_ARGS(&submission.instances)))) {
+                IID_PPV_ARGS(&submission.uploadInstances)))) {
             error = "D3D12 instance upload buffer creation failed";
             return false;
         }
         void* mapped = nullptr;
         const D3D12_RANGE noRead{0, 0};
-        if (FAILED(submission.instances->Map(0, &noRead, &mapped)) || mapped == nullptr) {
+        if (FAILED(submission.uploadInstances->Map(0, &noRead, &mapped)) || mapped == nullptr) {
             error = "D3D12 instance upload buffer mapping failed";
             return false;
         }
         submission.mapped = static_cast<std::byte*>(mapped);
+        if (gpuLocalResourcesEnabled
+            && FAILED(device->CreateCommittedResource(
+                &defaultHeap,
+                D3D12_HEAP_FLAG_NONE,
+                &description,
+                D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER,
+                nullptr,
+                IID_PPV_ARGS(&submission.gpuLocalInstances)))) {
+            error = "D3D12 GPU-local instance buffer creation failed";
+            return false;
+        }
     }
     return true;
 }
@@ -1470,13 +1537,44 @@ bool D3D12Renderer::Implementation::record(
             submission.retainedTextures[index] = textures[index].resource;
         }
     }
-    if (submission.uploadedIdentity != packet.identity() || submission.uploadedRevision != packet.revision()) {
+    using Strategy = henia::backend::d3d12::InstanceStorageStrategy;
+    const bool useGpuLocal = gpuLocalResourcesEnabled
+        && (configuration.instanceStorage == Strategy::GpuLocal
+            || packetBytes >= configuration.gpuLocalInstanceThresholdBytes);
+    std::uint64_t& uploadedIdentity = useGpuLocal
+        ? submission.gpuLocalUploadedIdentity
+        : submission.directUploadedIdentity;
+    std::uint64_t& uploadedRevision = useGpuLocal
+        ? submission.gpuLocalUploadedRevision
+        : submission.directUploadedRevision;
+    if (uploadedIdentity != packet.identity() || uploadedRevision != packet.revision()) {
         std::memcpy(submission.mapped, packet.instances().data(), packetBytes);
-        submission.uploadedIdentity = packet.identity();
-        submission.uploadedRevision = packet.revision();
+        if (useGpuLocal && packetBytes != 0) {
+            D3D12_RESOURCE_BARRIER transition{};
+            transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            transition.Transition.pResource = submission.gpuLocalInstances.Get();
+            transition.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            transition.Transition.StateBefore = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+            transition.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+            commandList.ResourceBarrier(1, &transition);
+            commandList.CopyBufferRegion(
+                submission.gpuLocalInstances.Get(),
+                0,
+                submission.uploadInstances.Get(),
+                0,
+                packetBytes);
+            std::swap(transition.Transition.StateBefore, transition.Transition.StateAfter);
+            commandList.ResourceBarrier(1, &transition);
+            ++statistics.instanceCopyOperations;
+            statistics.copiedInstanceBytes += packetBytes;
+        }
+        uploadedIdentity = packet.identity();
+        uploadedRevision = packet.revision();
         ++statistics.instanceUploads;
         statistics.uploadedInstanceBytes += packetBytes;
     }
+    if (useGpuLocal) ++statistics.gpuLocalFrames;
+    else ++statistics.directUploadFrames;
 
     const std::array viewportConstants{static_cast<float>(width), static_cast<float>(height)};
     if (usesTextures) {
@@ -1492,8 +1590,11 @@ bool D3D12Renderer::Implementation::record(
     }
     commandList.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+    ID3D12Resource* vertexInstances = useGpuLocal
+        ? submission.gpuLocalInstances.Get()
+        : submission.uploadInstances.Get();
     const D3D12_VERTEX_BUFFER_VIEW instanceView{
-        submission.instances->GetGPUVirtualAddress(),
+        vertexInstances->GetGPUVirtualAddress(),
         instanceBufferBytes,
         static_cast<UINT>(sizeof(DrawInstance)),
     };
@@ -1576,6 +1677,10 @@ bool D3D12Renderer::Implementation::record(
         commandList.DrawInstanced(6, batch.instanceCount, 0, batch.firstInstance);
         ++statistics.drawCalls;
         statistics.submittedInstances += batch.instanceCount;
+        if (!useGpuLocal) {
+            statistics.uploadHeapReadBytes +=
+                static_cast<std::uint64_t>(batch.instanceCount) * sizeof(DrawInstance);
+        }
     }
 
     ++statistics.recordedFrames;
@@ -1653,14 +1758,17 @@ bool D3D12Renderer::Implementation::validateSubmissionReuse(
 
 void D3D12Renderer::Implementation::shutdown() noexcept {
     for (Submission& submission : submissions) {
-        if (submission.instances != nullptr && submission.mapped != nullptr) {
-            submission.instances->Unmap(0, nullptr);
+        if (submission.uploadInstances != nullptr && submission.mapped != nullptr) {
+            submission.uploadInstances->Unmap(0, nullptr);
         }
         submission.mapped = nullptr;
-        submission.uploadedIdentity = 0;
-        submission.uploadedRevision = 0;
+        submission.directUploadedIdentity = 0;
+        submission.directUploadedRevision = 0;
+        submission.gpuLocalUploadedIdentity = 0;
+        submission.gpuLocalUploadedRevision = 0;
         submission.retainedTextures.clear();
-        submission.instances.Reset();
+        submission.gpuLocalInstances.Reset();
+        submission.uploadInstances.Reset();
     }
     submissions.clear();
     textures.clear();
@@ -1687,7 +1795,11 @@ void D3D12Renderer::Implementation::shutdown() noexcept {
     gpuDescriptorCapacity = 0;
     nextTextureUploadFenceValue = 1;
     nextDescriptorRevision = 1;
+    adapterArchitectureKnown = false;
+    adapterUma = true;
+    gpuLocalResourcesEnabled = false;
     ready = false;
+    statistics.gpuLocalResidentBytes = 0;
     statistics.gpuTextureBytes = 0;
     statistics.externalTextures = 0;
 }

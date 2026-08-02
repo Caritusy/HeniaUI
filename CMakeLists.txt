@@ -256,6 +256,37 @@ if(HENIAUI_BUILD_BENCHMARKS AND NOT HENIAUI_ENABLE_ADDRESS_SANITIZER)
         )
     endif()
     set_target_properties(HeniaUIBenchmarks PROPERTIES FOLDER "HeniaUI/Benchmarks")
+
+    if(WIN32)
+        add_executable(
+            HeniaUID3D12InstanceBenchmarks
+            benchmarks/D3D12InstanceStorage.cpp
+        )
+        target_link_libraries(
+            HeniaUID3D12InstanceBenchmarks
+            PRIVATE
+                HeniaUI::Gfx
+                HeniaUI::D3D12
+                d3d12
+                d3dcompiler
+                dxgi
+        )
+        target_compile_features(HeniaUID3D12InstanceBenchmarks PRIVATE cxx_std_23)
+        target_compile_definitions(
+            HeniaUID3D12InstanceBenchmarks
+            PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
+        )
+        if(MSVC)
+            target_compile_options(
+                HeniaUID3D12InstanceBenchmarks
+                PRIVATE /W4 /permissive- /utf-8 /GR-
+            )
+        endif()
+        set_target_properties(
+            HeniaUID3D12InstanceBenchmarks
+            PROPERTIES FOLDER "HeniaUI/Benchmarks"
+        )
+    endif()
 endif()
 
 if(HENIAUI_BUILD_TESTS)

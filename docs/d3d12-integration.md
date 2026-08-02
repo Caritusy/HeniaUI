@@ -27,6 +27,34 @@ Initialization verifies that the configured device supports the RT/DS formats
 and sample counts. D3D12 exposes no query for the command list's current OM
 formats, so the final attachment match remains an explicit host obligation.
 
+## Instance-storage strategy
+
+Both D3D12 configurations expose `instanceStorage` and
+`gpuLocalInstanceThresholdBytes`. `DirectUpload` binds the slot's persistently
+mapped upload resource directly. `GpuLocal` stages changed data in that same
+fence-owned slot, records `CopyBufferRegion` into a default-heap resource, and
+binds the default resource for drawing. `Automatic` is the default: it queries
+`D3D12_FEATURE_ARCHITECTURE1` (falling back to `ARCHITECTURE`), uses direct
+upload on UMA or when architecture is unknown, and uses GPU-local storage on a
+discrete adapter only when submitted instance bytes reach the 64 KiB default
+threshold. The strategy and threshold are explicit overrides, so hosts can
+apply measurements from their own adapters and workloads.
+
+Every submission slot owns its staging and optional default resource. A changed
+GPU-local revision records `VERTEX_AND_CONSTANT_BUFFER -> COPY_DEST`, exact
+buffer copies, then the reverse transition on the host command list. A stable
+revision records neither a copy nor a transition. Gfx `InstanceBatch` dirty
+ranges become independent `CopyBufferRegion` calls; an immutable UI packet
+revision is copied as one contiguous range. `SubmissionReuse` validation occurs
+before staging writes or transitions, so the host fence contract prevents both
+resources from being overwritten while in flight.
+
+Statistics distinguish CPU staging writes (`uploadedInstanceBytes`), copy
+commands/bytes (`instanceCopyOperations`/`copiedInstanceBytes`), vertex data
+read from upload memory (`uploadHeapReadBytes`), allocated default-heap capacity
+(`gpuLocalResidentBytes`), and frames selected for each strategy. Architecture
+availability and the UMA decision are also reported.
+
 ## State overwritten by `record()`
 
 Both renderers overwrite and do not restore:

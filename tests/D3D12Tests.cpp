@@ -131,6 +131,7 @@ int main() {
         .batchCapacity = 8,
         .textureCapacity = 1,
         .textureUploadBatchCapacity = 3,
+        .instanceStorage = henia::backend::d3d12::InstanceStorageStrategy::GpuLocal,
     };
     if (!renderer.initialize(
             *device.Get(),
@@ -356,6 +357,7 @@ int main() {
         fail("D3D12 renderer overwrote a fence-busy submission slot");
     }
     if (renderer.statistics().instanceUploads != 0
+        || renderer.statistics().instanceCopyOperations != 0
         || renderer.statistics().drawCalls != 0) {
         fail("D3D12 fence-busy rejection touched submission resources");
     }
@@ -482,6 +484,13 @@ int main() {
         || statistics.uploadedInstanceBytes
             != (packet.instances().size() + textureFreePacket.instances().size())
                 * sizeof(DrawInstance)
+        || statistics.instanceCopyOperations != 2
+        || statistics.copiedInstanceBytes != statistics.uploadedInstanceBytes
+        || statistics.uploadHeapReadBytes != 0
+        || statistics.gpuLocalResidentBytes
+            != rendererConfiguration.instanceCapacity * sizeof(DrawInstance)
+                * rendererConfiguration.submissionCapacity
+        || statistics.gpuLocalFrames != 3 || statistics.directUploadFrames != 0
         || statistics.descriptorHeapBindings != 2
         || statistics.descriptorTableCopies != packet.batches().size()
         || statistics.descriptorTableCacheHits != packet.batches().size()
@@ -492,6 +501,46 @@ int main() {
         || statistics.commandListValidationFailures != expectedCommandListValidationFailures) {
         fail("D3D12 renderer statistics are incorrect");
     }
+
+    D3D12Renderer automaticRenderer;
+    ComPtr<ID3D12CommandAllocator> automaticAllocator;
+    ComPtr<ID3D12GraphicsCommandList> automaticCommandList;
+    if (!automaticRenderer.initialize(
+            *device.Get(),
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            {
+                .instanceCapacity = 1,
+                .submissionCapacity = 1,
+                .batchCapacity = 1,
+                .textureCapacity = 1,
+                .textureUploadBatchCapacity = 1,
+            })
+        || FAILED(device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(&automaticAllocator)))
+        || FAILED(device->CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            automaticAllocator.Get(),
+            nullptr,
+            IID_PPV_ARGS(&automaticCommandList)))
+        || !automaticRenderer.record(
+            textureFreePacket, *automaticCommandList.Get(), 0, width, height)
+        || FAILED(automaticCommandList->Close())) {
+        fail("D3D12 automatic instance-storage validation failed to record");
+    }
+    const D3D12RenderStatistics automaticStatistics = automaticRenderer.statistics();
+    if (automaticStatistics.instanceCopyOperations != 0
+        || automaticStatistics.copiedInstanceBytes != 0
+        || automaticStatistics.gpuLocalResidentBytes != 0
+        || automaticStatistics.gpuLocalFrames != 0
+        || automaticStatistics.directUploadFrames != 1
+        || automaticStatistics.uploadHeapReadBytes != sizeof(DrawInstance)
+        || (automaticStatistics.adapterArchitectureKnown
+            && !automaticStatistics.adapterUma)) {
+        fail("D3D12 automatic storage did not keep WARP/UMA UI frames on upload memory");
+    }
+    automaticRenderer.shutdown();
 
     alpha.fill(std::byte{0x80});
     const std::array<std::byte, 1> partialAlpha{std::byte{0x80}};
@@ -542,6 +591,12 @@ int main() {
         || updatedStatistics.uploadedInstanceBytes
             != (packet.instances().size() * 2U + textureFreePacket.instances().size())
                 * sizeof(DrawInstance)
+        || updatedStatistics.instanceCopyOperations != 3
+        || updatedStatistics.copiedInstanceBytes
+            != updatedStatistics.uploadedInstanceBytes
+        || updatedStatistics.uploadHeapReadBytes != 0
+        || updatedStatistics.gpuLocalFrames != 4
+        || updatedStatistics.directUploadFrames != 0
         || updatedStatistics.textureUploads != 3
         || updatedStatistics.textureUploadBatches != 3
         || updatedStatistics.failedTextureUploadBatches != 0

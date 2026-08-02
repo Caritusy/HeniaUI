@@ -94,6 +94,9 @@ Top-level non-sanitizer builds also produce `HeniaUIBenchmarks`. Run it with
 `--verify --iterations 25 --warmup 5 --json out/benchmark.json`; the complete
 scene definitions, metrics, reference baseline, and same-runner CI comparison
 policy are in [docs/benchmarks.md](docs/benchmarks.md).
+Windows builds additionally produce `HeniaUID3D12InstanceBenchmarks`, which
+uses real GPU timestamp queries to compare upload-heap and GPU-local instance
+storage across the available UMA and discrete adapters.
 
 The interactive sandbox is hard-capped at 144 FPS even when a hybrid or virtual-display driver ignores the requested swap interval. `--help` exits without creating a GPU context; `--headless` runs exactly three validation frames, and `--snapshot` writes `HeniaUIVisualSandbox.bmp`.
 
@@ -133,7 +136,9 @@ target_link_libraries(MyApplication PRIVATE
 - RTTI is not required by the library.
 - OpenGL consumes an already-current context and restores the pipeline state it changes.
 - D3D12 records into a host-owned command list and never waits from the frame path.
-- D3D12 instance memory is split into fence-owned submission slots.
+- D3D12 instance staging/default memory is split into fence-owned submission
+  slots; automatic storage keeps UMA/small packets on upload memory and moves
+  larger discrete-GPU packets to GPU-local memory.
 - 3D box edges are shader-expanded triangle quads with fixed pixel width; no backend depends on line-width support.
 - Instance content, view/time constants, CPU upload, CPU submit, and optional host-reported GPU timing are tracked separately.
 - Missing host depth attachments produce an explicit depth fallback counter rather than pretending depth testing occurred.
