@@ -46,6 +46,7 @@ enum class WidgetKind : std::uint8_t {
     Label,
     Button,
     NumericInput,
+    TextInput,
 };
 
 class Widget {

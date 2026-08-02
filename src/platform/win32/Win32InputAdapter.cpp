@@ -1,7 +1,11 @@
 #include "henia/ui/platform/win32/Win32InputAdapter.h"
 
+#include "henia/ui/text/Utf8.h"
+
+#include <imm.h>
 #include <windowsx.h>
 
+#include <algorithm>
 #include <utility>
 
 namespace henia::ui {
@@ -115,12 +119,35 @@ bool Win32InputAdapter::handleMessage(
         case WM_SYSKEYUP:
             return mDocument->dispatch(makeKeyEvent(InputEventKind::KeyUp, wParam, lParam));
         case WM_CHAR:
+            if (mCommittedImeOffset < mCommittedImeUnits.size()) {
+                const char16_t unit = static_cast<char16_t>(wParam);
+                if (unit == mCommittedImeUnits[mCommittedImeOffset]) {
+                    ++mCommittedImeOffset;
+                    if (mCommittedImeOffset == mCommittedImeUnits.size()) {
+                        mCommittedImeUnits.clear();
+                        mCommittedImeOffset = 0;
+                    }
+                    return true;
+                }
+                mCommittedImeUnits.clear();
+                mCommittedImeOffset = 0;
+            }
             return handleUtf16Unit(static_cast<char16_t>(wParam));
         case WM_UNICHAR:
             if (wParam == UNICODE_NOCHAR) {
                 return true;
             }
             return handleUnicodeScalar(static_cast<std::uint64_t>(wParam));
+        case WM_IME_STARTCOMPOSITION:
+            mImeActive = dispatchComposition(InputEventKind::CompositionStart);
+            return mImeActive;
+        case WM_IME_COMPOSITION:
+            return handleImeComposition(window, lParam);
+        case WM_IME_ENDCOMPOSITION: {
+            const bool wasActive = mImeActive;
+            cancelComposition();
+            return wasActive;
+        }
         case WM_CAPTURECHANGED: {
             if (mReleasingNativeCapture
                 || reinterpret_cast<HWND>(lParam) == window) {
@@ -136,11 +163,13 @@ bool Win32InputAdapter::handleMessage(
             return false;
         case WM_KILLFOCUS:
             mHighSurrogate = u'\0';
+            cancelComposition();
             cancelInteraction(true);
             return false;
         case WM_DESTROY:
         case WM_NCDESTROY:
             mHighSurrogate = u'\0';
+            cancelComposition();
             cancelInteraction(true);
             return false;
         default:
@@ -222,6 +251,77 @@ bool Win32InputAdapter::handleUnicodeScalar(std::uint64_t value) {
     return dispatchText(scalar) || handled;
 }
 
+bool Win32InputAdapter::handleImeComposition(HWND window, LPARAM flags) {
+    HIMC context = ImmGetContext(window);
+    if (context == nullptr) return false;
+    ScopeExit release([window, context]() noexcept {
+        static_cast<void>(ImmReleaseContext(window, context));
+    });
+
+    const auto read = [context](DWORD kind, std::u16string& output) {
+        const LONG bytes = ImmGetCompositionStringW(context, kind, nullptr, 0);
+        if (bytes < 0 || (bytes % static_cast<LONG>(sizeof(char16_t))) != 0) return false;
+        output.resize(static_cast<std::size_t>(bytes) / sizeof(char16_t));
+        if (bytes == 0) return true;
+        return ImmGetCompositionStringW(context, kind, output.data(), static_cast<DWORD>(bytes))
+            == bytes;
+    };
+
+    bool handled = false;
+    if ((flags & GCS_RESULTSTR) != 0) {
+        std::u16string result;
+        if (!read(GCS_RESULTSTR, result)) return false;
+        const std::string utf8 = utf8FromUtf16(result);
+        handled = dispatchComposition(InputEventKind::CompositionCommit, utf8);
+        mImeActive = false;
+        if (handled) {
+            mCommittedImeUnits = std::move(result);
+            mCommittedImeOffset = 0;
+        }
+    }
+    if ((flags & GCS_COMPSTR) != 0) {
+        std::u16string composition;
+        if (!read(GCS_COMPSTR, composition)) return handled;
+        const LONG cursor = ImmGetCompositionStringW(context, GCS_CURSORPOS, nullptr, 0);
+        const std::size_t unitCursor = cursor < 0
+            ? 0
+            : std::min<std::size_t>(static_cast<std::size_t>(cursor), composition.size());
+        const std::string utf8 = utf8FromUtf16(composition);
+        const std::string prefix = utf8FromUtf16(
+            std::u16string_view(composition).substr(0, unitCursor));
+        mImeActive = true;
+        handled = dispatchComposition(
+            InputEventKind::CompositionUpdate,
+            utf8,
+            prefix.size()) || handled;
+    }
+    return handled;
+}
+
+bool Win32InputAdapter::dispatchComposition(
+    InputEventKind kind,
+    std::string_view text,
+    std::size_t selectionStart,
+    std::size_t selectionLength) {
+    InputEvent event{
+        .kind = kind,
+        .textUtf8 = text,
+        .compositionSelectionStart = selectionStart,
+        .compositionSelectionLength = selectionLength,
+    };
+    addModifiers(event);
+    return mDocument->dispatch(event);
+}
+
+void Win32InputAdapter::cancelComposition() {
+    if (mImeActive) {
+        mImeActive = false;
+        static_cast<void>(dispatchComposition(InputEventKind::CompositionCancel));
+    }
+    mCommittedImeUnits.clear();
+    mCommittedImeOffset = 0;
+}
+
 bool Win32InputAdapter::dispatchText(char32_t value) {
     InputEvent event{.kind = InputEventKind::TextInput, .text = value};
     addModifiers(event);
@@ -282,6 +382,33 @@ bool Win32InputAdapter::validUnicodeScalar(std::uint64_t value) noexcept {
     return value <= 0x10FFFFU && !(value >= 0xD800U && value <= 0xDFFFU);
 }
 
+std::string Win32InputAdapter::utf8FromUtf16(std::u16string_view text) {
+    std::string result;
+    result.reserve(text.size());
+    for (std::size_t index = 0; index < text.size(); ++index) {
+        const char16_t first = text[index];
+        if (first >= 0xD800 && first <= 0xDBFF) {
+            if (index + 1U < text.size()) {
+                const char16_t second = text[index + 1U];
+                if (second >= 0xDC00 && second <= 0xDFFF) {
+                    const char32_t scalar = 0x10000U
+                        + ((static_cast<char32_t>(first) - 0xD800U) << 10U)
+                        + (static_cast<char32_t>(second) - 0xDC00U);
+                    static_cast<void>(appendUtf8(result, scalar));
+                    ++index;
+                    continue;
+                }
+            }
+            static_cast<void>(appendUtf8(result, kReplacementCharacter));
+        } else if (first >= 0xDC00 && first <= 0xDFFF) {
+            static_cast<void>(appendUtf8(result, kReplacementCharacter));
+        } else {
+            static_cast<void>(appendUtf8(result, static_cast<char32_t>(first)));
+        }
+    }
+    return result;
+}
+
 KeyCode Win32InputAdapter::translateKey(WPARAM key) noexcept {
     switch (key) {
         case VK_BACK: return KeyCode::Backspace;
@@ -295,6 +422,12 @@ KeyCode Win32InputAdapter::translateKey(WPARAM key) noexcept {
         case VK_RETURN: return KeyCode::Enter;
         case VK_ESCAPE: return KeyCode::Escape;
         case VK_TAB: return KeyCode::Tab;
+        case 'A': return KeyCode::A;
+        case 'C': return KeyCode::C;
+        case 'V': return KeyCode::V;
+        case 'X': return KeyCode::X;
+        case 'Y': return KeyCode::Y;
+        case 'Z': return KeyCode::Z;
         default: return KeyCode::Unknown;
     }
 }

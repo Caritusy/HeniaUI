@@ -108,8 +108,37 @@ measurable. It makes fragment-work regressions observable alongside draw/instanc
 counts; it is deliberately not presented as a hardware occlusion or timestamp
 query.
 
-Text is decoded as strict UTF-8, shaped into cached text runs, and rendered from texture atlases. The Win32 font loader is optional and is not part of the platform-neutral core.
-The text-run cache has a configurable maximum entry count and reuses old slots, so rapidly changing telemetry strings cannot cause unbounded process-lifetime growth.
+### Text shaping, fallback, and atlas growth
+
+Text storage and cluster offsets are strict UTF-8. The dependency-free default
+shaper performs codepoint lookup and same-face kerning through an ordered font
+fallback chain. `TextShapingBackend` is an optional host integration point for
+HarfBuzz or another complex shaper: it returns visual-order glyph IDs, advances,
+offsets, and UTF-8 cluster ranges. No shaping library is linked by ASCII-only or
+minimal builds.
+
+`TextLayoutCache` stores face/glyph identity, cluster-aware bounds, line metrics,
+caret stops, and hit-test/selection geometry, but no atlas UVs. The independent
+`TextRenderCache` resolves the current atlas pages and creates contiguous
+texture segments only when a layout is painted. `TextRunCache` retains the old
+facade while owning both bounded caches. Font-face revisions invalidate stale
+fallback/layout and render entries lazily without changing a stable
+`FontHandle`.
+
+`DynamicGlyphAtlas` accepts host-rasterized Alpha8 glyphs and grows by allocating
+fixed-size pages. Pages never resize, so normalized UVs already present in an
+immutable packet remain valid; new pages still participate in the existing
+eight-texture batch table. Each insertion uses `TextureStore::updateRegion` and
+publishes the glyph plus a face revision. `Win32FontLoader::appendGlyphs`
+provides the optional GDI rasterizer bridge; the platform-neutral core does not
+depend on it.
+
+`TextEditorState` owns committed UTF-8, codepoint-boundary cursor/selection,
+bounded undo/redo snapshots, clipboard operations, and a separate IME preedit
+range. Preedit updates never mutate committed storage; commit is one undoable
+replacement and cancel is lossless. `TextInput` adds pointer selection,
+selection/caret/composition painting, single- or multi-line entry, shortcuts,
+and fallback fonts on top of that state.
 
 ### Widget measurement and panel allocation
 
@@ -138,7 +167,7 @@ the panel content rectangle instead of pushing later siblings beyond it.
 
 Hit testing always descends visible, enabled containers, but returns a widget
 itself only when `acceptsPointerInput()` opts it in. The base widget, `Panel`,
-and `Label` are passive; `Button` and `NumericInput` explicitly accept pointer
+and `Label` are passive; `Button`, `NumericInput`, and `TextInput` explicitly accept pointer
 input and keyboard focus. Custom controls make the same capability choice
 instead of relying on a speculative `handleInput()` call. A pointer down first
 has to be handled successfully; only then may the document focus, capture, and
@@ -173,8 +202,15 @@ capture, discard a pending UTF-16 high surrogate, and dispatch `FocusLost` to
 clear all interaction. Hosts must route destruction messages to the adapter
 before invalidating its document or adapter pointer.
 
+`WM_IME_STARTCOMPOSITION`, `WM_IME_COMPOSITION`, and
+`WM_IME_ENDCOMPOSITION` become synchronous platform-neutral composition
+start/update/commit/cancel events. Preedit and result strings are converted from
+UTF-16 to UTF-8, including a byte-accurate composition caret. A handled result
+is remembered only across its immediate UTF-16 character delivery and cleared
+at composition end, preventing the committed text from being inserted twice.
+
 The return value is a consumption decision. Pointer, wheel, key, and completed
-text messages return the document handler result. A buffered UTF-16 high
+text/composition messages return the document handler result. A buffered UTF-16 high
 surrogate and `WM_UNICHAR`'s `UNICODE_NOCHAR` capability probe return `true`.
 Capture/focus/cancellation/destruction notifications are observed but return
 `false` so normal host window processing continues. Valid surrogate pairs are

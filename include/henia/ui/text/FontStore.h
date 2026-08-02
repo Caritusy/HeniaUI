@@ -18,6 +18,11 @@ struct GlyphMetrics final {
     Vec2 size{};
     Vec2 bearing{};
     float advance = 0.0F;
+    // Optional backend glyph identifier. Zero keeps the lightweight
+    // codepoint-addressed path used by minimal builds.
+    std::uint32_t glyphId = 0;
+    // Dynamic/paged atlases may override the face's default texture per glyph.
+    TextureHandle atlas{};
 };
 
 struct KerningPair final {
@@ -47,18 +52,25 @@ public:
     [[nodiscard]] float descent() const noexcept;
     [[nodiscard]] float lineGap() const noexcept;
     [[nodiscard]] float lineHeight() const noexcept;
+    [[nodiscard]] std::uint64_t revision() const noexcept;
     [[nodiscard]] const GlyphMetrics* glyph(char32_t codepoint) const noexcept;
+    [[nodiscard]] const GlyphMetrics* glyphById(std::uint32_t glyphId) const noexcept;
+    [[nodiscard]] TextureHandle atlasFor(const GlyphMetrics& glyph) const noexcept;
     [[nodiscard]] float kerning(char32_t left, char32_t right) const noexcept;
     [[nodiscard]] std::size_t storageBytes() const noexcept;
 
 private:
+    friend class FontStore;
+
     [[nodiscard]] static std::uint64_t kerningKey(char32_t left, char32_t right) noexcept;
+    [[nodiscard]] bool appendGlyphs(std::span<const GlyphMetrics> glyphs);
 
     TextureHandle mAtlas{};
     float mPixelSize = 0.0F;
     float mAscent = 0.0F;
     float mDescent = 0.0F;
     float mLineGap = 0.0F;
+    std::uint64_t mRevision = 1;
     std::vector<GlyphMetrics> mGlyphs;
     std::vector<KerningPair> mKerning;
 };
@@ -66,6 +78,9 @@ private:
 class FontStore final {
 public:
     [[nodiscard]] FontHandle add(FontDefinition definition);
+    // Adds or replaces glyph records without invalidating the stable handle.
+    // Layout/render caches observe the face revision and rebuild lazily.
+    [[nodiscard]] bool addGlyphs(FontHandle handle, std::span<const GlyphMetrics> glyphs);
     [[nodiscard]] bool destroy(FontHandle handle) noexcept;
     [[nodiscard]] const FontFace* find(FontHandle handle) const noexcept;
     [[nodiscard]] FontHandle handleAt(std::size_t slotIndex) const noexcept;
