@@ -1,5 +1,6 @@
 #pragma once
 
+#include "henia/backend/d3d12/D3D12InstanceStorage.h"
 #include "henia/backend/d3d12/D3D12SubmissionReuse.h"
 #include "henia/gfx/InstanceBatch.h"
 
@@ -19,6 +20,10 @@ struct D3D12GfxConfiguration final {
     DXGI_FORMAT renderTargetFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
     DXGI_FORMAT depthStencilFormat = DXGI_FORMAT_UNKNOWN;
     std::uint32_t sampleCount = 1;
+    henia::backend::d3d12::InstanceStorageStrategy instanceStorage =
+        henia::backend::d3d12::InstanceStorageStrategy::Automatic;
+    std::size_t gpuLocalInstanceThresholdBytes =
+        henia::backend::d3d12::kDefaultGpuLocalInstanceThresholdBytes;
 };
 
 struct D3D12GfxStatistics final {
@@ -27,7 +32,16 @@ struct D3D12GfxStatistics final {
     std::uint64_t submittedInstances = 0;
     std::uint64_t fullInstanceUploads = 0;
     std::uint64_t partialInstanceUploads = 0;
+    // CPU writes into the submission slot's mapped staging resource.
     std::uint64_t uploadedInstanceBytes = 0;
+    // Default-heap CopyBufferRegion work, separate from staging writes.
+    std::uint64_t instanceCopyOperations = 0;
+    std::uint64_t copiedInstanceBytes = 0;
+    // Logical instance bytes consumed by draws bound directly to upload memory.
+    std::uint64_t uploadHeapReadBytes = 0;
+    std::uint64_t gpuLocalResidentBytes = 0;
+    std::uint64_t gpuLocalFrames = 0;
+    std::uint64_t directUploadFrames = 0;
     std::uint64_t viewUpdates = 0;
     std::uint64_t depthFallbacks = 0;
     std::uint64_t rejectedFrames = 0;
@@ -38,6 +52,8 @@ struct D3D12GfxStatistics final {
     std::uint64_t submissionSlotBusyRejections = 0;
     std::uint64_t deviceRemovalRejections = 0;
     std::uint64_t lifecycleRejections = 0;
+    bool adapterArchitectureKnown = false;
+    bool adapterUma = true;
     RenderProfile profile{};
 };
 

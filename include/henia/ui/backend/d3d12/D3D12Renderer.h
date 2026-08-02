@@ -1,5 +1,6 @@
 #pragma once
 
+#include "henia/backend/d3d12/D3D12InstanceStorage.h"
 #include "henia/backend/d3d12/D3D12SubmissionReuse.h"
 #include "henia/ui/RenderPacket.h"
 #include "henia/ui/resource/TextureStore.h"
@@ -20,6 +21,10 @@ struct D3D12RendererConfiguration final {
     std::uint32_t batchCapacity = 256;
     std::uint32_t textureCapacity = 256;
     std::uint32_t textureUploadBatchCapacity = 3;
+    henia::backend::d3d12::InstanceStorageStrategy instanceStorage =
+        henia::backend::d3d12::InstanceStorageStrategy::Automatic;
+    std::size_t gpuLocalInstanceThresholdBytes =
+        henia::backend::d3d12::kDefaultGpuLocalInstanceThresholdBytes;
 };
 
 struct D3D12RenderStatistics final {
@@ -27,7 +32,16 @@ struct D3D12RenderStatistics final {
     std::uint64_t drawCalls = 0;
     std::uint64_t submittedInstances = 0;
     std::uint64_t instanceUploads = 0;
+    // CPU writes into the submission slot's mapped staging resource.
     std::uint64_t uploadedInstanceBytes = 0;
+    // Default-heap CopyBufferRegion work, separate from staging writes.
+    std::uint64_t instanceCopyOperations = 0;
+    std::uint64_t copiedInstanceBytes = 0;
+    // Logical instance bytes consumed by draws bound directly to upload memory.
+    std::uint64_t uploadHeapReadBytes = 0;
+    std::uint64_t gpuLocalResidentBytes = 0;
+    std::uint64_t gpuLocalFrames = 0;
+    std::uint64_t directUploadFrames = 0;
     std::uint64_t textureUploads = 0;
     std::uint64_t fullTextureUploads = 0;
     std::uint64_t partialTextureUploads = 0;
@@ -49,6 +63,8 @@ struct D3D12RenderStatistics final {
     std::uint64_t submissionSlotBusyRejections = 0;
     std::uint64_t deviceRemovalRejections = 0;
     std::uint64_t lifecycleRejections = 0;
+    bool adapterArchitectureKnown = false;
+    bool adapterUma = true;
 };
 
 // The host owns command allocators, back-buffer transitions, render targets,

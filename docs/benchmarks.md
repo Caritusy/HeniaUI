@@ -119,6 +119,45 @@ still rejecting allocation-volume regressions.
 The absolute floor prevents sub-microsecond retained lookups from failing on
 timer noise.
 
+## D3D12 instance-storage sweep
+
+Windows non-sanitizer builds include a hardware benchmark that records GPU
+timestamp queries around the instance copies and draws. It enumerates one
+adapter per hardware ID and runs 64-instance (4 KiB) and 32,768-instance
+(2 MiB) workloads in static and full-replacement modes with forced direct,
+forced GPU-local, and automatic selection:
+
+```powershell
+cmake --build --preset release --target HeniaUID3D12InstanceBenchmarks
+./out/build/vs2022/Release/HeniaUID3D12InstanceBenchmarks.exe `
+  --iterations 25 --warmup 5
+```
+
+Recorded on 2026-08-02 on the same workstation, using an RTX 5060 Laptop GPU
+and Intel UHD Graphics. Values are median GPU timestamp microseconds; each row
+used 25 measured frames after 5 warmups:
+
+| Adapter | Architecture | Workload | Direct upload | GPU-local | Automatic choice |
+|---|---|---|---:|---:|---|
+| RTX 5060 Laptop | discrete | small static | 2.30 | 1.47 | direct (below 64 KiB) |
+| RTX 5060 Laptop | discrete | small dynamic | 3.78 | 2.91 | direct (below 64 KiB) |
+| RTX 5060 Laptop | discrete | large static | 1,745.86 | 209.60 | GPU-local |
+| RTX 5060 Laptop | discrete | large dynamic | 1,745.60 | 908.19 | GPU-local |
+| Intel UHD | UMA | small static | 18.18 | 26.51 | direct |
+| Intel UHD | UMA | small dynamic | 18.28 | 22.92 | direct |
+| Intel UHD | UMA | large static | 11,783.39 | 11,382.29 | direct |
+| Intel UHD | UMA | large dynamic | 11,429.84 | 11,145.05 | direct |
+
+The discrete large-static result removes repeated PCIe-visible vertex reads
+after warmup; the dynamic result still pays a 2 MiB copy each frame but is
+faster on this adapter. UMA has no separate GPU-local memory advantage and its
+forced copy path increases CPU recording cost, so the default stays direct.
+The 64 KiB threshold deliberately keeps small discrete workloads direct despite
+their tiny timestamp differences, avoiding extra resource/copy complexity for
+microsecond-scale work. These measurements justify the default selector for
+this hardware pair; the public override exists because adapter and workload
+results are not universal.
+
 ## CI behavior
 
 Pull requests run a dedicated `benchmark-regression` job. The base SHA and
