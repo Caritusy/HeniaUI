@@ -3,6 +3,8 @@
 #include "henia/ui/resource/TextureStore.h"
 
 #include "../src/backend/FixedError.h"
+#include "D3D12Validation.h"
+#include "VisualRegression.h"
 
 #include <Windows.h>
 #include <d3d12.h>
@@ -15,6 +17,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <type_traits>
+#include <vector>
 
 namespace {
 
@@ -69,6 +72,10 @@ using Microsoft::WRL::ComPtr;
 int main() {
     using namespace henia::ui;
 
+    if (!henia::test::enableD3D12Validation()) {
+        fail("Unable to enable requested D3D12 validation");
+    }
+
     henia::detail::FixedError diagnostic;
     std::array<char, henia::detail::FixedError::kCapacity + 32U> oversizedDiagnostic{};
     oversizedDiagnostic.fill('x');
@@ -97,12 +104,11 @@ int main() {
     }
 
     TextureStore textures;
+    Frame frame;
+    const RenderPacket packet = henia::test::buildUiVisualScene(textures, frame);
+    const TextureHandle atlas{1};
     std::array<std::byte, 16> alpha{};
     alpha.fill(std::byte{0xFF});
-    const TextureHandle atlas = textures.create(TextureFormat::Alpha8, 4, 4, 4, alpha);
-    if (!atlas.valid()) {
-        fail("Unable to create the test texture");
-    }
 
     D3D12Renderer renderer;
     if (!renderer.initialize(
@@ -129,17 +135,8 @@ int main() {
         fail("D3D12 texture upload did not commit after fence completion");
     }
 
-    Frame frame;
-    frame.reserve(16, 4);
-    Canvas& canvas = frame.begin();
-    canvas.fillRect({{8.0F, 8.0F}, {120.0F, 120.0F}}, {0.85F, 0.12F, 0.18F, 1.0F}, 10.0F);
-    constexpr std::array glyphs{
-        GlyphQuad{{{40.0F, 40.0F}, {88.0F, 88.0F}}, {{0.0F, 0.0F}, {1.0F, 1.0F}}},
-    };
-    canvas.glyphs(atlas, glyphs, {1.0F, 1.0F, 1.0F, 0.4F});
-    const RenderPacket packet = frame.finish();
-    if (packet.batches().size() != 1) {
-        fail("Test UI did not compile into one batch");
+    if (packet.instances().size() != 5 || packet.batches().size() != 2) {
+        fail("Visual regression scene compiled unexpectedly");
     }
 
     constexpr std::uint32_t width = 128;
@@ -259,23 +256,29 @@ int main() {
         || mapped == nullptr) {
         fail("Unable to map the D3D12 readback buffer");
     }
-    const std::size_t centerOffset = footprint.Offset
-        + static_cast<std::size_t>(height / 2) * footprint.Footprint.RowPitch
-        + static_cast<std::size_t>(width / 2) * 4U;
-    const auto red = static_cast<unsigned char>(mapped[centerOffset]);
-    const auto green = static_cast<unsigned char>(mapped[centerOffset + 1]);
-    const auto blue = static_cast<unsigned char>(mapped[centerOffset + 2]);
+    std::vector<henia::test::Rgba8> pixels(static_cast<std::size_t>(width) * height);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::size_t sourceOffset = footprint.Offset
+                + static_cast<std::size_t>(y) * footprint.Footprint.RowPitch
+                + static_cast<std::size_t>(x) * 4U;
+            pixels[static_cast<std::size_t>(y) * width + x] = {
+                static_cast<std::uint8_t>(mapped[sourceOffset]),
+                static_cast<std::uint8_t>(mapped[sourceOffset + 1U]),
+                static_cast<std::uint8_t>(mapped[sourceOffset + 2U]),
+                static_cast<std::uint8_t>(mapped[sourceOffset + 3U]),
+            };
+        }
+    }
     readback->Unmap(0, nullptr);
-    if (red < 180 || green < 60 || blue < 60) {
-        std::cerr << "Unexpected center pixel: "
-                  << static_cast<int>(red) << ','
-                  << static_cast<int>(green) << ','
-                  << static_cast<int>(blue) << '\n';
-        return EXIT_FAILURE;
+    if (!henia::test::matchesUiGolden(pixels, width, height)) {
+        henia::test::writePpm("d3d12-ui-actual.ppm", pixels, width, height);
+        fail("D3D12 output exceeded the documented golden-image tolerance");
     }
 
     const D3D12RenderStatistics statistics = renderer.statistics();
-    if (statistics.drawCalls != 1 || statistics.submittedInstances != 2
+    if (statistics.drawCalls != packet.batches().size()
+        || statistics.submittedInstances != packet.instances().size()
         || statistics.textureUploads != 1 || statistics.textureUploadBatches != 1
         || statistics.instanceUploads != 1) {
         fail("D3D12 renderer statistics are incorrect");
@@ -288,10 +291,14 @@ int main() {
     }
     alpha.fill(std::byte{0x40});
     if (!textures.update(atlas, 4, alpha)
-        || !renderer.synchronizeTextures(textures, *queue.Get())
-        || renderer.pendingTextureUploadBatches() != 2
-        || renderer.statistics().textureUploads != 1) {
+        || !renderer.synchronizeTextures(textures, *queue.Get())) {
         fail("D3D12 renderer did not keep repeated revisions pending transactionally");
+    }
+    const D3D12RenderStatistics queuedStatistics = renderer.statistics();
+    const std::uint32_t pendingRevisions = renderer.pendingTextureUploadBatches();
+    if (pendingRevisions == 0
+        || queuedStatistics.textureUploads + pendingRevisions != 3) {
+        fail("D3D12 renderer lost a completed or pending texture revision");
     }
     if (!waitForQueue(*device.Get(), *queue.Get()) || !renderer.pollTextureUploads()
         || renderer.pendingTextureUploadBatches() != 0
@@ -316,7 +323,8 @@ int main() {
     }
 
     const D3D12RenderStatistics updatedStatistics = renderer.statistics();
-    if (updatedStatistics.drawCalls != 2 || updatedStatistics.submittedInstances != 4
+    if (updatedStatistics.drawCalls != packet.batches().size() * 2U
+        || updatedStatistics.submittedInstances != packet.instances().size() * 2U
         || updatedStatistics.instanceUploads != 2
         || updatedStatistics.textureUploads != 3
         || updatedStatistics.textureUploadBatches != 3
@@ -328,6 +336,10 @@ int main() {
     if (!overflowTexture.valid() || renderer.synchronizeTextures(textures, *queue.Get())
         || renderer.lastError() != "D3D12 texture store exceeds configured capacity") {
         fail("D3D12 texture bookkeeping overflow was not rejected deterministically");
+    }
+
+    if (!henia::test::verifyD3D12Validation(*device.Get())) {
+        fail("D3D12 validation reported an error");
     }
 
     renderer.shutdown();

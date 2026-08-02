@@ -2,16 +2,27 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+env:
+  HENIAUI_TEST_ARTIFACT_DIR: ${{ github.workspace }}/out/test-artifacts
 
 jobs:
   windows:
     runs-on: windows-2022
     strategy:
+      fail-fast: false
       matrix:
         configuration: [Debug, Release]
     steps:
       - uses: actions/checkout@v7
+      - name: Install Mesa software OpenGL
+        uses: ssciwr/setup-mesa-dist-win@v3
+        with:
+          version: '26.0.3'
+          build-type: release-msvc
+          deployment-choice: '1'
       - name: Configure
         run: cmake -S . -B out/build -A x64 -DHENIAUI_BUILD_TESTS=ON -DHENIAUI_BUILD_SANDBOX=ON
       - name: Build
@@ -20,6 +31,98 @@ jobs:
         run: ctest --test-dir out/build -C ${{ matrix.configuration }} --output-on-failure
       - name: Sandbox
         run: ./out/build/${{ matrix.configuration }}/HeniaUISandbox.exe
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.configuration }}-diagnostics
+          if-no-files-found: ignore
+          path: |
+            out/test-artifacts
+            out/build/Testing/Temporary/LastTest.log
+            out/build/CMakeFiles/CMakeConfigureLog.yaml
+
+  windows-clang-asan:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Mesa software OpenGL
+        uses: ssciwr/setup-mesa-dist-win@v3
+      - name: Configure clang-cl with AddressSanitizer
+        run: >-
+          cmake -S . -B out/build -A x64 -T ClangCL
+          -DHENIAUI_BUILD_TESTS=ON
+          -DHENIAUI_BUILD_SANDBOX=ON
+          -DHENIAUI_ENABLE_ADDRESS_SANITIZER=ON
+      - name: Build
+        run: cmake --build out/build --config Debug --parallel
+      - name: Test
+        run: ctest --test-dir out/build -C Debug --output-on-failure
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-clang-asan-diagnostics
+          if-no-files-found: ignore
+          path: |
+            out/test-artifacts
+            out/build/Testing/Temporary/LastTest.log
+            out/build/CMakeFiles/CMakeConfigureLog.yaml
+
+  windows-msvc-asan:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Mesa software OpenGL
+        uses: ssciwr/setup-mesa-dist-win@v3
+      - name: Configure MSVC with AddressSanitizer
+        run: >-
+          cmake -S . -B out/build -A x64
+          -DHENIAUI_BUILD_TESTS=ON
+          -DHENIAUI_BUILD_SANDBOX=ON
+          -DHENIAUI_ENABLE_ADDRESS_SANITIZER=ON
+      - name: Build
+        run: cmake --build out/build --config Debug --parallel
+      - name: Test
+        run: ctest --test-dir out/build -C Debug --output-on-failure
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msvc-asan-diagnostics
+          if-no-files-found: ignore
+          path: |
+            out/test-artifacts
+            out/build/Testing/Temporary/LastTest.log
+            out/build/CMakeFiles/CMakeConfigureLog.yaml
+
+  d3d12-validation:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure
+        run: cmake -S . -B out/build -A x64 -DHENIAUI_BUILD_TESTS=ON -DHENIAUI_BUILD_SANDBOX=OFF
+      - name: Build D3D12 validation tests
+        run: >-
+          cmake --build out/build --config Debug --parallel
+          --target
+          HeniaUID3D12TextureUploadTransactionTests
+          HeniaUID3D12Tests
+          HeniaUID3D12GfxTests
+      - name: Run debug layer, GPU-based validation, and DRED tests
+        env:
+          HENIAUI_D3D12_VALIDATION: '1'
+        run: ctest --test-dir out/build -C Debug -R "HeniaUI.D3D12" --output-on-failure
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: d3d12-validation-diagnostics
+          if-no-files-found: ignore
+          path: |
+            out/test-artifacts
+            out/build/Testing/Temporary/LastTest.log
+            out/build/CMakeFiles/CMakeConfigureLog.yaml
 
   linux:
     runs-on: ubuntu-24.04
@@ -33,3 +136,72 @@ jobs:
         run: ctest --test-dir out/build --output-on-failure
       - name: Sandbox
         run: ./out/build/HeniaUISandbox
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release-diagnostics
+          if-no-files-found: ignore
+          path: |
+            out/test-artifacts
+            out/build/Testing/Temporary/LastTest.log
+            out/build/CMakeFiles/CMakeConfigureLog.yaml
+
+  linux-sanitizers:
+    runs-on: ubuntu-24.04
+    env:
+      ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:check_initialization_order=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure Clang ASan and UBSan
+        env:
+          CC: clang
+          CXX: clang++
+        run: >-
+          cmake -S . -B out/build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DHENIAUI_BUILD_TESTS=ON
+          -DHENIAUI_BUILD_SANDBOX=ON
+          -DHENIAUI_ENABLE_ADDRESS_SANITIZER=ON
+          -DHENIAUI_ENABLE_UNDEFINED_SANITIZER=ON
+      - name: Build
+        run: cmake --build out/build --parallel
+      - name: Test under sanitizers
+        run: ctest --test-dir out/build --output-on-failure
+      - name: Sandbox under sanitizers
+        run: ./out/build/HeniaUISandbox
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-sanitizer-diagnostics
+          if-no-files-found: ignore
+          path: |
+            out/test-artifacts
+            out/build/Testing/Temporary/LastTest.log
+            out/build/CMakeFiles/CMakeConfigureLog.yaml
+
+  installed-package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and install HeniaUI
+        run: |
+          cmake -S . -B out/package-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/out/install -DHENIAUI_BUILD_TESTS=OFF -DHENIAUI_BUILD_SANDBOX=OFF
+          cmake --build out/package-build --parallel --target install
+      - name: Configure installed-package consumer
+        run: cmake -S tests/package-consumer -B out/consumer-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=${{ github.workspace }}/out/install
+      - name: Build and run installed-package consumer
+        run: |
+          cmake --build out/consumer-build --parallel
+          ./out/consumer-build/HeniaUIPackageConsumer
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-package-diagnostics
+          if-no-files-found: ignore
+          path: |
+            out/package-build/CMakeFiles/CMakeConfigureLog.yaml
+            out/consumer-build/CMakeFiles/CMakeConfigureLog.yaml

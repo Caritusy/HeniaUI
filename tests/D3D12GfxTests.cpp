@@ -1,6 +1,9 @@
 #include "henia/gfx/ShapeBatch3D.h"
 #include "henia/gfx/backend/d3d12/D3D12RenderDevice.h"
 
+#include "D3D12Validation.h"
+#include "VisualRegression.h"
+
 #include <Windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -62,6 +65,10 @@ using Microsoft::WRL::ComPtr;
 
 int main() {
     using namespace henia::gfx;
+
+    if (!henia::test::enableD3D12Validation()) {
+        fail("Unable to enable requested D3D12 validation");
+    }
 
     ComPtr<IDXGIFactory6> factory;
     ComPtr<IDXGIAdapter> adapter;
@@ -132,6 +139,12 @@ int main() {
             .color = {0.9F, 0.1F, 0.15F, 1.0F},
         };
     }
+    boxes[0] = {
+        .minimum = {0.60F, -0.5F, -0.25F},
+        .lineWidth = 6.0F,
+        .maximum = {0.90F, 0.5F, 0.25F},
+        .color = {0.1F, 0.9F, 0.2F, 1.0F},
+    };
     builder.replaceBoxes(boxes);
     const InstanceBatch batch = builder.snapshot();
     D3D12RenderDevice renderer;
@@ -187,15 +200,35 @@ int main() {
     if (FAILED(readback->Map(0, &readRange, &mappedMemory)) || mappedMemory == nullptr) {
         fail("Unable to map the D3D12 gfx readback buffer");
     }
-    const auto* pixels = static_cast<const std::byte*>(mappedMemory);
-    const std::size_t edgeOffset = footprint.Offset
-        + static_cast<std::size_t>(height / 2) * footprint.Footprint.RowPitch
-        + static_cast<std::size_t>(width / 4) * 4U;
-    const unsigned red = static_cast<unsigned char>(pixels[edgeOffset]);
-    const unsigned green = static_cast<unsigned char>(pixels[edgeOffset + 1]);
+    const auto* mappedPixels = static_cast<const std::byte*>(mappedMemory);
+    std::vector<henia::test::Rgba8> pixels(static_cast<std::size_t>(width) * height);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::size_t sourceOffset = footprint.Offset
+                + static_cast<std::size_t>(y) * footprint.Footprint.RowPitch
+                + static_cast<std::size_t>(x) * 4U;
+            pixels[static_cast<std::size_t>(y) * width + x] = {
+                static_cast<std::uint8_t>(mappedPixels[sourceOffset]),
+                static_cast<std::uint8_t>(mappedPixels[sourceOffset + 1U]),
+                static_cast<std::uint8_t>(mappedPixels[sourceOffset + 2U]),
+                static_cast<std::uint8_t>(mappedPixels[sourceOffset + 3U]),
+            };
+        }
+    }
     readback->Unmap(0, nullptr);
-    if (red < 100 || red <= green * 2U) {
-        std::cerr << "Unexpected D3D12 gfx edge pixel: " << red << ',' << green << '\n';
+    const henia::test::Rgba8 redEdge = pixels[
+        static_cast<std::size_t>(height / 2) * width + width / 4];
+    const henia::test::Rgba8 nearPlaneEdge = pixels[
+        static_cast<std::size_t>(height / 2) * width + width * 4U / 5U];
+    if (redEdge.red < 100 || redEdge.red <= redEdge.green * 2U
+        || nearPlaneEdge.green < 100
+        || nearPlaneEdge.green <= nearPlaneEdge.red * 2U) {
+        henia::test::writePpm("d3d12-gfx-near-plane-actual.ppm", pixels, width, height);
+        std::cerr << "Unexpected D3D12 gfx golden probes: red="
+                  << static_cast<unsigned>(redEdge.red) << ','
+                  << static_cast<unsigned>(redEdge.green) << " near="
+                  << static_cast<unsigned>(nearPlaneEdge.red) << ','
+                  << static_cast<unsigned>(nearPlaneEdge.green) << '\n';
         return EXIT_FAILURE;
     }
 
@@ -225,6 +258,10 @@ int main() {
     statistics = renderer.statistics();
     if (statistics.partialInstanceUploads != 1 || statistics.drawCalls != 3) {
         fail("D3D12 gfx did not upload only the changed instance range");
+    }
+
+    if (!henia::test::verifyD3D12Validation(*device.Get())) {
+        fail("D3D12 gfx validation reported an error");
     }
 
     renderer.shutdown();
