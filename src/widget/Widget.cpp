@@ -50,6 +50,12 @@ bool Widget::layoutDirty() const noexcept { return mLayoutDirty; }
 
 bool Widget::paintDirty() const noexcept { return mPaintDirty; }
 
+bool Widget::subtreePaintDirty() const noexcept { return mSubtreePaintDirty; }
+
+std::uint64_t Widget::paintSegmentIdentity() const noexcept { return mIdentity; }
+
+std::uint64_t Widget::paintRevision() const noexcept { return mPaintRevision; }
+
 void Widget::setLayoutParameters(LayoutParameters parameters) noexcept {
     if (mLayout.width == parameters.width && mLayout.height == parameters.height
         && mLayout.flexGrow == parameters.flexGrow
@@ -68,6 +74,7 @@ void Widget::setVisible(bool visibleValue) noexcept {
         return;
     }
     mVisible = visibleValue;
+    markPaintTopologyDirty();
     markLayoutDirty();
 }
 
@@ -91,6 +98,7 @@ Widget& Widget::addChild(std::unique_ptr<Widget> child) {
     Widget* pointer = child.get();
     mChildren.push_back(std::move(child));
     pointer->mParent = this;
+    markPaintTopologyDirty();
     markLayoutDirty();
     return *pointer;
 }
@@ -116,11 +124,19 @@ Vec2 Widget::measure(TextPainter& text, Constraints constraints) {
 
 void Widget::arrange(TextPainter& text, Rect arrangedFrame) {
     if (!mVisible) {
+        // Visibility restoration marks layout dirty again. Clearing the hidden
+        // root here prevents an otherwise stable empty document from running a
+        // layout pass on every compose().
+        mLayoutDirty = false;
         return;
     }
-    if (!(mFrame == arrangedFrame)) {
+    const bool frameChanged = !(mFrame == arrangedFrame);
+    if (!mLayoutDirty && !frameChanged) {
+        return;
+    }
+    if (frameChanged) {
         mFrame = arrangedFrame;
-        mPaintDirty = true;
+        markPaintDirty();
     }
     onArrange(text, arrangedFrame);
     mLayoutDirty = false;
@@ -151,17 +167,17 @@ Widget* Widget::hitTest(Vec2 point) noexcept {
 bool Widget::handleInput(const InputEvent&) { return false; }
 
 void Widget::markLayoutDirty() noexcept {
-    mLayoutDirty = true;
     mPaintDirty = true;
-    if (mParent != nullptr) {
-        mParent->markLayoutDirty();
+    for (Widget* current = this; current != nullptr; current = current->mParent) {
+        current->mLayoutDirty = true;
+        current->mSubtreePaintDirty = true;
     }
 }
 
 void Widget::markPaintDirty() noexcept {
     mPaintDirty = true;
-    if (mParent != nullptr) {
-        mParent->markPaintDirty();
+    for (Widget* current = this; current != nullptr; current = current->mParent) {
+        current->mSubtreePaintDirty = true;
     }
 }
 
@@ -201,6 +217,7 @@ std::unique_ptr<Widget> Widget::detachChild(std::uint64_t identityValue) noexcep
     std::unique_ptr<Widget> child = std::move(*iterator);
     mChildren.erase(iterator);
     child->mParent = nullptr;
+    markPaintTopologyDirty();
     markLayoutDirty();
     return child;
 }
@@ -226,11 +243,27 @@ void Widget::setFocused(bool focusedValue) noexcept {
     }
 }
 
-void Widget::clearDirtyRecursive() noexcept {
-    mLayoutDirty = false;
-    mPaintDirty = false;
+void Widget::markPaintTopologyDirty() noexcept {
+    for (Widget* current = this; current != nullptr; current = current->mParent) {
+        current->mSubtreePaintTopologyDirty = true;
+        current->mSubtreePaintDirty = true;
+    }
+}
+
+void Widget::markPaintDirtyRecursive() noexcept {
+    mPaintDirty = true;
+    mSubtreePaintDirty = true;
     for (const std::unique_ptr<Widget>& child : mChildren) {
-        child->clearDirtyRecursive();
+        child->markPaintDirtyRecursive();
+    }
+}
+
+void Widget::clearPaintDirtyRecursive() noexcept {
+    mPaintDirty = false;
+    mSubtreePaintDirty = false;
+    mSubtreePaintTopologyDirty = false;
+    for (const std::unique_ptr<Widget>& child : mChildren) {
+        child->clearPaintDirtyRecursive();
     }
 }
 

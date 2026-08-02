@@ -111,7 +111,14 @@ target_link_libraries(MyApplication PRIVATE
 
 ## Retained controls
 
-`UiDocument` retains layout and paint output until a dirty reason occurs. `Panel`, `Label`, `Button`, and `NumericInput` use direct context/function-pointer callbacks and platform-neutral input events. The Win32 adapter translates an existing host `WndProc` message stream without subclassing or owning the window.
+`UiDocument` retains one stable, revisioned paint segment per widget. A dirty
+leaf rebuilds only its affected branch; unrelated sibling `onPaint()` output and
+compiled segment data are reused in depth-first draw order. Rebuilt/reused
+subtree and segment totals are observable through `UiDocumentStatistics`.
+`Panel`, `Label`, `Button`, and `NumericInput` use direct
+context/function-pointer callbacks and platform-neutral input events. The Win32
+adapter translates an existing host `WndProc` message stream without
+subclassing or owning the window.
 
 Widget interaction uses stable identities. Root replacement, child removal, and
 reparenting requested by callbacks are deferred until the outer dispatch ends;

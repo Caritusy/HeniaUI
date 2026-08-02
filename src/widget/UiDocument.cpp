@@ -12,6 +12,7 @@ void UiDocument::reserve(
     CapacityPolicy capacityPolicy,
     std::size_t snapshotSlots) {
     mFrame.reserve(commandCapacity, batchCapacity, capacityPolicy, snapshotSlots);
+    mRetainedSegments.reserve(commandCapacity);
 }
 
 void UiDocument::setRoot(std::unique_ptr<Widget> rootWidget) {
@@ -75,7 +76,7 @@ Vec2 UiDocument::viewport() const noexcept { return mViewport; }
 void UiDocument::setTheme(Theme themeValue) noexcept {
     mTheme = themeValue;
     if (mRoot != nullptr) {
-        mRoot->markPaintDirty();
+        mRoot->markPaintDirtyRecursive();
     }
 }
 
@@ -83,12 +84,19 @@ const Theme& UiDocument::theme() const noexcept { return mTheme; }
 
 RenderPacket UiDocument::compose() {
     if (mRoot == nullptr || mViewport.x <= 0.0F || mViewport.y <= 0.0F) {
-        Canvas& canvas = mFrame.begin();
-        static_cast<void>(canvas);
-        RenderPacket packet = mFrame.finish();
+        if (mHasPublishedPacket && mPacketRepresentsEmptyDocument) {
+            ++mStatistics.cachedFrames;
+            return mFrame.packet();
+        }
+        const RenderPacket packet = mFrame.finish(std::span<const DisplayListSegment>{});
         if (!mFrame.lastBuildPublished()) {
             ++mStatistics.rejectedCompositions;
+            return packet;
         }
+        mHasPublishedPacket = true;
+        mPacketRepresentsEmptyDocument = true;
+        ++mStatistics.paintPasses;
+        ++mStatistics.revision;
         return packet;
     }
 
@@ -98,15 +106,22 @@ RenderPacket UiDocument::compose() {
         mRoot->arrange(*mText, {{0.0F, 0.0F}, mViewport});
         ++mStatistics.layoutPasses;
     }
-    if (mRoot->paintDirty() || mStatistics.revision == 0) {
-        Canvas& canvas = mFrame.begin();
-        mRoot->paint(canvas, *mText, mTheme);
-        RenderPacket packet = mFrame.finish();
+    if (mRoot->mSubtreePaintDirty || mRoot->mSubtreePaintTopologyDirty
+        || !mHasPublishedPacket || mPacketRepresentsEmptyDocument) {
+        if (mRoot->mSubtreePaintTopologyDirty || mRetainedSegments.empty()) {
+            mRetainedSegments.clear();
+            rebuildSegmentTopology(*mRoot);
+        } else {
+            updateDirtySubtree(*mRoot);
+        }
+        const RenderPacket packet = mFrame.finish(mRetainedSegments);
         if (!mFrame.lastBuildPublished()) {
             ++mStatistics.rejectedCompositions;
             return packet;
         }
-        mRoot->clearDirtyRecursive();
+        mRoot->clearPaintDirtyRecursive();
+        mHasPublishedPacket = true;
+        mPacketRepresentsEmptyDocument = false;
         ++mStatistics.paintPasses;
         ++mStatistics.revision;
         return packet;
@@ -114,6 +129,67 @@ RenderPacket UiDocument::compose() {
 
     ++mStatistics.cachedFrames;
     return mFrame.packet();
+}
+
+void UiDocument::rebuildPaintSegment(Widget& widget) {
+    widget.mPaintSegment.clear();
+    Canvas canvas(widget.mPaintSegment);
+    widget.onPaint(canvas, *mText, mTheme);
+    ++widget.mPaintRevision;
+    if (widget.mPaintRevision == 0) {
+        ++widget.mPaintRevision;
+    }
+    ++mStatistics.rebuiltSegments;
+}
+
+void UiDocument::rebuildSegmentTopology(Widget& widget) {
+    widget.mRetainedSegmentBegin = mRetainedSegments.size();
+    if (!widget.mVisible) {
+        widget.mRetainedSegmentEnd = widget.mRetainedSegmentBegin;
+        return;
+    }
+
+    ++mStatistics.rebuiltSubtrees;
+    if (widget.mPaintDirty || widget.mPaintRevision == 0) {
+        rebuildPaintSegment(widget);
+    } else {
+        ++mStatistics.reusedSegments;
+    }
+    mRetainedSegments.push_back({
+        .identity = widget.mIdentity,
+        .revision = widget.mPaintRevision,
+        .commands = widget.mPaintSegment.commands(),
+    });
+    for (const std::unique_ptr<Widget>& child : widget.mChildren) {
+        rebuildSegmentTopology(*child);
+    }
+    widget.mRetainedSegmentEnd = mRetainedSegments.size();
+}
+
+void UiDocument::updateDirtySubtree(Widget& widget) {
+    if (!widget.mVisible) {
+        return;
+    }
+    if (!widget.mSubtreePaintDirty) {
+        ++mStatistics.reusedSubtrees;
+        mStatistics.reusedSegments += widget.mRetainedSegmentEnd - widget.mRetainedSegmentBegin;
+        return;
+    }
+
+    ++mStatistics.rebuiltSubtrees;
+    if (widget.mPaintDirty) {
+        rebuildPaintSegment(widget);
+        mRetainedSegments[widget.mRetainedSegmentBegin] = {
+            .identity = widget.mIdentity,
+            .revision = widget.mPaintRevision,
+            .commands = widget.mPaintSegment.commands(),
+        };
+    } else {
+        ++mStatistics.reusedSegments;
+    }
+    for (const std::unique_ptr<Widget>& child : widget.mChildren) {
+        updateDirtySubtree(*child);
+    }
 }
 
 bool UiDocument::dispatch(const InputEvent& event) {

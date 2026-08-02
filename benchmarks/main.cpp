@@ -503,7 +503,7 @@ template <typename Operation>
     return result;
 }
 
-[[nodiscard]] ScenarioResult benchmarkDynamicDirty(const Options& options) {
+[[nodiscard]] ScenarioResult benchmarkDynamicFullRepaint(const Options& options) {
     using namespace henia::ui;
     FontStore fonts;
     const FontHandle font = createBenchmarkFont(fonts);
@@ -516,15 +516,17 @@ template <typename Operation>
     RenderPacket packet;
     const Theme theme{};
     const Constraints constraints{{0.0F, 0.0F}, {1280.0F, 720.0F}};
+    static_cast<void>(scene.root->measure(painter, constraints));
+    scene.root->arrange(painter, {{0.0F, 0.0F}, {1280.0F, 720.0F}});
     ScenarioResult result = measureScenario(
-        "retained_dynamic_dirty_ui",
+        "full_repaint_dynamic_ui",
         options,
         [&](std::size_t iteration) {
-            scene.dynamicLabel->setText(iteration % 2U == 0 ? "dynamic-A" : "dynamic-B");
-            const auto layoutStarted = Clock::now();
-            static_cast<void>(scene.root->measure(painter, constraints));
-            scene.root->arrange(painter, {{0.0F, 0.0F}, {1280.0F, 720.0F}});
-            const std::uint64_t layout = nanosecondsSince(layoutStarted);
+            LabelStyle style = scene.dynamicLabel->style();
+            style.color = iteration % 2U == 0
+                ? Color{0.2F, 0.7F, 1.0F, 1.0F}
+                : Color{1.0F, 0.6F, 0.2F, 1.0F};
+            scene.dynamicLabel->setStyle(style);
             const auto paintStarted = Clock::now();
             Canvas& canvas = frame.begin();
             scene.root->paint(canvas, painter, theme);
@@ -533,7 +535,6 @@ template <typename Operation>
             packet = frame.finish();
             const std::uint64_t compile = nanosecondsSince(packetStarted);
             return IterationPhases{
-                .layoutNanoseconds = layout,
                 .paintBuildNanoseconds = paint,
                 .packetCompileNanoseconds = compile,
                 .checksum = packet.identity() ^ packet.revision() ^ iteration,
@@ -547,6 +548,51 @@ template <typename Operation>
     result.coldUploadBytes = result.uploadBytes;
     result.cpuResidentBytes = frame.displayList().capacity() * sizeof(DrawCommand)
         + packet.instanceCapacity() * sizeof(DrawInstance)
+        + packet.batchCapacity() * sizeof(DrawBatch);
+    result.gpuBufferBytes = packet.instanceCapacity() * sizeof(DrawInstance);
+    result.textureBytes = kTextAtlasBytes;
+    return result;
+}
+
+[[nodiscard]] ScenarioResult benchmarkDynamicDirty(const Options& options) {
+    using namespace henia::ui;
+    FontStore fonts;
+    const FontHandle font = createBenchmarkFont(fonts);
+    TextRunCache cache(fonts);
+    cache.reserve(64, 16);
+    TextPainter painter(cache);
+    UiDocument document(painter);
+    WidgetScene scene = createWidgetScene(font);
+    Label* dynamicLabel = scene.dynamicLabel;
+    document.reserve(4096, 32, CapacityPolicy::Fixed);
+    document.setViewport({1280.0F, 720.0F});
+    document.setRoot(std::move(scene.root));
+    RenderPacket packet = document.compose();
+    const UiDocumentStatistics statisticsBefore = document.statistics();
+    ScenarioResult result = measureScenario(
+        "retained_dynamic_dirty_ui",
+        options,
+        [&](std::size_t iteration) {
+            LabelStyle style = dynamicLabel->style();
+            style.color = iteration % 2U == 0
+                ? Color{0.2F, 0.7F, 1.0F, 1.0F}
+                : Color{1.0F, 0.6F, 0.2F, 1.0F};
+            dynamicLabel->setStyle(style);
+            const auto compositionStarted = Clock::now();
+            packet = document.compose();
+            return IterationPhases{
+                .paintBuildNanoseconds = nanosecondsSince(compositionStarted),
+                .checksum = packet.identity() ^ packet.revision() ^ iteration,
+            };
+        });
+    const UiDocumentStatistics statisticsAfter = document.statistics();
+    result.cacheHits = statisticsAfter.reusedSegments - statisticsBefore.reusedSegments;
+    result.cacheMisses = statisticsAfter.rebuiltSegments - statisticsBefore.rebuiltSegments;
+    result.drawCalls = packet.batches().size();
+    result.submittedInstances = packet.instances().size();
+    result.uploadBytes = packet.instances().size() * sizeof(DrawInstance);
+    result.coldUploadBytes = result.uploadBytes;
+    result.cpuResidentBytes = packet.instanceCapacity() * sizeof(DrawInstance)
         + packet.batchCapacity() * sizeof(DrawBatch);
     result.gpuBufferBytes = packet.instanceCapacity() * sizeof(DrawInstance);
     result.textureBytes = kTextAtlasBytes;
@@ -684,12 +730,14 @@ template <typename Operation>
     const ScenarioResult* tessellation = findScenario(results, "imdrawlist_cpu_tessellation");
     const ScenarioResult* primitives = findScenario(results, "henia_many_primitives");
     const ScenarioResult* retained = findScenario(results, "retained_static_ui");
+    const ScenarioResult* fullDynamic = findScenario(results, "full_repaint_dynamic_ui");
     const ScenarioResult* dynamic = findScenario(results, "retained_dynamic_dirty_ui");
     const ScenarioResult* text = findScenario(results, "text_heavy_ui");
     const ScenarioResult* full3d = findScenario(results, "large_3d_full_build");
     const ScenarioResult* dirty3d = findScenario(results, "large_3d_dirty_update");
     bool valid = tessellation != nullptr && primitives != nullptr && retained != nullptr
-        && dynamic != nullptr && text != nullptr && full3d != nullptr && dirty3d != nullptr;
+        && fullDynamic != nullptr && dynamic != nullptr && text != nullptr
+        && full3d != nullptr && dirty3d != nullptr;
     if (!valid) {
         std::cerr << "Benchmark verification: a required scenario is missing\n";
         return false;
@@ -700,8 +748,10 @@ template <typename Operation>
         && retained->allocationsMedian == 0
         && retained->uploadBytes == 0
         && retained->cacheHits >= retained->iterations
-        && dynamic->layoutMedianNanoseconds > 0
-        && dynamic->packetCompileMedianNanoseconds > 0
+        && dynamic->paintBuildMedianNanoseconds > 0
+        && dynamic->cacheHits >= dynamic->iterations
+        && dynamic->cacheMisses >= dynamic->iterations
+        && dynamic->totalMedianNanoseconds < fullDynamic->totalMedianNanoseconds
         && text->cacheHits > 0
         && text->cacheMisses == 0
         && text->submittedInstances >= kGlyphCount * 3U / 4U
@@ -864,10 +914,11 @@ int main(int argc, char** argv) {
     }
     try {
         std::vector<ScenarioResult> results;
-        results.reserve(7);
+        results.reserve(8);
         results.push_back(benchmarkTessellation(options));
         results.push_back(benchmarkManyPrimitives(options));
         results.push_back(benchmarkStaticRetained(options));
+        results.push_back(benchmarkDynamicFullRepaint(options));
         results.push_back(benchmarkDynamicDirty(options));
         results.push_back(benchmarkTextHeavy(options));
         results.push_back(benchmarkLarge3DFull(options));

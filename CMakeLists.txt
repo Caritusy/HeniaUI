@@ -280,6 +280,12 @@ if(HENIAUI_BUILD_TESTS)
     set_target_properties(HeniaUIWidgetTests PROPERTIES FOLDER "HeniaUI/Tests")
     add_test(NAME HeniaUI.Widgets COMMAND HeniaUIWidgetTests)
 
+    add_executable(HeniaUIRetainedWidgetTests tests/RetainedWidgetTests.cpp)
+    target_link_libraries(HeniaUIRetainedWidgetTests PRIVATE HeniaUI::Core)
+    target_compile_features(HeniaUIRetainedWidgetTests PRIVATE cxx_std_23)
+    set_target_properties(HeniaUIRetainedWidgetTests PROPERTIES FOLDER "HeniaUI/Tests")
+    add_test(NAME HeniaUI.Widgets.RetainedSubtrees COMMAND HeniaUIRetainedWidgetTests)
+
     add_executable(HeniaUIGfxTests tests/GfxTests.cpp)
     target_link_libraries(HeniaUIGfxTests PRIVATE HeniaUI::Gfx)
     target_compile_features(HeniaUIGfxTests PRIVATE cxx_std_23)

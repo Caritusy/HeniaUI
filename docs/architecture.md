@@ -4,7 +4,25 @@ HeniaUI deliberately separates retained 2D interface work from general-purpose 3
 
 ## 2D retained pipeline
 
-`UiDocument` owns a widget tree. Layout and paint dirtiness propagate to the root. A stable document returns a cheap handle to the same immutable `RenderPacket` storage, so both CPU composition and backend instance upload are skipped. `Canvas` remains available as the low-level immediate recorder for custom widgets and generated diagrams.
+`UiDocument` owns a widget tree. A widget keeps an independently revisioned
+local display-list segment; paint invalidation propagates only an aggregate
+"dirty descendant" bit through its ancestors. Composition follows dirty
+branches, calls `onPaint()` only for dirty widgets, and skips a stable sibling
+subtree as one retained segment range. Layout invalidation still reaches the
+root when a descendant's desired size can affect its ancestors, but cached
+measurement and unchanged-frame checks avoid remeasuring or arranging stable
+branches. Visibility and child-order changes rebuild the segment topology while
+reusing local segments whose frame and paint revision remain valid.
+
+Segment views stay in depth-first paint order, so partial rebuilds preserve
+clipping and draw order without concatenating stable `DrawCommand` vectors.
+`BatchCompiler` caches validated backend-neutral instances by segment identity
+and revision, then rebuilds only the global batch/texture-table envelope needed
+by each immutable packet. A stable document returns a cheap handle to the same
+`RenderPacket` storage, so both CPU composition and backend instance upload are
+skipped. Null-root and nonpositive-viewport documents likewise retain one empty
+snapshot until their visible output can change. `Canvas` remains available as
+the low-level immediate recorder for custom widgets and generated diagrams.
 
 `RenderPacketBuilder` is the single-producer mutable compile target;
 `RenderPacket` is a copyable, immutable snapshot handle. A builder owns a pool of

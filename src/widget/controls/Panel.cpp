@@ -13,8 +13,27 @@ namespace {
 Panel::Panel(PanelStyle style) noexcept : Widget(WidgetKind::Panel), mStyle(style) {}
 
 void Panel::setStyle(PanelStyle styleValue) noexcept {
+    const bool unchanged = mStyle.background == styleValue.background
+        && mStyle.border == styleValue.border
+        && mStyle.borderWidth == styleValue.borderWidth
+        && mStyle.radius == styleValue.radius
+        && mStyle.padding == styleValue.padding
+        && mStyle.gap == styleValue.gap
+        && mStyle.direction == styleValue.direction
+        && mStyle.stretchCrossAxis == styleValue.stretchCrossAxis;
+    if (unchanged) {
+        return;
+    }
+    const bool layoutChanged = !(mStyle.padding == styleValue.padding)
+        || mStyle.gap != styleValue.gap
+        || mStyle.direction != styleValue.direction
+        || mStyle.stretchCrossAxis != styleValue.stretchCrossAxis;
     mStyle = styleValue;
-    markLayoutDirty();
+    if (layoutChanged) {
+        markLayoutDirty();
+    } else {
+        markPaintDirty();
+    }
 }
 
 const PanelStyle& Panel::style() const noexcept { return mStyle; }

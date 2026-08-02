@@ -36,6 +36,15 @@ struct DrawCommand final {
     float thickness = 0.0F;
 };
 
+// A stable, independently revisioned slice of retained paint output. Segment
+// order is the document's global paint order; commands never borrow state from
+// an adjacent segment.
+struct DisplayListSegment final {
+    std::uint64_t identity = 0;
+    std::uint64_t revision = 0;
+    std::span<const DrawCommand> commands{};
+};
+
 class DisplayList final {
 public:
     void reserve(
