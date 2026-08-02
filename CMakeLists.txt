@@ -28,6 +28,22 @@ if(HENIAUI_ENABLE_ADDRESS_SANITIZER)
                 HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY
                 "${HENIAUI_CLANG_RESOURCE_DIRECTORY}/lib/windows"
             )
+            set(
+                HENIAUI_CLANG_ASAN_DYNAMIC_LIBRARY
+                "${HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY}/clang_rt.asan_dynamic-x86_64.lib"
+            )
+            set(
+                HENIAUI_CLANG_ASAN_THUNK_LIBRARY
+                "${HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY}/clang_rt.asan_dynamic_runtime_thunk-x86_64.lib"
+            )
+            if(NOT EXISTS "${HENIAUI_CLANG_ASAN_DYNAMIC_LIBRARY}"
+                OR NOT EXISTS "${HENIAUI_CLANG_ASAN_THUNK_LIBRARY}")
+                message(FATAL_ERROR "clang-cl AddressSanitizer runtime libraries were not found")
+            endif()
+            # Visual Studio generators invoke lld-link directly, bypassing the
+            # clang driver that would normally add compiler-rt at final link.
+            link_libraries("${HENIAUI_CLANG_ASAN_DYNAMIC_LIBRARY}")
+            add_link_options("/WHOLEARCHIVE:${HENIAUI_CLANG_ASAN_THUNK_LIBRARY}")
         else()
             get_filename_component(
                 HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY
