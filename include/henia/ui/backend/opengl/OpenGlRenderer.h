@@ -21,7 +21,8 @@ struct OpenGlRenderStatistics final {
 
 // OpenGlRenderer never creates, binds, or swaps a native context. Its owner must
 // keep one renderer instance per resource-sharing context group and make the
-// correct OpenGL 3.3+ context current for every call.
+// correct OpenGL 3.3+ context current for every call. The renderer is not
+// movable: its resources must be shut down on the owning context and thread.
 class OpenGlRenderer final {
 public:
     OpenGlRenderer();
@@ -29,8 +30,8 @@ public:
 
     OpenGlRenderer(const OpenGlRenderer&) = delete;
     OpenGlRenderer& operator=(const OpenGlRenderer&) = delete;
-    OpenGlRenderer(OpenGlRenderer&&) noexcept;
-    OpenGlRenderer& operator=(OpenGlRenderer&&) noexcept;
+    OpenGlRenderer(OpenGlRenderer&&) = delete;
+    OpenGlRenderer& operator=(OpenGlRenderer&&) = delete;
 
     [[nodiscard]] bool initialize(std::size_t instanceCapacity = 16384) noexcept;
     [[nodiscard]] bool synchronizeTextures(const TextureStore& textures) noexcept;

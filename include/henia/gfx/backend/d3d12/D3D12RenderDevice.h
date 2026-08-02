@@ -34,6 +34,8 @@ struct D3D12GfxStatistics final {
 
 // The host owns command allocators, RT/DS attachments, transitions, queue
 // submission and fences. A slot is reusable only after its host fence completes.
+// The device is not movable because its resources and submission slots remain
+// associated with that host device and fence lifecycle.
 class D3D12RenderDevice final {
 public:
     D3D12RenderDevice();
@@ -41,8 +43,8 @@ public:
 
     D3D12RenderDevice(const D3D12RenderDevice&) = delete;
     D3D12RenderDevice& operator=(const D3D12RenderDevice&) = delete;
-    D3D12RenderDevice(D3D12RenderDevice&&) noexcept;
-    D3D12RenderDevice& operator=(D3D12RenderDevice&&) noexcept;
+    D3D12RenderDevice(D3D12RenderDevice&&) = delete;
+    D3D12RenderDevice& operator=(D3D12RenderDevice&&) = delete;
 
     [[nodiscard]] bool initialize(ID3D12Device& device, D3D12GfxConfiguration configuration = {}) noexcept;
     [[nodiscard]] bool record(

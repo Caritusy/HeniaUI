@@ -586,8 +586,6 @@ void OpenGlRenderDevice::Implementation::shutdown() noexcept {
 
 OpenGlRenderDevice::OpenGlRenderDevice() : mImplementation(std::make_unique<Implementation>()) {}
 OpenGlRenderDevice::~OpenGlRenderDevice() { shutdown(); }
-OpenGlRenderDevice::OpenGlRenderDevice(OpenGlRenderDevice&&) noexcept = default;
-OpenGlRenderDevice& OpenGlRenderDevice::operator=(OpenGlRenderDevice&&) noexcept = default;
 bool OpenGlRenderDevice::initialize(std::size_t capacityValue) noexcept { return mImplementation->initialize(capacityValue); }
 bool OpenGlRenderDevice::render(
     const InstanceBatch& batch,

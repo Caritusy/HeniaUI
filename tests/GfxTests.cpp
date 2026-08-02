@@ -1,10 +1,15 @@
 #include "henia/gfx/ShapeBatch3D.h"
+#include "henia/gfx/backend/opengl/OpenGlRenderDevice.h"
 
 #include <array>
 #include <cstdlib>
 #include <iostream>
+#include <type_traits>
 
 namespace {
+
+static_assert(!std::is_move_constructible_v<henia::gfx::OpenGlRenderDevice>);
+static_assert(!std::is_move_assignable_v<henia::gfx::OpenGlRenderDevice>);
 
 [[noreturn]] void fail(const char* message) {
     std::cerr << message << '\n';

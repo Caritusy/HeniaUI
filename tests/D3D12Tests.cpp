@@ -12,8 +12,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <type_traits>
 
 namespace {
+
+static_assert(!std::is_move_constructible_v<henia::ui::D3D12Renderer>);
+static_assert(!std::is_move_assignable_v<henia::ui::D3D12Renderer>);
 
 using Microsoft::WRL::ComPtr;
 

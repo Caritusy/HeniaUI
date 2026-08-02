@@ -823,10 +823,6 @@ D3D12Renderer::D3D12Renderer() : mImplementation(std::make_unique<Implementation
 
 D3D12Renderer::~D3D12Renderer() { mImplementation->shutdown(); }
 
-D3D12Renderer::D3D12Renderer(D3D12Renderer&&) noexcept = default;
-
-D3D12Renderer& D3D12Renderer::operator=(D3D12Renderer&&) noexcept = default;
-
 bool D3D12Renderer::initialize(
     ID3D12Device& device,
     DXGI_FORMAT renderTargetFormat,

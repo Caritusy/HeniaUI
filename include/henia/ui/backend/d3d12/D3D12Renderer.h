@@ -31,7 +31,9 @@ struct D3D12RenderStatistics final {
 
 // The host owns command allocators, back-buffer transitions, render targets,
 // queue submission, and fences. A submission slot may be reused only after the
-// host has observed completion of every command list that referenced it.
+// host has observed completion of every command list that referenced it. The
+// renderer is not movable because its resources and submission slots remain
+// associated with that host device and fence lifecycle.
 class D3D12Renderer final {
 public:
     D3D12Renderer();
@@ -39,8 +41,8 @@ public:
 
     D3D12Renderer(const D3D12Renderer&) = delete;
     D3D12Renderer& operator=(const D3D12Renderer&) = delete;
-    D3D12Renderer(D3D12Renderer&&) noexcept;
-    D3D12Renderer& operator=(D3D12Renderer&&) noexcept;
+    D3D12Renderer(D3D12Renderer&&) = delete;
+    D3D12Renderer& operator=(D3D12Renderer&&) = delete;
 
     [[nodiscard]] bool initialize(
         ID3D12Device& device,

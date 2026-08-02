@@ -465,8 +465,6 @@ void D3D12RenderDevice::Implementation::shutdown() noexcept {
 
 D3D12RenderDevice::D3D12RenderDevice() : mImplementation(std::make_unique<Implementation>()) {}
 D3D12RenderDevice::~D3D12RenderDevice() { shutdown(); }
-D3D12RenderDevice::D3D12RenderDevice(D3D12RenderDevice&&) noexcept = default;
-D3D12RenderDevice& D3D12RenderDevice::operator=(D3D12RenderDevice&&) noexcept = default;
 bool D3D12RenderDevice::initialize(ID3D12Device& device, D3D12GfxConfiguration configuration) noexcept {
     return mImplementation->initialize(device, configuration);
 }

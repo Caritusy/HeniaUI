@@ -23,6 +23,8 @@ struct OpenGlGfxStatistics final {
 
 // Host-owned OpenGL context contract. The device allocates only its own pipeline
 // and instance buffer; it never creates, switches, or presents a native context.
+// The device is not movable: its resources must be shut down on the owning
+// context and thread.
 class OpenGlRenderDevice final {
 public:
     OpenGlRenderDevice();
@@ -30,8 +32,8 @@ public:
 
     OpenGlRenderDevice(const OpenGlRenderDevice&) = delete;
     OpenGlRenderDevice& operator=(const OpenGlRenderDevice&) = delete;
-    OpenGlRenderDevice(OpenGlRenderDevice&&) noexcept;
-    OpenGlRenderDevice& operator=(OpenGlRenderDevice&&) noexcept;
+    OpenGlRenderDevice(OpenGlRenderDevice&&) = delete;
+    OpenGlRenderDevice& operator=(OpenGlRenderDevice&&) = delete;
 
     [[nodiscard]] bool initialize(std::size_t boxCapacity = 65536) noexcept;
     [[nodiscard]] bool render(
