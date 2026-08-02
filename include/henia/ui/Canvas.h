@@ -65,6 +65,43 @@ public:
         LineJoin join = LineJoin::Round) noexcept;
     void fillRect(Rect rect, Color color, float rounding = 0.0F) noexcept;
     void strokeRect(Rect rect, Color color, float rounding, float thickness) noexcept;
+    void circle(Vec2 center, float radius, Color color) noexcept;
+    void ellipse(Rect rect, Color color) noexcept;
+    void arc(
+        Rect ellipseBounds,
+        float startRadians,
+        float sweepRadians,
+        Color color,
+        float thickness) noexcept;
+    void capsule(Rect rect, Color color) noexcept;
+    void gradientRect(
+        Rect rect,
+        Color start,
+        Color finish,
+        Vec2 direction = {1.0F, 0.0F},
+        float rounding = 0.0F) noexcept;
+    // A compact analytic approximation: blurRadius controls a Gaussian-like
+    // falloff without allocating an intermediate blur target.
+    void roundedShadow(
+        Rect rect,
+        Color color,
+        float rounding,
+        float blurRadius,
+        Vec2 offset = {}) noexcept;
+    void border(
+        Rect rect,
+        Color color,
+        CornerRadii radii,
+        float thickness) noexcept;
+    // Uniform-border nine-patch mapping in one textured instance. sourceBorder
+    // is normalized within sourceUv and must be in (0, 0.5).
+    void ninePatch(
+        TextureHandle texture,
+        Rect rect,
+        Rect sourceUv,
+        float destinationBorder,
+        float sourceBorder,
+        Color tint = {}) noexcept;
     void image(TextureHandle texture, Rect rect, Color tint = {}) noexcept;
     void glyphs(TextureHandle atlas, std::span<const GlyphQuad> glyphs, Color color) noexcept;
     void glyphs(

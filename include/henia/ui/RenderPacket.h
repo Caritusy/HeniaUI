@@ -15,6 +15,8 @@ struct DrawInstance final {
     // - rect/image/glyph: bounds is geometry, uv is texture data;
     // - stroke: bounds is the tight region, uv is the logical rectangle;
     // - line: bounds contains endpoints, uv contains adjacent endpoints.
+    // - advanced analytic primitives: bounds is geometry and uv is the
+    //   kind-specific four-float parameter block documented by Canvas.
     Rect bounds{};
     Rect uv{};
     Color color{};

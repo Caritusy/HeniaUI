@@ -51,9 +51,11 @@ The retained and compiled streams keep paint order in one contiguous sequence,
 but each entry now carries only two four-float payload rectangles. A regular
 rectangle uses them as geometry and UV data, a line uses them as ordered
 endpoints and neighbours, and a stroke uses them as a tight raster region and
-its original logical rectangle. This tagged reuse removes the separate line
-endpoint pair without introducing per-kind streams, indirection, or additional
-draw calls.
+its original logical rectangle. Advanced analytic primitives reuse the UV
+rectangle and two metrics for parameters such as gradient color, arc angles,
+shadow offset, independent corner radii, and nine-patch borders. This tagged
+reuse removes kind-specific payloads without introducing per-kind streams,
+indirection, or additional draw calls.
 
 `DrawInstance` keeps the full four-float color and two float metrics so HDR and
 additive colors do not lose precision. Its final four bytes contain primitive
@@ -80,6 +82,15 @@ the fragment shader continues to evaluate the caller's original rectangle.
 of shading its full interior. Fixed-capacity callers can use the `Frame::reserve`
 and `UiDocument::reserve` overloads with separate command and expanded-instance
 budgets.
+
+Circle/ellipse, arc, capsule, rounded linear-gradient, cheap rounded-shadow,
+and independent-corner border commands each compile to one 60-byte analytic
+instance. Matching OpenGL GLSL and D3D12 HLSL evaluate their coverage in the
+fragment stage; arcs use round end caps and shadows use a bounded Gaussian-like
+falloff without an intermediate render target. A uniform-border nine-patch uses
+one textured instance and a piecewise UV remap. These focused primitives retain
+the existing batch and texture-table model without introducing a general path
+or filter engine.
 
 Lines are expanded by the vertex shader into oriented pixel-space quads. Their
 width therefore stays in framebuffer pixels at every angle and viewport size;

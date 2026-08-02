@@ -353,6 +353,104 @@ void testTightAnalyticGeometryAndLineStyles() {
         "viewport diagonal line did not compile to a narrow oriented geometry bound");
 }
 
+void testShaderDrivenPrimitivePayloads() {
+    static_assert(sizeof(DrawCommand) == 88, "advanced source commands must remain compact");
+    static_assert(sizeof(DrawInstance) == 60, "advanced instances must reuse the compact payload");
+
+    Frame frame;
+    frame.reserve(8, 8, 2, CapacityPolicy::Fixed);
+    frame.setFragmentAreaTracking(true);
+    Canvas& canvas = frame.begin();
+    canvas.circle({10.0F, 10.0F}, 6.0F, {1.0F, 0.0F, 0.0F, 1.0F});
+    canvas.ellipse({{20.0F, 2.0F}, {40.0F, 18.0F}}, {0.0F, 1.0F, 0.0F, 1.0F});
+    canvas.arc(
+        {{44.0F, 2.0F}, {68.0F, 22.0F}},
+        0.25F,
+        3.0F,
+        {0.0F, 0.0F, 1.0F, 1.0F},
+        3.0F);
+    canvas.capsule({{2.0F, 26.0F}, {34.0F, 38.0F}}, {1.0F, 1.0F, 0.0F, 1.0F});
+    canvas.gradientRect(
+        {{38.0F, 26.0F}, {78.0F, 42.0F}},
+        {1.0F, 0.0F, 0.0F, 1.0F},
+        {0.0F, 0.0F, 1.0F, 0.5F},
+        {1.0F, 0.0F},
+        4.0F);
+    canvas.roundedShadow(
+        {{2.0F, 48.0F}, {30.0F, 70.0F}},
+        {0.0F, 0.0F, 0.0F, 0.5F},
+        5.0F,
+        4.0F,
+        {2.0F, 3.0F});
+    canvas.border(
+        {{34.0F, 48.0F}, {74.0F, 68.0F}},
+        {0.2F, 0.8F, 1.0F, 1.0F},
+        {12.0F, 12.0F, 12.0F, 12.0F},
+        2.0F);
+    canvas.ninePatch(
+        TextureHandle{1},
+        {{78.0F, 48.0F}, {118.0F, 88.0F}},
+        {{0.0F, 0.0F}, {1.0F, 1.0F}},
+        8.0F,
+        0.25F,
+        {1.0F, 1.0F, 1.0F, 1.0F});
+
+    const std::span<const DrawCommand> commands = frame.displayList().commands();
+    require(commands.size() == 8
+            && commands[0].kind == PrimitiveKind::Ellipse
+            && commands[1].kind == PrimitiveKind::Ellipse
+            && commands[2].kind == PrimitiveKind::Arc
+            && commands[3].kind == PrimitiveKind::Capsule
+            && commands[4].kind == PrimitiveKind::GradientRect
+            && commands[5].kind == PrimitiveKind::RoundedShadow
+            && commands[6].kind == PrimitiveKind::BorderRadii
+            && commands[7].kind == PrimitiveKind::NinePatch,
+        "shader-driven primitives did not retain one command per logical primitive");
+    require(commands[4].uv == Rect{{0.0F, 0.0F}, {1.0F, 0.5F}}
+            && commands[4].radius == 4.0F && commands[4].thickness == 0.0F,
+        "gradient did not pack its finish color/direction without expanding the command");
+    require(commands[5].uv.min == Vec2{2.0F, 3.0F}
+            && commands[5].thickness == 4.0F,
+        "rounded shadow did not retain offset/blur parameters");
+    require(commands[6].uv == Rect{{10.0F, 10.0F}, {10.0F, 10.0F}},
+        "independent corner radii were not normalized against adjacent edges");
+
+    const RenderPacket packet = frame.finish();
+    require(packet.instances().size() == 8 && packet.batches().size() == 1
+            && packet.batches()[0].textureCount == 1
+            && packet.statistics().sourceCommands == 8
+            && packet.statistics().instances == 8
+            && packet.statistics().estimatedFragmentArea > 0,
+        "shader-driven primitives did not compile to one shared instance batch");
+    require(packet.instances()[2].kind == PrimitiveKind::Arc
+            && packet.instances()[2].uv.min == Vec2{0.25F, 3.0F}
+            && packet.instances()[7].kind == PrimitiveKind::NinePatch
+            && packet.instances()[7].textureSlot == 0
+            && packet.instances()[7].radius == 8.0F
+            && packet.instances()[7].thickness == 0.25F,
+        "advanced instance payload lost arc or nine-patch parameters");
+
+    DisplayList invalidList;
+    Canvas invalid(invalidList);
+    invalid.circle({}, 0.0F, {});
+    invalid.arc({{0.0F, 0.0F}, {10.0F, 10.0F}}, 0.0F, 0.0F, {}, 1.0F);
+    invalid.gradientRect(
+        {{0.0F, 0.0F}, {10.0F, 10.0F}}, {}, {}, {}, 0.0F);
+    invalid.roundedShadow(
+        {{0.0F, 0.0F}, {10.0F, 10.0F}}, {}, 1.0F, 0.0F);
+    invalid.border(
+        {{0.0F, 0.0F}, {10.0F, 10.0F}}, {}, {-1.0F, 0.0F, 0.0F, 0.0F}, 1.0F);
+    invalid.ninePatch(
+        TextureHandle{1},
+        {{0.0F, 0.0F}, {10.0F, 10.0F}},
+        {{0.0F, 0.0F}, {1.0F, 1.0F}},
+        2.0F,
+        0.5F);
+    require(invalidList.commands().empty() && invalid.rejectedCommands() == 6
+            && invalid.invalidInputCommands() == 6,
+        "invalid shader-driven primitive parameters were accepted");
+}
+
 void testFixedCapacityOverflowIsRejected() {
     Frame frame;
     frame.reserve(1, 1, CapacityPolicy::Fixed);
@@ -803,6 +901,7 @@ int main() {
     testNestedClipIntersection();
     testFailureSafeClippingAndCulling();
     testTightAnalyticGeometryAndLineStyles();
+    testShaderDrivenPrimitivePayloads();
     testFixedCapacityOverflowIsRejected();
     testInvalidGeometryAndCheckedArithmetic();
     testPacketSnapshotsRemainImmutable();

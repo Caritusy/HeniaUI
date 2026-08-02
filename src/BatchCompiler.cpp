@@ -356,7 +356,17 @@ std::uint64_t BatchCompiler::estimateFragmentArea(const DrawInstance& instance) 
             instance.lineJoin());
         area = (length + start + end + kAnalyticAaFringe * 2.0)
             * (static_cast<double>(instance.thickness) + kAnalyticAaFringe * 2.0);
-    } else if (instance.kind == PrimitiveKind::SolidRect) {
+    } else if (instance.kind == PrimitiveKind::RoundedShadow) {
+        const double extent = static_cast<double>(instance.thickness) * 3.0
+            + kAnalyticAaFringe;
+        area = (static_cast<double>(instance.bounds.width()) + extent * 2.0)
+            * (static_cast<double>(instance.bounds.height()) + extent * 2.0);
+    } else if (instance.kind == PrimitiveKind::SolidRect
+        || instance.kind == PrimitiveKind::Ellipse
+        || instance.kind == PrimitiveKind::Arc
+        || instance.kind == PrimitiveKind::Capsule
+        || instance.kind == PrimitiveKind::GradientRect
+        || instance.kind == PrimitiveKind::BorderRadii) {
         area = static_cast<double>(instance.bounds.width() + kAnalyticAaFringe * 2.0F)
             * (instance.bounds.height() + kAnalyticAaFringe * 2.0F);
     } else {

@@ -20,6 +20,13 @@ enum class PrimitiveKind : std::uint8_t {
     Line,
     Image,
     Glyph,
+    Ellipse,
+    Arc,
+    Capsule,
+    GradientRect,
+    RoundedShadow,
+    BorderRadii,
+    NinePatch,
 };
 
 enum class LineCap : std::uint8_t {
@@ -42,9 +49,9 @@ struct DrawCommand final {
     BlendMode blend     = BlendMode::PremultipliedAlpha;
     ClipRect clip{};
     TextureHandle texture{};
-    // For lines, bounds.min/bounds.max are the ordered segment endpoints and
-    // uv.min/uv.max are the optional previous/next neighbours. Other
-    // primitives keep the conventional rectangle and texture-UV meanings.
+    // For lines, bounds are ordered endpoints and uv stores neighbours.
+    // Advanced untextured primitives reuse uv as four compact shader
+    // parameters; image/glyph/nine-patch keep texture-UV meanings.
     Rect bounds{};
     Rect uv{{0.0F, 0.0F}, {1.0F, 1.0F}};
     Color color{};

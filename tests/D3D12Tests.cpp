@@ -129,7 +129,7 @@ int main() {
         .instanceCapacity = 128,
         .submissionCapacity = 2,
         .batchCapacity = 8,
-        .textureCapacity = 1,
+        .textureCapacity = 2,
         .textureUploadBatchCapacity = 3,
         .instanceStorage = henia::backend::d3d12::InstanceStorageStrategy::GpuLocal,
     };
@@ -168,11 +168,11 @@ int main() {
     }
     if (!waitForQueue(*device.Get(), *queue.Get()) || !renderer.pollTextureUploads()
         || renderer.pendingTextureUploadBatches() != 0
-        || renderer.statistics().textureUploads != 1) {
+        || renderer.statistics().textureUploads != 2) {
         fail("D3D12 texture upload did not commit after fence completion");
     }
 
-    if (packet.instances().size() != 17 || packet.batches().size() != 2) {
+    if (packet.instances().size() != 24 || packet.batches().size() != 2) {
         fail("Visual regression scene compiled unexpectedly");
     }
 
@@ -480,7 +480,7 @@ int main() {
     const D3D12RenderStatistics statistics = renderer.statistics();
     if (statistics.drawCalls != packet.batches().size() * 2U + 1U
         || statistics.submittedInstances != packet.instances().size() * 2U + 1U
-        || statistics.textureUploads != 1 || statistics.textureUploadBatches != 1
+        || statistics.textureUploads != 2 || statistics.textureUploadBatches != 1
         || statistics.instanceUploads != 2
         || statistics.uploadedInstanceBytes
             != (packet.instances().size() + textureFreePacket.instances().size())
@@ -568,15 +568,15 @@ int main() {
     const D3D12RenderStatistics queuedStatistics = renderer.statistics();
     const std::uint32_t pendingRevisions = renderer.pendingTextureUploadBatches();
     if (pendingRevisions == 0
-        || queuedStatistics.textureUploads + pendingRevisions != 3) {
+        || queuedStatistics.textureUploads + pendingRevisions != 4) {
         fail("D3D12 renderer lost a completed or pending texture revision");
     }
     if (!waitForQueue(*device.Get(), *queue.Get()) || !renderer.pollTextureUploads()
         || renderer.pendingTextureUploadBatches() != 0
-        || renderer.statistics().textureUploads != 3
-        || renderer.statistics().fullTextureUploads != 2
+        || renderer.statistics().textureUploads != 4
+        || renderer.statistics().fullTextureUploads != 3
         || renderer.statistics().partialTextureUploads != 1
-        || renderer.statistics().uploadedTextureBytes != 33) {
+        || renderer.statistics().uploadedTextureBytes != 97) {
         fail("D3D12 renderer did not commit repeated revisions in fence order");
     }
 
@@ -609,7 +609,7 @@ int main() {
         || updatedStatistics.uploadHeapReadBytes != 0
         || updatedStatistics.gpuLocalFrames != 4
         || updatedStatistics.directUploadFrames != 0
-        || updatedStatistics.textureUploads != 3
+        || updatedStatistics.textureUploads != 4
         || updatedStatistics.textureUploadBatches != 3
         || updatedStatistics.failedTextureUploadBatches != 0
         || updatedStatistics.descriptorHeapBindings != 3

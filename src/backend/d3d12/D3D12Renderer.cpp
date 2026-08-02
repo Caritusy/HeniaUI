@@ -94,7 +94,14 @@ PixelInput vertexMain(VertexInput input) {
         float along = lerp(-startExtension, segmentLength + endExtension, corner.x);
         float across = lerp(-halfWidth - 2.0, halfWidth + 2.0, corner.y);
         pixel = start + direction * along + normal * across;
-    } else if (kind == 0) {
+    } else if (kind == 9) {
+        float extent = input.metrics.y * 3.0 + 2.0;
+        pixel = lerp(
+            input.bounds.xy + input.uv.xy - extent,
+            input.bounds.zw + input.uv.xy + extent,
+            corner);
+    } else if (kind == 0 || kind == 5 || kind == 6 || kind == 7
+        || kind == 8 || kind == 10) {
         pixel = lerp(input.bounds.xy - 2.0, input.bounds.zw + 2.0, corner);
     } else {
         pixel = lerp(input.bounds.xy, input.bounds.zw, corner);
@@ -135,10 +142,62 @@ float roundedBoxDistance(float2 positionValue, float2 halfSize, float radius) {
     return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - radius;
 }
 
+float variableRoundedBoxDistance(float2 positionValue, float2 halfSize, float4 radii) {
+    float radius = positionValue.x < 0.0
+        ? (positionValue.y < 0.0 ? radii.x : radii.w)
+        : (positionValue.y < 0.0 ? radii.y : radii.z);
+    radius = min(max(radius, 0.0), min(halfSize.x, halfSize.y));
+    float2 q = abs(positionValue) - halfSize + radius;
+    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - radius;
+}
+
+float ellipseDistance(float2 positionValue, float2 halfSize) {
+    float2 safeHalfSize = max(halfSize, 0.001);
+    return (length(positionValue / safeHalfSize) - 1.0)
+        * min(safeHalfSize.x, safeHalfSize.y);
+}
+
+float arcDistance(
+    float2 positionValue,
+    float2 halfSize,
+    float start,
+    float sweep,
+    float thickness) {
+    const float tau = 6.28318530718;
+    float halfWidth = thickness * 0.5;
+    float2 pathRadii = max(halfSize - halfWidth, 0.001);
+    float angle = atan2(positionValue.y / pathRadii.y, positionValue.x / pathRadii.x);
+    float direction = sweep < 0.0 ? -1.0 : 1.0;
+    float relative = fmod(direction * (angle - start), tau);
+    if (relative < 0.0) relative += tau;
+    float span = abs(sweep);
+    float radial = abs(ellipseDistance(positionValue, pathRadii)) - halfWidth;
+    if (span >= tau - 0.0001 || relative <= span) return radial;
+    float2 startPoint = float2(cos(start), sin(start)) * pathRadii;
+    float finish = start + sweep;
+    float2 finishPoint = float2(cos(finish), sin(finish)) * pathRadii;
+    return min(length(positionValue - startPoint), length(positionValue - finishPoint)) - halfWidth;
+}
+
+float ninePatchCoordinate(float value, float destinationBorder, float sourceBorder) {
+    if (value < destinationBorder) {
+        return value / max(destinationBorder, 0.0001) * sourceBorder;
+    }
+    if (value > 1.0 - destinationBorder) {
+        return 1.0 - (1.0 - value) / max(destinationBorder, 0.0001) * sourceBorder;
+    }
+    return sourceBorder
+        + (value - destinationBorder) / max(1.0 - destinationBorder * 2.0, 0.0001)
+            * (1.0 - sourceBorder * 2.0);
+}
+
 float boxDistance(float2 positionValue, float2 halfSize) {
     float2 q = abs(positionValue) - halfSize;
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
 }
+
+)hlsl"
+R"hlsl(
 
 float cappedSegmentDistance(
     float2 positionValue,
@@ -280,10 +339,97 @@ float4 pixelMain(PixelInput input) : SV_Target {
             if (nextDistance < distanceToLine) discard;
         }
         coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToLine);
+    } else if (input.primitiveKind == 5) {
+        float2 halfSize = (input.linePoints.zw - input.linePoints.xy) * 0.5;
+        float2 centered = input.pixelPosition
+            - (input.linePoints.xy + input.linePoints.zw) * 0.5;
+        float distanceToEdge = ellipseDistance(centered, halfSize);
+        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
+    } else if (input.primitiveKind == 6) {
+        float2 halfSize = (input.linePoints.zw - input.linePoints.xy) * 0.5;
+        float2 centered = input.pixelPosition
+            - (input.linePoints.xy + input.linePoints.zw) * 0.5;
+        float distanceToEdge = arcDistance(
+            centered,
+            halfSize,
+            input.lineNeighbors.x,
+            input.lineNeighbors.y,
+            input.shapeMetrics.y);
+        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
+    } else if (input.primitiveKind == 7) {
+        float2 primitiveSize = input.linePoints.zw - input.linePoints.xy;
+        float2 centered = input.pixelPosition
+            - (input.linePoints.xy + input.linePoints.zw) * 0.5;
+        float distanceToEdge = roundedBoxDistance(
+            centered,
+            primitiveSize * 0.5,
+            min(primitiveSize.x, primitiveSize.y) * 0.5);
+        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
+    } else if (input.primitiveKind == 8) {
+        float2 primitiveSize = input.linePoints.zw - input.linePoints.xy;
+        float2 halfSize = primitiveSize * 0.5;
+        float2 centered = input.pixelPosition
+            - (input.linePoints.xy + input.linePoints.zw) * 0.5;
+        float distanceToEdge = roundedBoxDistance(
+            centered,
+            halfSize,
+            min(input.shapeMetrics.x, min(primitiveSize.x, primitiveSize.y) * 0.5));
+        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
+        float2 direction = float2(cos(input.shapeMetrics.y), sin(input.shapeMetrics.y));
+        float extent = max(dot(abs(direction), halfSize), 0.0001);
+        float amount = saturate(0.5 + dot(centered, direction) / (extent * 2.0));
+        color = lerp(input.tintColor, input.lineNeighbors, amount);
+    } else if (input.primitiveKind == 9) {
+        float2 center = (input.linePoints.xy + input.linePoints.zw) * 0.5
+            + input.lineNeighbors.xy;
+        float2 halfSize = (input.linePoints.zw - input.linePoints.xy) * 0.5;
+        float distanceToEdge = roundedBoxDistance(
+            input.pixelPosition - center,
+            halfSize,
+            min(input.shapeMetrics.x, min(halfSize.x, halfSize.y)));
+        float normalizedDistance = max(distanceToEdge, 0.0)
+            / max(input.shapeMetrics.y, 0.001);
+        coverage = distanceToEdge <= 0.0
+            ? 1.0
+            : exp(-0.5 * normalizedDistance * normalizedDistance);
+    } else if (input.primitiveKind == 10) {
+        float2 primitiveSize = input.linePoints.zw - input.linePoints.xy;
+        float2 halfSize = primitiveSize * 0.5;
+        float2 centered = input.pixelPosition
+            - (input.linePoints.xy + input.linePoints.zw) * 0.5;
+        float distanceToEdge = variableRoundedBoxDistance(
+            centered,
+            halfSize,
+            input.lineNeighbors);
+        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        float outer = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
+        float borderWidth = min(input.shapeMetrics.y, min(halfSize.x, halfSize.y));
+        float2 innerHalfSize = max(halfSize - borderWidth, 0.001);
+        float innerDistance = variableRoundedBoxDistance(
+            centered,
+            innerHalfSize,
+            max(input.lineNeighbors - borderWidth, 0.0));
+        float inner = 1.0 - smoothstep(-antiAlias, antiAlias, innerDistance);
+        coverage = max(outer - inner, 0.0);
     } else if (input.primitiveKind == 3) {
         color *= sampleTexture(input.textureSlot, input.textureUv);
     } else if (input.primitiveKind == 4) {
         color.a *= sampleTexture(input.textureSlot, input.textureUv).r;
+    } else if (input.primitiveKind == 11) {
+        float2 primitiveSize = input.linePoints.zw - input.linePoints.xy;
+        float2 local = saturate((input.pixelPosition - input.linePoints.xy) / primitiveSize);
+        float2 destinationBorder = min(
+            input.shapeMetrics.x / primitiveSize,
+            0.5);
+        float2 mapped = float2(
+            ninePatchCoordinate(local.x, destinationBorder.x, input.shapeMetrics.y),
+            ninePatchCoordinate(local.y, destinationBorder.y, input.shapeMetrics.y));
+        float2 uv = lerp(input.lineNeighbors.xy, input.lineNeighbors.zw, mapped);
+        color *= sampleTexture(input.textureSlot, uv);
     }
 
     color.a *= coverage;

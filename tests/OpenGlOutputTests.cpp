@@ -842,9 +842,9 @@ int main() {
     const OpenGlRenderStatistics statistics = renderer.statistics();
     if (statistics.successfulFrames != 99 || statistics.frameAttempts != 101
         || statistics.instanceUploads != 65
-        || statistics.textureUploads != 3
-        || statistics.fullTextureUploads != 2 || statistics.partialTextureUploads != 1
-        || statistics.uploadedTextureBytes != 33 || statistics.gpuTextureBytes != 16
+        || statistics.textureUploads != 4
+        || statistics.fullTextureUploads != 3 || statistics.partialTextureUploads != 1
+        || statistics.uploadedTextureBytes != 97 || statistics.gpuTextureBytes != 80
         || statistics.uploadFenceFailures != 0 || statistics.rejectedFrames != 2
         || statistics.invalidInputFrames != 1 || statistics.capacityRejectedFrames != 0
         || statistics.wrongContextCalls != 3 || statistics.ignoredHostErrors == 0
