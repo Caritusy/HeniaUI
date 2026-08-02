@@ -465,9 +465,10 @@ int main() {
     }
 
     alpha.fill(std::byte{0x80});
-    if (!textures.update(atlas, 4, alpha)
+    const std::array<std::byte, 1> partialAlpha{std::byte{0x80}};
+    if (!textures.updateRegion(atlas, {1, 1, 1, 1}, 1, partialAlpha)
         || !renderer.synchronizeTextures(textures, *queue.Get())) {
-        fail("D3D12 renderer could not queue the first texture revision");
+        fail("D3D12 renderer could not queue a partial texture revision");
     }
     alpha.fill(std::byte{0x40});
     if (!textures.update(atlas, 4, alpha)
@@ -482,7 +483,10 @@ int main() {
     }
     if (!waitForQueue(*device.Get(), *queue.Get()) || !renderer.pollTextureUploads()
         || renderer.pendingTextureUploadBatches() != 0
-        || renderer.statistics().textureUploads != 3) {
+        || renderer.statistics().textureUploads != 3
+        || renderer.statistics().fullTextureUploads != 2
+        || renderer.statistics().partialTextureUploads != 1
+        || renderer.statistics().uploadedTextureBytes != 33) {
         fail("D3D12 renderer did not commit repeated revisions in fence order");
     }
 
@@ -514,6 +518,68 @@ int main() {
         || updatedStatistics.descriptorTableCacheHits != packet.batches().size()
         || updatedStatistics.textureFreeFrames != 1) {
         fail("D3D12 repeated texture update statistics are incorrect");
+    }
+
+    if (!textures.destroy(atlas)
+        || !renderer.synchronizeTextures(textures, *queue.Get())
+        || renderer.statistics().retiredTextures == 0) {
+        fail("D3D12 renderer did not retire a destroyed texture generation");
+    }
+    if (FAILED(allocator->Reset()) || FAILED(commandList->Reset(allocator.Get(), nullptr))
+        || renderer.record(packet, *commandList.Get(), 0, width, height)) {
+        fail("D3D12 renderer accepted a packet holding a destroyed texture generation");
+    }
+    const TextureHandle replacementAtlas = textures.create(
+        TextureFormat::Alpha8, 4, 4, 4, alpha);
+    if (!replacementAtlas.valid() || replacementAtlas.value() != atlas.value()
+        || replacementAtlas.generation() == atlas.generation()
+        || !renderer.synchronizeTextures(textures, *queue.Get())
+        || !waitForQueue(*device.Get(), *queue.Get())
+        || !renderer.pollTextureUploads()) {
+        fail("D3D12 renderer could not synchronize a reused texture slot");
+    }
+    Frame replacementFrame;
+    replacementFrame.begin().image(
+        replacementAtlas, {{0.0F, 0.0F}, {16.0F, 16.0F}});
+    const RenderPacket replacementPacket = replacementFrame.finish();
+    if (!renderer.record(replacementPacket, *commandList.Get(), 0, width, height)
+        || FAILED(commandList->Close())) {
+        fail("D3D12 renderer rejected the replacement texture generation");
+    }
+
+    if (!textures.destroy(replacementAtlas)
+        || !renderer.synchronizeTextures(textures, *queue.Get())) {
+        fail("D3D12 external texture fixture could not retire its CPU predecessor");
+    }
+    const TextureHandle externalHandle = textures.createExternal(
+        TextureFormat::Alpha8, 4, 4);
+    D3D12_RESOURCE_DESC externalDescription{};
+    externalDescription.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    externalDescription.Width = 4;
+    externalDescription.Height = 4;
+    externalDescription.DepthOrArraySize = 1;
+    externalDescription.MipLevels = 1;
+    externalDescription.Format = DXGI_FORMAT_R8_UNORM;
+    externalDescription.SampleDesc.Count = 1;
+    ComPtr<ID3D12Resource> externalResource;
+    if (FAILED(device->CreateCommittedResource(
+            &defaultHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &externalDescription,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            nullptr,
+            IID_PPV_ARGS(&externalResource)))
+        || !renderer.bindExternalTexture(textures, externalHandle, *externalResource.Get())) {
+        fail("D3D12 renderer rejected a compatible external texture");
+    }
+    externalResource.Reset();
+    Frame externalFrame;
+    externalFrame.begin().image(externalHandle, {{0.0F, 0.0F}, {16.0F, 16.0F}});
+    if (FAILED(allocator->Reset()) || FAILED(commandList->Reset(allocator.Get(), nullptr))
+        || !renderer.record(externalFrame.finish(), *commandList.Get(), 0, width, height)
+        || FAILED(commandList->Close())
+        || renderer.statistics().externalTextures != 1) {
+        fail("D3D12 renderer did not retain a host-provided texture safely");
     }
 
     const TextureHandle overflowTexture = textures.create(TextureFormat::Alpha8, 4, 4, 4, alpha);

@@ -20,6 +20,12 @@ struct OpenGlRenderStatistics final {
     std::uint64_t fullUploadFallbacks = 0;
     std::uint64_t uploadFenceFailures = 0;
     std::uint64_t textureUploads = 0;
+    std::uint64_t fullTextureUploads = 0;
+    std::uint64_t partialTextureUploads = 0;
+    std::uint64_t uploadedTextureBytes = 0;
+    std::uint64_t gpuTextureBytes = 0;
+    std::uint64_t retiredTextures = 0;
+    std::uint64_t externalTextures = 0;
     std::uint64_t rejectedFrames = 0;
     std::uint64_t invalidInputFrames = 0;
     std::uint64_t capacityRejectedFrames = 0;
@@ -30,6 +36,11 @@ struct OpenGlRenderStatistics final {
     std::uint64_t textureSynchronizationFailures = 0;
     std::uint64_t lifecycleRejections = 0;
     std::uint64_t abandonedContexts = 0;
+};
+
+enum class OpenGlExternalTextureOwnership : std::uint8_t {
+    Borrowed,
+    Transferred,
 };
 
 // OpenGlRenderer never creates, binds, or swaps a native context. Its owner must
@@ -53,13 +64,20 @@ public:
 
     // Initialization commits only after every GL object and buffer allocation
     // succeeds. Texture synchronization rejects stores larger than
-    // textureCapacity and atomically replaces changed textures; a failed call
-    // keeps every previous texture usable and retryable.
+    // textureCapacity. Full changes are transactionally replaced; a single
+    // region revision uses an exact subresource update with rollback on failure.
     [[nodiscard]] bool initialize(
         std::size_t instanceCapacity = 16384,
         std::size_t textureCapacity = 256,
         std::size_t uploadSlotCount = 3) noexcept;
-    [[nodiscard]] bool synchronizeTextures(const TextureStore& textures) noexcept;
+    [[nodiscard]] bool synchronizeTextures(TextureStore& textures) noexcept;
+    // Validates level-zero storage in the owner context. Borrowed names are
+    // never deleted; transferred names follow renderer-owned lifetime.
+    [[nodiscard]] bool bindExternalTexture(
+        const TextureStore& textures,
+        TextureHandle handle,
+        std::uint32_t textureObject,
+        OpenGlExternalTextureOwnership ownership = OpenGlExternalTextureOwnership::Borrowed) noexcept;
     [[nodiscard]] bool render(
         const RenderPacket& packet,
         std::uint32_t viewportWidth,

@@ -28,6 +28,12 @@ struct D3D12RenderStatistics final {
     std::uint64_t submittedInstances = 0;
     std::uint64_t instanceUploads = 0;
     std::uint64_t textureUploads = 0;
+    std::uint64_t fullTextureUploads = 0;
+    std::uint64_t partialTextureUploads = 0;
+    std::uint64_t uploadedTextureBytes = 0;
+    std::uint64_t gpuTextureBytes = 0;
+    std::uint64_t retiredTextures = 0;
+    std::uint64_t externalTextures = 0;
     std::uint64_t textureUploadBatches = 0;
     std::uint64_t failedTextureUploadBatches = 0;
     std::uint64_t rejectedFrames = 0;
@@ -55,7 +61,8 @@ struct D3D12RenderStatistics final {
 //
 // Texture synchronization records work on the supplied direct queue without
 // waiting for it to become idle. A successful synchronizeTextures call means
-// that every current revision is committed or has fence-tracked upload work.
+// that every CPU-backed current revision is committed or has fence-tracked
+// upload work. External entries become usable through bindExternalTexture().
 // pollTextureUploads commits completed revisions and never waits. Replaced
 // textures remain alive through every submission slot that copied their SRV.
 // Use one direct queue for the renderer's lifetime and make it idle before
@@ -84,8 +91,14 @@ public:
         DXGI_FORMAT renderTargetFormat,
         D3D12RendererConfiguration configuration = {}) noexcept;
     [[nodiscard]] bool synchronizeTextures(
-        const TextureStore& textures,
+        TextureStore& textures,
         ID3D12CommandQueue& directQueue) noexcept;
+    // Retains the COM resource. The host must keep it in
+    // D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE whenever HeniaUI records it.
+    [[nodiscard]] bool bindExternalTexture(
+        const TextureStore& textures,
+        TextureHandle handle,
+        ID3D12Resource& texture) noexcept;
     [[nodiscard]] bool pollTextureUploads() noexcept;
     [[nodiscard]] bool record(
         const RenderPacket& packet,

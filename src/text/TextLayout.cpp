@@ -33,6 +33,10 @@ const TextRun* TextRunCache::layout(FontHandle font, float size, std::string_vie
     if (size <= 0.0F || text.empty()) {
         return nullptr;
     }
+    const FontFace* face = mFonts->find(font);
+    if (face == nullptr || face->pixelSize() <= 0.0F || !face->atlas().valid()) {
+        return nullptr;
+    }
     const std::uint64_t hash = keyHash(font, size, text);
     const auto [begin, end] = mIndex.equal_range(hash);
     for (auto iterator = begin; iterator != end; ++iterator) {
@@ -41,11 +45,6 @@ const TextRun* TextRunCache::layout(FontHandle font, float size, std::string_vie
             ++mHits;
             return &entry.run;
         }
-    }
-
-    const FontFace* face = mFonts->find(font);
-    if (face == nullptr || face->pixelSize() <= 0.0F || !face->atlas().valid()) {
-        return nullptr;
     }
 
     if (mMaximumEntries == 0) {
@@ -126,10 +125,12 @@ std::uint64_t TextRunCache::keyHash(
         hash ^= value;
         hash *= prime;
     };
-    const std::uint32_t fontValue = font.value();
+    const std::uint32_t fontValue = font.packed();
     const std::uint32_t sizeBits = std::bit_cast<std::uint32_t>(size);
     for (unsigned int shift = 0; shift < 32; shift += 8) {
         mix(static_cast<std::uint8_t>(fontValue >> shift));
+    }
+    for (unsigned int shift = 0; shift < 32; shift += 8) {
         mix(static_cast<std::uint8_t>(sizeBits >> shift));
     }
     for (const unsigned char value : text) {
