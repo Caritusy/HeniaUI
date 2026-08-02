@@ -182,6 +182,66 @@ jobs:
             out/build/Testing/Temporary/LastTest.log
             out/build/CMakeFiles/CMakeConfigureLog.yaml
 
+  benchmark-regression:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v7
+        with:
+          path: candidate
+      - name: Check out pull-request base
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: baseline
+      - name: Build base and candidate benchmarks
+        shell: bash
+        run: |
+          if grep -q "HENIAUI_BUILD_BENCHMARKS" baseline/CMakeLists.txt; then
+            cmake -S baseline -B out/baseline -G Ninja -DCMAKE_BUILD_TYPE=Release -DHENIAUI_BUILD_TESTS=OFF -DHENIAUI_BUILD_SANDBOX=OFF -DHENIAUI_BUILD_BENCHMARKS=ON
+            cmake --build out/baseline --parallel --target HeniaUIBenchmarks
+            echo "HENIAUI_BENCHMARK_BASE_AVAILABLE=1" >> "$GITHUB_ENV"
+          else
+            echo "HENIAUI_BENCHMARK_BASE_AVAILABLE=0" >> "$GITHUB_ENV"
+          fi
+          cmake -S candidate -B out/candidate -G Ninja -DCMAKE_BUILD_TYPE=Release -DHENIAUI_BUILD_TESTS=OFF -DHENIAUI_BUILD_SANDBOX=OFF -DHENIAUI_BUILD_BENCHMARKS=ON
+          cmake --build out/candidate --parallel --target HeniaUIBenchmarks
+      - name: Capture same-runner benchmark results
+        shell: bash
+        run: |
+          if [[ "$HENIAUI_BENCHMARK_BASE_AVAILABLE" == "1" ]]; then
+            ./out/baseline/HeniaUIBenchmarks --verify --iterations 25 --warmup 5 --json out/benchmark-base.json
+          else
+            ./out/candidate/HeniaUIBenchmarks --verify --iterations 25 --warmup 5 --json out/benchmark-base.json
+          fi
+          ./out/candidate/HeniaUIBenchmarks --verify --iterations 25 --warmup 5 --json out/benchmark-candidate.json
+      - name: Compare regression budgets
+        run: >-
+          python3 candidate/tools/compare_benchmarks.py
+          out/benchmark-base.json
+          out/benchmark-candidate.json
+          --max-time-regression-percent 35
+          --max-memory-regression-percent 5
+          --markdown out/benchmark-summary.md
+      - name: Publish benchmark summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f out/benchmark-summary.md ]]; then
+            cat out/benchmark-summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-regression
+          if-no-files-found: warn
+          path: |
+            out/benchmark-base.json
+            out/benchmark-candidate.json
+            out/benchmark-summary.md
+
   installed-package:
     runs-on: ubuntu-24.04
     steps:
