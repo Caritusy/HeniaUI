@@ -464,7 +464,7 @@ bool D3D12RenderDevice::Implementation::record(
     henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
     ++statistics.recordedFrames;
     statistics.profile.cpuBuildNanoseconds = batch.cpuBuildNanoseconds();
-    const std::span<const BoxInstance> boxes = batch.boxes();
+    const BoxInstanceView boxes = batch.boxes();
     if (!ready || submissionSlot >= submissions.size()) {
         ++statistics.rejectedFrames;
         error = "D3D12 gfx renderer or submissionSlot is unavailable";
@@ -493,12 +493,14 @@ bool D3D12RenderDevice::Implementation::record(
         error = "D3D12 gfx instance count exceeds boxCapacity";
         return false;
     }
-    for (const BoxInstance& box : boxes) {
-        if (const std::string_view issue = validate(box); !issue.empty()) {
-            ++statistics.rejectedFrames;
-            ++statistics.invalidInputFrames;
-            error.assign(issue.data(), issue.size());
-            return false;
+    for (std::size_t pageIndex = 0; pageIndex < batch.boxPageCount(); ++pageIndex) {
+        for (const BoxInstance& box : batch.boxPage(pageIndex)) {
+            if (const std::string_view issue = validate(box); !issue.empty()) {
+                ++statistics.rejectedFrames;
+                ++statistics.invalidInputFrames;
+                error.assign(issue.data(), issue.size());
+                return false;
+            }
         }
     }
     if (!validateSubmissionReuse(submissionReuse)) {
@@ -508,34 +510,73 @@ bool D3D12RenderDevice::Implementation::record(
     Submission& submission = submissions[submissionSlot];
     if (submission.uploadedIdentity != batch.identity() || submission.uploadedRevision != batch.revision()) {
         const auto uploadStarted = std::chrono::steady_clock::now();
+        const std::span<const DirtyRange> dirtyRanges = batch.dirtyRanges();
+        bool dirtyRangesValid = !dirtyRanges.empty();
+        std::size_t previousEnd = 0;
+        for (const DirtyRange range : dirtyRanges) {
+            const bool valid = range.count > 0 && range.offset >= previousEnd
+                && range.offset <= boxes.size() && range.count <= boxes.size() - range.offset;
+            if (!valid) {
+                dirtyRangesValid = false;
+                break;
+            }
+            previousEnd = range.offset + range.count;
+        }
         const bool partial = submission.uploadedIdentity == batch.identity()
             && submission.uploadedRevision + 1 == batch.revision()
-            && batch.dirtyCount() > 0
-            && batch.dirtyOffset() <= boxes.size()
-            && batch.dirtyCount() <= boxes.size() - batch.dirtyOffset();
-        const std::size_t offset = partial ? batch.dirtyOffset() : 0;
-        const std::size_t count = partial ? batch.dirtyCount() : boxes.size();
-        if (count > 0) {
+            && !batch.requiresFullUpload() && dirtyRangesValid;
+        std::size_t uploadedBytes = 0;
+        const auto copyRange = [&](DirtyRange range) noexcept {
             std::size_t offsetBytes = 0;
             std::size_t countBytes = 0;
-            if (!checkedMultiply(offset, sizeof(BoxInstance), offsetBytes)
-                || !checkedMultiply(count, sizeof(BoxInstance), countBytes)
+            if (!checkedMultiply(range.offset, sizeof(BoxInstance), offsetBytes)
+                || !checkedMultiply(range.count, sizeof(BoxInstance), countBytes)
                 || offsetBytes > instanceBufferBytes
                 || countBytes > instanceBufferBytes - offsetBytes) {
-                ++statistics.rejectedFrames;
-                ++statistics.capacityRejectedFrames;
-                error = "D3D12 gfx upload byte range exceeds the instance buffer";
                 return false;
             }
-            std::memcpy(
-                submission.mapped + offsetBytes,
-                boxes.data() + offset,
-                countBytes);
+            std::size_t sourceOffset = range.offset;
+            std::size_t destinationOffset = offsetBytes;
+            std::size_t remaining = range.count;
+            while (remaining > 0) {
+                const std::span<const BoxInstance> page = batch.boxPage(
+                    sourceOffset / InstanceBatch::kBoxesPerPage);
+                const std::size_t localOffset = sourceOffset % InstanceBatch::kBoxesPerPage;
+                const std::size_t pageCount = std::min(remaining, page.size() - localOffset);
+                const std::size_t pageBytes = pageCount * sizeof(BoxInstance);
+                std::memcpy(
+                    submission.mapped + destinationOffset,
+                    page.data() + localOffset,
+                    pageBytes);
+                sourceOffset += pageCount;
+                destinationOffset += pageBytes;
+                remaining -= pageCount;
+            }
+            uploadedBytes += countBytes;
+            return true;
+        };
+        bool copied = true;
+        if (partial) {
+            for (const DirtyRange range : dirtyRanges) {
+                if (!copyRange(range)) {
+                    copied = false;
+                    break;
+                }
+            }
+        } else if (!boxes.empty()) {
+            copied = copyRange({0, boxes.size()});
+        }
+        if (!copied) {
+            ++statistics.rejectedFrames;
+            ++statistics.capacityRejectedFrames;
+            error = "D3D12 gfx upload byte range exceeds the instance buffer";
+            return false;
         }
         submission.uploadedIdentity = batch.identity();
         submission.uploadedRevision = batch.revision();
         if (partial) ++statistics.partialInstanceUploads;
         else ++statistics.fullInstanceUploads;
+        statistics.uploadedInstanceBytes += uploadedBytes;
         statistics.profile.cpuUploadNanoseconds = elapsedNanoseconds(uploadStarted);
     } else {
         statistics.profile.cpuUploadNanoseconds = 0;

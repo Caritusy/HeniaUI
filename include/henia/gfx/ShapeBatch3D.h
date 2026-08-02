@@ -5,9 +5,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string_view>
-#include <vector>
 
 namespace henia::gfx {
 
@@ -32,15 +32,16 @@ public:
     [[nodiscard]] InstanceBatch snapshot();
 
 private:
-    void ensureWritable();
-    void markDirty(std::size_t offset, std::size_t count) noexcept;
+    void ensureStorageWritable();
+    void ensurePageWritable(std::size_t pageIndex);
+    [[nodiscard]] const BoxInstance& boxAt(std::size_t index) const noexcept;
+    void markDirty(std::size_t offset, std::size_t count);
 
-    std::shared_ptr<std::vector<BoxInstance>> mBoxes;
+    std::shared_ptr<detail::InstanceStorage> mStorage;
     DepthState mDepthState{};
     std::uint64_t mIdentity = 0;
     std::uint64_t mRevision = 0;
-    std::size_t mDirtyOffset = 0;
-    std::size_t mDirtyEnd = 0;
+    std::size_t mPendingCopiedBoxCount = 0;
     std::uint64_t mPendingBuildNanoseconds = 0;
     std::uint64_t mRejectedBoxChanges = 0;
     std::string_view mLastError{};

@@ -175,7 +175,12 @@ renderDevice.render(snapshot, view); // OpenGL
 // renderDevice.record(snapshot, view, commandList, fenceOwnedSlot); // D3D12
 ```
 
-One box instance stores bounds, linear color, pixel line width, hue offset, and generic shader effects. A static unit-box edge topology is expanded in the vertex shader. Instance revisions and dirty ranges let a backend skip stable uploads or update only a changed range.
+One box instance stores bounds, linear color, pixel line width, hue offset, and generic shader effects. A static unit-box edge topology is expanded in the vertex shader. Instance revisions and independent dirty ranges let a backend skip stable uploads or patch only changed spans. Published box storage is page-based: keeping an old snapshot alive and changing one box copies one 256-instance page rather than the complete batch.
+
+`InstanceBatch::boxes()` is a segmented immutable view with `size()`, indexed
+access, and iteration. It intentionally has no `data()` member because the
+snapshot is not one contiguous CPU allocation. Upload integrations that need
+contiguous pieces can iterate `boxPageCount()` / `boxPage()` without allocating.
 
 See [docs/architecture.md](docs/architecture.md) for the ownership and threading contract.
 

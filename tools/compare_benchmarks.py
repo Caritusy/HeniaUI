@@ -69,11 +69,30 @@ def main() -> int:
 
         before_allocations = int(before["cpu"]["allocations_median"])
         after_allocations = int(after["cpu"]["allocations_median"])
-        if after_allocations > before_allocations:
+        before_allocated_bytes = int(before["cpu"]["allocated_bytes_median"])
+        after_allocated_bytes = int(after["cpu"]["allocated_bytes_median"])
+        allocated_byte_change = percent_change(before_allocated_bytes, after_allocated_bytes)
+        if allocated_byte_change > arguments.max_memory_regression_percent:
             failures.append(
-                f"{name}: median allocations increased "
-                f"({before_allocations} -> {after_allocations})"
+                f"{name}: cpu.allocated_bytes_median regressed "
+                f"{allocated_byte_change:.1f}% "
+                f"({before_allocated_bytes} -> {after_allocated_bytes})"
             )
+        elif after_allocations > before_allocations:
+            notes.append(
+                f"{name}: allocation count increased "
+                f"({before_allocations} -> {after_allocations}) while allocated bytes "
+                f"stayed within budget ({before_allocated_bytes} -> {after_allocated_bytes})"
+            )
+
+        if "copied_box_instances" in before["cpu"]:
+            before_copied = int(before["cpu"]["copied_box_instances"])
+            after_copied = int(after["cpu"].get("copied_box_instances", 0))
+            if after_copied > before_copied:
+                failures.append(
+                    f"{name}: cpu.copied_box_instances increased "
+                    f"({before_copied} -> {after_copied})"
+                )
 
         for group, field in (
             ("gpu", "draw_calls"),

@@ -185,6 +185,9 @@ using Clock = std::chrono::steady_clock;
 constexpr std::size_t kPrimitiveCount = 4096;
 constexpr std::size_t kGlyphCount = 4096;
 constexpr std::size_t kBoxCount = 32768;
+constexpr std::size_t kPagedBoxCount = 100000;
+constexpr std::size_t kClusteredBoxEdits = 32;
+constexpr std::size_t kSparseBoxEdits = 4;
 constexpr std::size_t kRoundedSegments = 32;
 constexpr std::uint64_t kTextAtlasBytes = 512U * 512U;
 
@@ -220,6 +223,7 @@ struct ScenarioResult final {
     std::uint64_t uploadBytes = 0;
     std::uint64_t coldUploadBytes = 0;
     std::uint64_t estimatedFragmentArea = 0;
+    std::uint64_t copiedBoxInstances = 0;
     std::uint64_t cpuResidentBytes = 0;
     std::uint64_t gpuBufferBytes = 0;
     std::uint64_t textureBytes = 0;
@@ -356,10 +360,11 @@ template <typename Operation>
     return {std::move(root), dynamicLabel};
 }
 
-[[nodiscard]] std::vector<henia::gfx::BoxInstance> createBoxes() {
+[[nodiscard]] std::vector<henia::gfx::BoxInstance> createBoxes(
+    std::size_t count = kBoxCount) {
     std::vector<henia::gfx::BoxInstance> boxes;
-    boxes.reserve(kBoxCount);
-    for (std::size_t index = 0; index < kBoxCount; ++index) {
+    boxes.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
         const float x = static_cast<float>(index % 128U) * 1.25F;
         const float y = static_cast<float>((index / 128U) % 64U) * 1.25F;
         const float z = static_cast<float>(index / (128U * 64U)) * 1.25F;
@@ -724,8 +729,9 @@ template <typename Operation>
     result.submittedInstances = batch.boxes().size();
     result.uploadBytes = batch.boxes().size() * sizeof(BoxInstance);
     result.coldUploadBytes = result.uploadBytes;
+    result.copiedBoxInstances = batch.copiedBoxCount();
     result.cpuResidentBytes = boxes.capacity() * sizeof(BoxInstance)
-        + batch.boxes().size() * sizeof(BoxInstance);
+        + batch.storageBytes();
     result.gpuBufferBytes = batch.boxes().size() * sizeof(BoxInstance);
     return result;
 }
@@ -757,8 +763,142 @@ template <typename Operation>
     result.submittedInstances = retained.boxes().size();
     result.uploadBytes = sizeof(BoxInstance);
     result.coldUploadBytes = retained.boxes().size() * sizeof(BoxInstance);
+    result.copiedBoxInstances = retained.copiedBoxCount();
     result.cpuResidentBytes = boxes.capacity() * sizeof(BoxInstance)
-        + retained.boxes().size() * sizeof(BoxInstance);
+        + retained.storageBytes();
+    result.gpuBufferBytes = retained.boxes().size() * sizeof(BoxInstance);
+    return result;
+}
+
+[[nodiscard]] ScenarioResult benchmarkPaged3DStable(const Options& options) {
+    using namespace henia::gfx;
+    const std::vector<BoxInstance> boxes = createBoxes(kPagedBoxCount);
+    ShapeBatch3D builder;
+    builder.reserve(boxes.size());
+    static_cast<void>(builder.replaceBoxes(boxes));
+    InstanceBatch retained = builder.snapshot();
+    ScenarioResult result = measureScenario(
+        "paged_3d_stable_snapshot_100k",
+        options,
+        [&](std::size_t iteration) {
+            const auto started = Clock::now();
+            retained = builder.snapshot();
+            return IterationPhases{
+                .paintBuildNanoseconds = nanosecondsSince(started),
+                .checksum = retained.identity() ^ retained.revision()
+                    ^ retained.boxes().size() ^ iteration,
+            };
+        });
+    result.drawCalls = 1;
+    result.submittedInstances = retained.boxes().size();
+    result.coldUploadBytes = retained.boxes().size() * sizeof(BoxInstance);
+    result.copiedBoxInstances = retained.copiedBoxCount();
+    result.cpuResidentBytes = boxes.capacity() * sizeof(BoxInstance) + retained.storageBytes();
+    result.gpuBufferBytes = retained.boxes().size() * sizeof(BoxInstance);
+    return result;
+}
+
+[[nodiscard]] ScenarioResult benchmarkPaged3DOneEdit(const Options& options) {
+    using namespace henia::gfx;
+    const std::vector<BoxInstance> boxes = createBoxes(kPagedBoxCount);
+    ShapeBatch3D builder;
+    builder.reserve(boxes.size());
+    static_cast<void>(builder.replaceBoxes(boxes));
+    InstanceBatch retained = builder.snapshot();
+    ScenarioResult result = measureScenario(
+        "paged_3d_one_edit_100k",
+        options,
+        [&](std::size_t iteration) {
+            const std::size_t index = iteration % boxes.size();
+            BoxInstance changed = retained.boxes()[index];
+            changed.hueOffset += 1.0F;
+            const auto started = Clock::now();
+            static_cast<void>(builder.updateBox(index, changed));
+            retained = builder.snapshot();
+            return IterationPhases{
+                .paintBuildNanoseconds = nanosecondsSince(started),
+                .checksum = retained.revision() ^ retained.copiedBoxCount()
+                    ^ retained.dirtyRanges().size(),
+            };
+        });
+    result.drawCalls = 1;
+    result.submittedInstances = retained.boxes().size();
+    result.uploadBytes = sizeof(BoxInstance);
+    result.coldUploadBytes = retained.boxes().size() * sizeof(BoxInstance);
+    result.copiedBoxInstances = retained.copiedBoxCount();
+    result.cpuResidentBytes = boxes.capacity() * sizeof(BoxInstance) + retained.storageBytes();
+    result.gpuBufferBytes = retained.boxes().size() * sizeof(BoxInstance);
+    return result;
+}
+
+[[nodiscard]] ScenarioResult benchmarkPaged3DClusteredEdits(const Options& options) {
+    using namespace henia::gfx;
+    const std::vector<BoxInstance> boxes = createBoxes(kPagedBoxCount);
+    ShapeBatch3D builder;
+    builder.reserve(boxes.size());
+    static_cast<void>(builder.replaceBoxes(boxes));
+    InstanceBatch retained = builder.snapshot();
+    const std::size_t pageCount = retained.boxPageCount();
+    ScenarioResult result = measureScenario(
+        "paged_3d_clustered_edits_100k",
+        options,
+        [&](std::size_t iteration) {
+            const std::size_t page = iteration % (pageCount - 1U);
+            const std::size_t start = page * InstanceBatch::kBoxesPerPage + 64U;
+            const auto started = Clock::now();
+            for (std::size_t offset = 0; offset < kClusteredBoxEdits; ++offset) {
+                BoxInstance changed = retained.boxes()[start + offset];
+                changed.hueOffset += 1.0F;
+                static_cast<void>(builder.updateBox(start + offset, changed));
+            }
+            retained = builder.snapshot();
+            return IterationPhases{
+                .paintBuildNanoseconds = nanosecondsSince(started),
+                .checksum = retained.revision() ^ retained.copiedBoxCount()
+                    ^ retained.dirtyCount(),
+            };
+        });
+    result.drawCalls = 1;
+    result.submittedInstances = retained.boxes().size();
+    result.uploadBytes = kClusteredBoxEdits * sizeof(BoxInstance);
+    result.coldUploadBytes = retained.boxes().size() * sizeof(BoxInstance);
+    result.copiedBoxInstances = retained.copiedBoxCount();
+    result.cpuResidentBytes = boxes.capacity() * sizeof(BoxInstance) + retained.storageBytes();
+    result.gpuBufferBytes = retained.boxes().size() * sizeof(BoxInstance);
+    return result;
+}
+
+[[nodiscard]] ScenarioResult benchmarkPaged3DSparseEdits(const Options& options) {
+    using namespace henia::gfx;
+    const std::vector<BoxInstance> boxes = createBoxes(kPagedBoxCount);
+    ShapeBatch3D builder;
+    builder.reserve(boxes.size());
+    static_cast<void>(builder.replaceBoxes(boxes));
+    InstanceBatch retained = builder.snapshot();
+    constexpr std::array<std::size_t, kSparseBoxEdits> indices{1, 25000, 75000, 99998};
+    ScenarioResult result = measureScenario(
+        "paged_3d_sparse_edits_100k",
+        options,
+        [&](std::size_t iteration) {
+            const auto started = Clock::now();
+            for (const std::size_t index : indices) {
+                BoxInstance changed = retained.boxes()[index];
+                changed.hueOffset += 1.0F;
+                static_cast<void>(builder.updateBox(index, changed));
+            }
+            retained = builder.snapshot();
+            return IterationPhases{
+                .paintBuildNanoseconds = nanosecondsSince(started),
+                .checksum = retained.revision() ^ retained.copiedBoxCount()
+                    ^ retained.dirtyRanges().size() ^ iteration,
+            };
+        });
+    result.drawCalls = 1;
+    result.submittedInstances = retained.boxes().size();
+    result.uploadBytes = kSparseBoxEdits * sizeof(BoxInstance);
+    result.coldUploadBytes = retained.boxes().size() * sizeof(BoxInstance);
+    result.copiedBoxInstances = retained.copiedBoxCount();
+    result.cpuResidentBytes = boxes.capacity() * sizeof(BoxInstance) + retained.storageBytes();
     result.gpuBufferBytes = retained.boxes().size() * sizeof(BoxInstance);
     return result;
 }
@@ -782,9 +922,14 @@ template <typename Operation>
     const ScenarioResult* text = findScenario(results, "text_heavy_ui");
     const ScenarioResult* full3d = findScenario(results, "large_3d_full_build");
     const ScenarioResult* dirty3d = findScenario(results, "large_3d_dirty_update");
+    const ScenarioResult* pagedStable = findScenario(results, "paged_3d_stable_snapshot_100k");
+    const ScenarioResult* pagedOne = findScenario(results, "paged_3d_one_edit_100k");
+    const ScenarioResult* pagedClustered = findScenario(results, "paged_3d_clustered_edits_100k");
+    const ScenarioResult* pagedSparse = findScenario(results, "paged_3d_sparse_edits_100k");
     bool valid = tessellation != nullptr && primitives != nullptr && analytic != nullptr
         && retained != nullptr && fullDynamic != nullptr && dynamic != nullptr && text != nullptr
-        && full3d != nullptr && dirty3d != nullptr;
+        && full3d != nullptr && dirty3d != nullptr && pagedStable != nullptr
+        && pagedOne != nullptr && pagedClustered != nullptr && pagedSparse != nullptr;
     if (!valid) {
         std::cerr << "Benchmark verification: a required scenario is missing\n";
         return false;
@@ -808,7 +953,21 @@ template <typename Operation>
         && full3d->submittedInstances == kBoxCount
         && full3d->uploadBytes == kBoxCount * sizeof(henia::gfx::BoxInstance)
         && dirty3d->uploadBytes == sizeof(henia::gfx::BoxInstance)
-        && dirty3d->gpuBufferBytes == full3d->gpuBufferBytes;
+        && dirty3d->copiedBoxInstances <= henia::gfx::InstanceBatch::kBoxesPerPage
+        && dirty3d->gpuBufferBytes == full3d->gpuBufferBytes
+        && pagedStable->submittedInstances == kPagedBoxCount
+        && pagedStable->allocationsMedian == 0
+        && pagedStable->uploadBytes == 0
+        && pagedStable->copiedBoxInstances == 0
+        && pagedOne->uploadBytes == sizeof(henia::gfx::BoxInstance)
+        && pagedOne->copiedBoxInstances <= henia::gfx::InstanceBatch::kBoxesPerPage
+        && pagedOne->allocatedBytesMedian
+            < kPagedBoxCount * sizeof(henia::gfx::BoxInstance) / 16U
+        && pagedClustered->uploadBytes == kClusteredBoxEdits * sizeof(henia::gfx::BoxInstance)
+        && pagedClustered->copiedBoxInstances <= henia::gfx::InstanceBatch::kBoxesPerPage
+        && pagedSparse->uploadBytes == kSparseBoxEdits * sizeof(henia::gfx::BoxInstance)
+        && pagedSparse->copiedBoxInstances
+            <= kSparseBoxEdits * henia::gfx::InstanceBatch::kBoxesPerPage;
     if (!valid) {
         std::cerr << "Benchmark verification: structural performance invariant failed\n";
     }
@@ -861,7 +1020,8 @@ void writeJson(
                << "        \"packet_compile_median_ns\": " << result.packetCompileMedianNanoseconds << ",\n"
                << "        \"allocations_median\": " << result.allocationsMedian << ",\n"
                << "        \"allocated_bytes_median\": " << result.allocatedBytesMedian << ",\n"
-               << "        \"peak_transient_bytes\": " << result.peakTransientBytes << "\n"
+               << "        \"peak_transient_bytes\": " << result.peakTransientBytes << ",\n"
+               << "        \"copied_box_instances\": " << result.copiedBoxInstances << "\n"
                << "      },\n"
                << "      \"cache\": {\n"
                << "        \"hits\": " << result.cacheHits << ",\n"
@@ -966,7 +1126,7 @@ int main(int argc, char** argv) {
     }
     try {
         std::vector<ScenarioResult> results;
-        results.reserve(9);
+        results.reserve(13);
         results.push_back(benchmarkTessellation(options));
         results.push_back(benchmarkManyPrimitives(options));
         results.push_back(benchmarkAnalyticFragmentBounds(options));
@@ -976,6 +1136,10 @@ int main(int argc, char** argv) {
         results.push_back(benchmarkTextHeavy(options));
         results.push_back(benchmarkLarge3DFull(options));
         results.push_back(benchmarkLarge3DDirty(options));
+        results.push_back(benchmarkPaged3DStable(options));
+        results.push_back(benchmarkPaged3DOneEdit(options));
+        results.push_back(benchmarkPaged3DClusteredEdits(options));
+        results.push_back(benchmarkPaged3DSparseEdits(options));
         printResults(results);
         if (!options.jsonPath.empty()) {
             writeJson(options.jsonPath, options, results);

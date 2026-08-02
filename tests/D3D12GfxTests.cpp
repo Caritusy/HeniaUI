@@ -341,6 +341,7 @@ int main() {
     D3D12GfxStatistics statistics = renderer.statistics();
     if (statistics.drawCalls != 2 || statistics.submittedInstances != boxes.size() * 2U
         || statistics.fullInstanceUploads != 1 || statistics.partialInstanceUploads != 0
+        || statistics.uploadedInstanceBytes != boxes.size() * sizeof(BoxInstance)
         || statistics.viewUpdates != 2 || statistics.commandListValidationFailures != 1
         || statistics.submissionFenceChecks != 2
         || statistics.submissionSlotBusyRejections != 1
@@ -365,8 +366,36 @@ int main() {
     queue->ExecuteCommandLists(1, lists);
     if (!waitForQueue(*device.Get(), *queue.Get())) fail("D3D12 gfx partial-update queue timed out");
     statistics = renderer.statistics();
-    if (statistics.partialInstanceUploads != 1 || statistics.drawCalls != 3) {
+    if (statistics.partialInstanceUploads != 1 || statistics.drawCalls != 3
+        || statistics.uploadedInstanceBytes != (boxes.size() + 1U) * sizeof(BoxInstance)) {
         fail("D3D12 gfx did not upload only the changed instance range");
+    }
+
+    BoxInstance sparseLeft = partial.boxes()[17];
+    BoxInstance sparseRight = partial.boxes()[1900];
+    sparseLeft.hueOffset = 17.0F;
+    sparseRight.hueOffset = 19.0F;
+    static_cast<void>(builder.updateBox(17, sparseLeft));
+    static_cast<void>(builder.updateBox(1900, sparseRight));
+    const InstanceBatch sparse = builder.snapshot();
+    if (sparse.dirtyRanges().size() != 2
+        || sparse.dirtyRanges()[0] != DirtyRange{17, 1}
+        || sparse.dirtyRanges()[1] != DirtyRange{1900, 1}) {
+        fail("D3D12 gfx sparse snapshot lost its independent dirty ranges");
+    }
+    if (FAILED(allocator->Reset()) || FAILED(commandList->Reset(allocator.Get(), nullptr))) {
+        fail("Unable to reset the D3D12 gfx sparse command list");
+    }
+    commandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);
+    if (!renderer.record(sparse, view, *commandList.Get(), 0) || FAILED(commandList->Close())) {
+        fail("D3D12 gfx sparse-update recording failed");
+    }
+    queue->ExecuteCommandLists(1, lists);
+    if (!waitForQueue(*device.Get(), *queue.Get())) fail("D3D12 gfx sparse-update queue timed out");
+    statistics = renderer.statistics();
+    if (statistics.partialInstanceUploads != 2 || statistics.drawCalls != 4
+        || statistics.uploadedInstanceBytes != (boxes.size() + 3U) * sizeof(BoxInstance)) {
+        fail("D3D12 gfx sparse update copied the bounding interval instead of two boxes");
     }
 
     if (!henia::test::verifyD3D12Validation(*device.Get())) {
