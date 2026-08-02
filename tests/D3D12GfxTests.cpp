@@ -2,6 +2,7 @@
 #include "henia/gfx/backend/d3d12/D3D12RenderDevice.h"
 
 #include "D3D12Validation.h"
+#include "D3D12HostDraw.h"
 #include "VisualRegression.h"
 
 #include <Windows.h>
@@ -85,6 +86,10 @@ int main() {
     if (FAILED(device->CreateCommandQueue(&queueDescription, IID_PPV_ARGS(&queue)))) {
         fail("Unable to create the D3D12 gfx queue");
     }
+    henia::test::D3D12HostDraw hostDraw;
+    if (!hostDraw.initialize(*device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM)) {
+        fail("Unable to create the D3D12 gfx host-state contract pipeline");
+    }
 
     constexpr std::uint32_t width = 128;
     constexpr std::uint32_t height = 128;
@@ -155,6 +160,15 @@ int main() {
         })) {
         fail("D3D12 gfx accepted a buffer-view byte capacity above UINT");
     }
+    D3D12RenderDevice unsupportedSamples;
+    if (unsupportedSamples.initialize(*device.Get(), {
+            .boxCapacity = 1,
+            .submissionCapacity = 1,
+            .renderTargetFormat = DXGI_FORMAT_R8G8B8A8_UNORM,
+            .sampleCount = 3,
+        })) {
+        fail("D3D12 gfx accepted an unsupported target sample count");
+    }
     D3D12RenderDevice renderer;
     if (!renderer.initialize(*device.Get(), {
             .boxCapacity = boxes.size(),
@@ -179,6 +193,21 @@ int main() {
         || renderer.lastError() != "view.viewProjection") {
         fail("D3D12 gfx accepted a non-finite view matrix");
     }
+    ComPtr<ID3D12CommandAllocator> bundleAllocator;
+    ComPtr<ID3D12GraphicsCommandList> bundleList;
+    if (FAILED(device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_BUNDLE,
+            IID_PPV_ARGS(&bundleAllocator)))
+        || FAILED(device->CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_BUNDLE,
+            bundleAllocator.Get(),
+            nullptr,
+            IID_PPV_ARGS(&bundleList)))
+        || renderer.record(batch, ViewParameters{}, *bundleList.Get(), 0)
+        || renderer.lastError() != "D3D12 gfx recording requires a DIRECT command list") {
+        fail("D3D12 gfx accepted an unsupported command-list type");
+    }
     const D3D12GfxStatistics invalidStatistics = renderer.statistics();
     if (invalidStatistics.invalidInputFrames != 1
         || invalidStatistics.capacityRejectedFrames != 0
@@ -188,6 +217,10 @@ int main() {
     constexpr std::array<float, 4> black{0.0F, 0.0F, 0.0F, 1.0F};
     commandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);
     commandList->ClearRenderTargetView(renderTarget, black.data(), 0, nullptr);
+    hostDraw.record(
+        *commandList.Get(), width, height,
+        {0.0F, 0.0F, 4.0F, 4.0F},
+        {1.0F, 0.0F, 0.0F, 1.0F});
     ViewParameters view{.viewport = {static_cast<float>(width), static_cast<float>(height)}};
     if (!renderer.record(batch, view, *commandList.Get(), 0)) {
         std::cerr << renderer.lastError() << '\n';
@@ -198,6 +231,10 @@ int main() {
     if (!renderer.record(batch, view, *commandList.Get(), 0)) {
         fail("D3D12 gfx stable-frame recording failed");
     }
+    hostDraw.record(
+        *commandList.Get(), width, height,
+        {124.0F, 124.0F, 128.0F, 128.0F},
+        {0.0F, 1.0F, 0.0F, 1.0F});
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = target.Get();
@@ -241,9 +278,13 @@ int main() {
         static_cast<std::size_t>(height / 2) * width + width / 4];
     const henia::test::Rgba8 nearPlaneEdge = pixels[
         static_cast<std::size_t>(height / 2) * width + width * 4U / 5U];
+    const henia::test::Rgba8 beforeMarker = pixels[static_cast<std::size_t>(1) * width + 1];
+    const henia::test::Rgba8 afterMarker = pixels[static_cast<std::size_t>(126) * width + 126];
     if (redEdge.red < 100 || redEdge.red <= redEdge.green * 2U
         || nearPlaneEdge.green < 100
-        || nearPlaneEdge.green <= nearPlaneEdge.red * 2U) {
+        || nearPlaneEdge.green <= nearPlaneEdge.red * 2U
+        || beforeMarker.red < 240 || beforeMarker.green > 8
+        || afterMarker.green < 240 || afterMarker.red > 8) {
         henia::test::writePpm("d3d12-gfx-near-plane-actual.ppm", pixels, width, height);
         std::cerr << "Unexpected D3D12 gfx golden probes: red="
                   << static_cast<unsigned>(redEdge.red) << ','
@@ -256,7 +297,7 @@ int main() {
     D3D12GfxStatistics statistics = renderer.statistics();
     if (statistics.drawCalls != 2 || statistics.submittedInstances != boxes.size() * 2U
         || statistics.fullInstanceUploads != 1 || statistics.partialInstanceUploads != 0
-        || statistics.viewUpdates != 2) {
+        || statistics.viewUpdates != 2 || statistics.commandListValidationFailures != 1) {
         fail("D3D12 gfx stable-frame statistics are incorrect");
     }
 

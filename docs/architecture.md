@@ -141,6 +141,16 @@ render submission.
 
 For D3D12, the host binds the render/depth targets, transitions resources, supplies a recording command list, submits it, and associates its submission slot with a fence. A slot cannot be reused for different instance content until that fence completes.
 
+D3D12 command-list state cannot be queried and restored generically. Both
+renderers therefore expose a clobber-and-rebind contract: they validate a direct
+list from the initialization device, overwrite their documented graphics state,
+and require the host to bind its full draw state afterward. Textured UI packets
+bind the renderer's private shader-visible heap; texture-free packets use a
+heap-free root signature and PSOs. Per-slot descriptor tables are recopied only
+when their texture handles or committed revisions change. The exact state list,
+attachment expectations, dedicated-list containment option, and before/after
+example are in [D3D12 command-list integration](d3d12-integration.md).
+
 Depth is generic `DepthState`, not a visibility policy. When a depth-enabled request cannot use a host depth attachment, the backend selects a depth-disabled pipeline and increments `depthFallbacks`.
 
 ## Input validation and numeric policy
