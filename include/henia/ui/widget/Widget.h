@@ -79,7 +79,7 @@ public:
     void arrange(TextPainter& text, Rect frame);
     void paint(Canvas& canvas, TextPainter& text, const Theme& theme);
     [[nodiscard]] Widget* hitTest(Vec2 point) noexcept;
-    [[nodiscard]] virtual bool handleInput(const InputEvent& event) noexcept;
+    [[nodiscard]] virtual bool handleInput(const InputEvent& event);
 
     void markLayoutDirty() noexcept;
     void markPaintDirty() noexcept;

@@ -4,9 +4,12 @@ namespace henia::ui {
 
 Frame::Frame() : mCanvas(mDisplayList) {}
 
-void Frame::reserve(std::size_t commandCapacity, std::size_t batchCapacity) {
-    mDisplayList.reserve(commandCapacity);
-    mPacket.reserve(commandCapacity, batchCapacity);
+void Frame::reserve(
+    std::size_t commandCapacity,
+    std::size_t batchCapacity,
+    CapacityPolicy capacityPolicy) {
+    mDisplayList.reserve(commandCapacity, capacityPolicy);
+    mPacket.reserve(commandCapacity, batchCapacity, capacityPolicy);
 }
 
 Canvas& Frame::begin() noexcept {
@@ -18,7 +21,7 @@ Canvas& Frame::begin() noexcept {
 
 const RenderPacket& Frame::finish() {
     if (mRecording) {
-        mCompiler.compile(mDisplayList, mPacket);
+        static_cast<void>(mCompiler.compile(mDisplayList, mPacket));
         mRecording = false;
     }
     return mPacket;

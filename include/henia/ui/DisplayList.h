@@ -9,6 +9,11 @@
 
 namespace henia::ui {
 
+enum class CapacityPolicy : std::uint8_t {
+    Grow,
+    Fixed,
+};
+
 enum class PrimitiveKind : std::uint8_t {
     SolidRect,
     StrokeRect,
@@ -33,17 +38,21 @@ struct DrawCommand final {
 
 class DisplayList final {
 public:
-    void reserve(std::size_t commandCapacity);
+    void reserve(
+        std::size_t commandCapacity,
+        CapacityPolicy capacityPolicy = CapacityPolicy::Grow);
     void clear() noexcept;
-    void append(const DrawCommand& command);
+    [[nodiscard]] bool append(const DrawCommand& command) noexcept;
 
     [[nodiscard]] std::span<const DrawCommand> commands() const noexcept;
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] std::size_t capacity() const noexcept;
+    [[nodiscard]] CapacityPolicy capacityPolicy() const noexcept;
     [[nodiscard]] std::uint64_t capacityGrowths() const noexcept;
 
 private:
     std::vector<DrawCommand> mCommands;
+    CapacityPolicy mCapacityPolicy = CapacityPolicy::Grow;
     std::uint64_t mCapacityGrowths = 0;
 };
 

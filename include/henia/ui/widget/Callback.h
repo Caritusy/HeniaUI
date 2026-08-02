@@ -7,6 +7,8 @@ namespace henia::ui {
 template <typename... Arguments>
 class Callback final {
 public:
+    // Callback exceptions propagate to the dispatch caller. Hosts that require
+    // a non-throwing boundary must catch there; HeniaUI never terminates them.
     using Invoker = void (*)(void*, Arguments...);
 
     constexpr Callback() noexcept = default;

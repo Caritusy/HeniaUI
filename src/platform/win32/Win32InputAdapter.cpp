@@ -26,7 +26,7 @@ namespace {
 Win32InputAdapter::Win32InputAdapter(UiDocument& document) noexcept : mDocument(&document) {}
 
 bool Win32InputAdapter::handleMessage(
-    HWND window, UINT message, WPARAM wParam, LPARAM lParam) noexcept {
+    HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_MOUSEMOVE: {
             TRACKMOUSEEVENT tracking{sizeof(TRACKMOUSEEVENT), TME_LEAVE, window, 0};

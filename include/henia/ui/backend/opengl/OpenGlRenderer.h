@@ -33,7 +33,11 @@ public:
     OpenGlRenderer(OpenGlRenderer&&) = delete;
     OpenGlRenderer& operator=(OpenGlRenderer&&) = delete;
 
-    [[nodiscard]] bool initialize(std::size_t instanceCapacity = 16384) noexcept;
+    // Initialization performs all CPU bookkeeping allocation. Texture
+    // synchronization rejects stores larger than textureCapacity.
+    [[nodiscard]] bool initialize(
+        std::size_t instanceCapacity = 16384,
+        std::size_t textureCapacity = 256) noexcept;
     [[nodiscard]] bool synchronizeTextures(const TextureStore& textures) noexcept;
     [[nodiscard]] bool render(
         const RenderPacket& packet,
@@ -43,6 +47,7 @@ public:
 
     [[nodiscard]] bool initialized() const noexcept;
     [[nodiscard]] std::size_t instanceCapacity() const noexcept;
+    [[nodiscard]] std::size_t textureCapacity() const noexcept;
     [[nodiscard]] OpenGlRenderStatistics statistics() const noexcept;
     [[nodiscard]] std::string_view lastError() const noexcept;
 

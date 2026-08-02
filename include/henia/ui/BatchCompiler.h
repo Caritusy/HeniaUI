@@ -7,7 +7,7 @@ namespace henia::ui {
 
 class BatchCompiler final {
 public:
-    void compile(const DisplayList& displayList, RenderPacket& output) const;
+    [[nodiscard]] bool compile(const DisplayList& displayList, RenderPacket& output) const noexcept;
 
 private:
     [[nodiscard]] static bool compatible(const DrawBatch& batch, const DrawCommand& command) noexcept;

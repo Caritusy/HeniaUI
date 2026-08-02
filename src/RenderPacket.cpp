@@ -12,11 +12,15 @@ std::atomic_uint64_t gNextPacketIdentity{1};
 RenderPacket::RenderPacket() noexcept
     : mIdentity(gNextPacketIdentity.fetch_add(1, std::memory_order_relaxed)) {}
 
-void RenderPacket::reserve(std::size_t instanceCapacity, std::size_t batchCapacity) {
+void RenderPacket::reserve(
+    std::size_t instanceCapacity,
+    std::size_t batchCapacity,
+    CapacityPolicy capacityPolicyValue) {
     const std::size_t previousInstances = mInstances.capacity();
     const std::size_t previousBatches = mBatches.capacity();
     mInstances.reserve(instanceCapacity);
     mBatches.reserve(batchCapacity);
+    mCapacityPolicy = capacityPolicyValue;
     if (mInstances.capacity() != previousInstances) {
         ++mStatistics.instanceCapacityGrowths;
     }
@@ -49,21 +53,38 @@ std::size_t RenderPacket::instanceCapacity() const noexcept { return mInstances.
 
 std::size_t RenderPacket::batchCapacity() const noexcept { return mBatches.capacity(); }
 
-void RenderPacket::appendInstance(const DrawInstance& instance) {
+CapacityPolicy RenderPacket::capacityPolicy() const noexcept { return mCapacityPolicy; }
+
+bool RenderPacket::appendInstance(const DrawInstance& instance) noexcept {
+    if (mCapacityPolicy == CapacityPolicy::Fixed && mInstances.size() == mInstances.capacity()) {
+        return false;
+    }
     const std::size_t previous = mInstances.capacity();
-    mInstances.push_back(instance);
+    try {
+        mInstances.push_back(instance);
+    } catch (...) {
+        return false;
+    }
     if (mInstances.capacity() != previous) {
         ++mStatistics.instanceCapacityGrowths;
     }
+    return true;
 }
 
-DrawBatch& RenderPacket::appendBatch(const DrawBatch& batch) {
+DrawBatch* RenderPacket::appendBatch(const DrawBatch& batch) noexcept {
+    if (mCapacityPolicy == CapacityPolicy::Fixed && mBatches.size() == mBatches.capacity()) {
+        return nullptr;
+    }
     const std::size_t previous = mBatches.capacity();
-    mBatches.push_back(batch);
+    try {
+        mBatches.push_back(batch);
+    } catch (...) {
+        return nullptr;
+    }
     if (mBatches.capacity() != previous) {
         ++mStatistics.batchCapacityGrowths;
     }
-    return mBatches.back();
+    return &mBatches.back();
 }
 
 } // namespace henia::ui

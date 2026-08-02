@@ -47,7 +47,7 @@ void NumericInput::setPrecision(std::size_t valueValue) noexcept {
 
 void NumericInput::setOnValueChanged(Callback<double> callback) noexcept { mOnValueChanged = callback; }
 
-bool NumericInput::handleInput(const InputEvent& event) noexcept {
+bool NumericInput::handleInput(const InputEvent& event) {
     if (!enabled()) {
         return false;
     }
@@ -218,7 +218,7 @@ void NumericInput::beginEditing() {
     markPaintDirty();
 }
 
-void NumericInput::commitEditing() noexcept {
+void NumericInput::commitEditing() {
     if (!mEditing) {
         return;
     }
@@ -238,7 +238,7 @@ void NumericInput::cancelEditing() noexcept {
     markPaintDirty();
 }
 
-void NumericInput::adjust(double delta) noexcept {
+void NumericInput::adjust(double delta) {
     const double next = std::clamp(mValue + delta, mMinimum, mMaximum);
     mEditing = false;
     if (next == mValue) {

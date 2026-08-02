@@ -181,7 +181,9 @@ ClipRect Canvas::currentClip() const noexcept {
 void Canvas::append(DrawCommand command) noexcept {
     command.blend = mBlendMode;
     command.clip = currentClip();
-    mDisplayList->append(command);
+    if (!mDisplayList->append(command)) {
+        ++mRejectedCommands;
+    }
 }
 
 } // namespace henia::ui

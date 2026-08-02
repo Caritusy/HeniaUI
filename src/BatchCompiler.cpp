@@ -18,30 +18,47 @@ constexpr std::uint32_t kNoTextureSlot = std::numeric_limits<std::uint32_t>::max
 
 } // namespace
 
-void BatchCompiler::compile(const DisplayList& displayList, RenderPacket& output) const {
+bool BatchCompiler::compile(const DisplayList& displayList, RenderPacket& output) const noexcept {
     output.clear();
     output.mStatistics.sourceCommands = displayList.size();
+
+    const auto rejectPacket = [&]() noexcept {
+        const std::uint64_t sourceCommands = output.mStatistics.sourceCommands;
+        output.clear();
+        output.mStatistics.sourceCommands = sourceCommands;
+        output.mStatistics.rejectedCommands = sourceCommands;
+        ++output.mRevision;
+        return false;
+    };
 
     for (const DrawCommand& command : displayList.commands()) {
         DrawBatch* batch = output.mBatches.empty() ? nullptr : &output.mBatches.back();
         if (batch == nullptr || !compatible(*batch, command)) {
-            batch = &output.appendBatch(makeBatch(
+            batch = output.appendBatch(makeBatch(
                 command,
                 static_cast<std::uint32_t>(output.mInstances.size())));
+            if (batch == nullptr) {
+                return rejectPacket();
+            }
         }
 
         std::uint32_t textureSlot = kNoTextureSlot;
         if (!resolveTextureSlot(*batch, command.texture, textureSlot)) {
-            batch = &output.appendBatch(makeBatch(
+            batch = output.appendBatch(makeBatch(
                 command,
                 static_cast<std::uint32_t>(output.mInstances.size())));
+            if (batch == nullptr) {
+                return rejectPacket();
+            }
             const bool resolved = resolveTextureSlot(*batch, command.texture, textureSlot);
             if (!resolved) {
-                continue;
+                return rejectPacket();
             }
         }
 
-        output.appendInstance(makeInstance(command, textureSlot));
+        if (!output.appendInstance(makeInstance(command, textureSlot))) {
+            return rejectPacket();
+        }
         ++batch->instanceCount;
     }
 
@@ -51,6 +68,7 @@ void BatchCompiler::compile(const DisplayList& displayList, RenderPacket& output
         ? output.mStatistics.instances - output.mStatistics.batches
         : 0;
     ++output.mRevision;
+    return true;
 }
 
 bool BatchCompiler::compatible(const DrawBatch& batch, const DrawCommand& command) noexcept {

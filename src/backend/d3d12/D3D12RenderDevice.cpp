@@ -1,5 +1,7 @@
 #include "henia/gfx/backend/d3d12/D3D12RenderDevice.h"
 
+#include "../FixedError.h"
+
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
@@ -9,7 +11,6 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
-#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -147,7 +148,10 @@ static_assert(sizeof(FrameConstants) == 80);
 }
 
 [[nodiscard]] bool compileShader(
-    const char* entry, const char* target, ComPtr<ID3DBlob>& output, std::string& error) noexcept {
+    const char* entry,
+    const char* target,
+    ComPtr<ID3DBlob>& output,
+    henia::detail::FixedError& error) noexcept {
     ComPtr<ID3DBlob> errors;
     const HRESULT result = D3DCompile(
         kShaderSource,
@@ -244,10 +248,10 @@ struct D3D12RenderDevice::Implementation final {
     std::vector<Submission> submissions;
     D3D12GfxConfiguration configuration{};
     D3D12GfxStatistics statistics{};
-    std::string error;
+    henia::detail::FixedError error;
     bool ready = false;
 
-    [[nodiscard]] bool initialize(ID3D12Device& device, D3D12GfxConfiguration value) noexcept;
+    [[nodiscard]] bool initialize(ID3D12Device& device, D3D12GfxConfiguration value);
     [[nodiscard]] bool createPipeline(
         ID3D12Device& device,
         ID3DBlob& vertexShader,
@@ -262,13 +266,15 @@ struct D3D12RenderDevice::Implementation final {
 };
 
 bool D3D12RenderDevice::Implementation::initialize(
-    ID3D12Device& device, D3D12GfxConfiguration value) noexcept {
+    ID3D12Device& device, D3D12GfxConfiguration value) {
     if (ready) return true;
     if (value.boxCapacity == 0 || value.submissionCapacity == 0 || value.sampleCount == 0
         || value.boxCapacity > static_cast<std::size_t>(std::numeric_limits<UINT>::max())) {
         error = "D3D12 gfx configuration is invalid";
         return false;
     }
+    configuration = value;
+    submissions.resize(configuration.submissionCapacity);
     ComPtr<ID3DBlob> vertexShader;
     ComPtr<ID3DBlob> pixelShader;
     if (!compileShader("vertexMain", "vs_5_1", vertexShader, error)
@@ -294,7 +300,6 @@ bool D3D12RenderDevice::Implementation::initialize(
         error = "D3D12 failed to create the gfx root signature";
         return false;
     }
-    configuration = value;
     if (!createPipeline(device, *vertexShader.Get(), *pixelShader.Get(), {})) return false;
     if (configuration.depthStencilFormat != DXGI_FORMAT_UNKNOWN) {
         for (std::uint8_t operation = 0; operation <= static_cast<std::uint8_t>(CompareOp::Always); ++operation) {
@@ -308,7 +313,6 @@ bool D3D12RenderDevice::Implementation::initialize(
         }
     }
 
-    submissions.resize(configuration.submissionCapacity);
     const std::uint64_t bufferBytes = static_cast<std::uint64_t>(configuration.boxCapacity * sizeof(BoxInstance));
     const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
     const D3D12_RESOURCE_DESC buffer = bufferDescription(bufferBytes);
@@ -466,7 +470,17 @@ void D3D12RenderDevice::Implementation::shutdown() noexcept {
 D3D12RenderDevice::D3D12RenderDevice() : mImplementation(std::make_unique<Implementation>()) {}
 D3D12RenderDevice::~D3D12RenderDevice() { shutdown(); }
 bool D3D12RenderDevice::initialize(ID3D12Device& device, D3D12GfxConfiguration configuration) noexcept {
-    return mImplementation->initialize(device, configuration);
+    try {
+        const bool initialized = mImplementation->initialize(device, configuration);
+        if (!initialized) {
+            mImplementation->shutdown();
+        }
+        return initialized;
+    } catch (...) {
+        mImplementation->shutdown();
+        mImplementation->error = "D3D12 gfx initialization exhausted CPU bookkeeping storage";
+        return false;
+    }
 }
 bool D3D12RenderDevice::record(
     const InstanceBatch& batch, const ViewParameters& view,
@@ -484,6 +498,6 @@ std::uint32_t D3D12RenderDevice::submissionCapacity() const noexcept {
     return mImplementation->configuration.submissionCapacity;
 }
 D3D12GfxStatistics D3D12RenderDevice::statistics() const noexcept { return mImplementation->statistics; }
-std::string_view D3D12RenderDevice::lastError() const noexcept { return mImplementation->error; }
+std::string_view D3D12RenderDevice::lastError() const noexcept { return mImplementation->error.view(); }
 
 } // namespace henia::gfx

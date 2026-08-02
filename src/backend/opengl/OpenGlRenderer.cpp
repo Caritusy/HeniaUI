@@ -1,5 +1,7 @@
 #include "henia/ui/backend/opengl/OpenGlRenderer.h"
 
+#include "../FixedError.h"
+
 #define NOMINMAX
 #include <Windows.h>
 #include <gl/GL.h>
@@ -12,7 +14,6 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
-#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -302,7 +303,7 @@ void main() {
     const GlFunctions& gl,
     GLenum type,
     const char* source,
-    std::string& error) {
+    henia::detail::FixedError& error) noexcept {
     const GLuint shader = gl.createShader(type);
     if (shader == 0) {
         error = "OpenGL failed to create a shader";
@@ -318,9 +319,11 @@ void main() {
 
     GLint length = 0;
     gl.getShaderIv(shader, kInfoLogLength, &length);
-    std::vector<char> log(static_cast<std::size_t>(std::max(length, 1)));
-    gl.getShaderInfoLog(shader, length, nullptr, log.data());
-    error.assign(log.data());
+    std::array<char, henia::detail::FixedError::kCapacity> log{};
+    const GLsizei logCapacity = static_cast<GLsizei>(log.size() - 1U);
+    GLsizei written = 0;
+    gl.getShaderInfoLog(shader, std::min(length, logCapacity), &written, log.data());
+    error.assign(log.data(), static_cast<std::size_t>(std::max(written, 0)));
     gl.deleteShader(shader);
     return 0;
 }
@@ -362,10 +365,12 @@ struct OpenGlRenderer::Implementation final {
     std::uint64_t uploadedRevision = 0;
     std::vector<GpuTexture> textures;
     OpenGlRenderStatistics statistics{};
-    std::string error;
+    henia::detail::FixedError error;
     bool ready = false;
 
-    [[nodiscard]] bool initialize(std::size_t requestedCapacity) noexcept;
+    [[nodiscard]] bool initialize(
+        std::size_t requestedCapacity,
+        std::size_t requestedTextureCapacity);
     [[nodiscard]] bool synchronizeTextures(const TextureStore& store) noexcept;
     [[nodiscard]] bool render(
         const RenderPacket& packet,
@@ -377,15 +382,19 @@ struct OpenGlRenderer::Implementation final {
     void restoreState(const GlState& state) const noexcept;
 };
 
-bool OpenGlRenderer::Implementation::initialize(std::size_t requestedCapacity) noexcept {
+bool OpenGlRenderer::Implementation::initialize(
+    std::size_t requestedCapacity,
+    std::size_t requestedTextureCapacity) {
     if (ready) {
         return true;
     }
-    if (wglGetCurrentContext() == nullptr || requestedCapacity == 0
-        || requestedCapacity > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
-        error = "OpenGL 3.3 context and a non-zero instance capacity are required";
+    if (wglGetCurrentContext() == nullptr || requestedCapacity == 0 || requestedTextureCapacity == 0
+        || requestedCapacity > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())
+        || requestedTextureCapacity > std::numeric_limits<std::uint32_t>::max()) {
+        error = "OpenGL 3.3 context and non-zero instance/texture capacities are required";
         return false;
     }
+    textures.resize(requestedTextureCapacity);
     if (!loadFunctions(gl)) {
         error = "OpenGL 3.3 entry points are unavailable";
         return false;
@@ -413,9 +422,11 @@ bool OpenGlRenderer::Implementation::initialize(std::size_t requestedCapacity) n
     if (linked != GL_TRUE) {
         GLint length = 0;
         gl.getProgramIv(program, kInfoLogLength, &length);
-        std::vector<char> log(static_cast<std::size_t>(std::max(length, 1)));
-        gl.getProgramInfoLog(program, length, nullptr, log.data());
-        error.assign(log.data());
+        std::array<char, henia::detail::FixedError::kCapacity> log{};
+        const GLsizei logCapacity = static_cast<GLsizei>(log.size() - 1U);
+        GLsizei written = 0;
+        gl.getProgramInfoLog(program, std::min(length, logCapacity), &written, log.data());
+        error.assign(log.data(), static_cast<std::size_t>(std::max(written, 0)));
         gl.deleteProgram(program);
         program = 0;
         return false;
@@ -455,12 +466,11 @@ bool OpenGlRenderer::Implementation::initialize(std::size_t requestedCapacity) n
 }
 
 bool OpenGlRenderer::Implementation::synchronizeTextures(const TextureStore& store) noexcept {
-    if (!ready || wglGetCurrentContext() == nullptr) {
-        error = "Texture synchronization requires the renderer context";
+    if (!ready || wglGetCurrentContext() == nullptr || store.size() > textures.size()) {
+        error = store.size() > textures.size()
+            ? "OpenGL texture store exceeds configured capacity"
+            : "Texture synchronization requires the renderer context";
         return false;
-    }
-    if (textures.size() < store.size()) {
-        textures.resize(store.size());
     }
 
     GLint previousTexture = 0;
@@ -731,8 +741,20 @@ OpenGlRenderer::OpenGlRenderer() : mImplementation(std::make_unique<Implementati
 
 OpenGlRenderer::~OpenGlRenderer() { mImplementation->shutdown(); }
 
-bool OpenGlRenderer::initialize(std::size_t instanceCapacity) noexcept {
-    return mImplementation->initialize(instanceCapacity);
+bool OpenGlRenderer::initialize(
+    std::size_t instanceCapacity,
+    std::size_t textureCapacityValue) noexcept {
+    try {
+        const bool initialized = mImplementation->initialize(instanceCapacity, textureCapacityValue);
+        if (!initialized) {
+            mImplementation->shutdown();
+        }
+        return initialized;
+    } catch (...) {
+        mImplementation->shutdown();
+        mImplementation->error = "OpenGL renderer initialization exhausted CPU bookkeeping storage";
+        return false;
+    }
 }
 
 bool OpenGlRenderer::synchronizeTextures(const TextureStore& textures) noexcept {
@@ -752,8 +774,12 @@ bool OpenGlRenderer::initialized() const noexcept { return mImplementation->read
 
 std::size_t OpenGlRenderer::instanceCapacity() const noexcept { return mImplementation->capacity; }
 
+std::size_t OpenGlRenderer::textureCapacity() const noexcept {
+    return mImplementation->textures.size();
+}
+
 OpenGlRenderStatistics OpenGlRenderer::statistics() const noexcept { return mImplementation->statistics; }
 
-std::string_view OpenGlRenderer::lastError() const noexcept { return mImplementation->error; }
+std::string_view OpenGlRenderer::lastError() const noexcept { return mImplementation->error.view(); }
 
 } // namespace henia::ui

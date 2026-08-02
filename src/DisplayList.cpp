@@ -2,9 +2,10 @@
 
 namespace henia::ui {
 
-void DisplayList::reserve(std::size_t commandCapacity) {
+void DisplayList::reserve(std::size_t commandCapacity, CapacityPolicy capacityPolicyValue) {
     const std::size_t previous = mCommands.capacity();
     mCommands.reserve(commandCapacity);
+    mCapacityPolicy = capacityPolicyValue;
     if (mCommands.capacity() != previous) {
         ++mCapacityGrowths;
     }
@@ -12,12 +13,20 @@ void DisplayList::reserve(std::size_t commandCapacity) {
 
 void DisplayList::clear() noexcept { mCommands.clear(); }
 
-void DisplayList::append(const DrawCommand& command) {
+bool DisplayList::append(const DrawCommand& command) noexcept {
+    if (mCapacityPolicy == CapacityPolicy::Fixed && mCommands.size() == mCommands.capacity()) {
+        return false;
+    }
     const std::size_t previous = mCommands.capacity();
-    mCommands.push_back(command);
+    try {
+        mCommands.push_back(command);
+    } catch (...) {
+        return false;
+    }
     if (mCommands.capacity() != previous) {
         ++mCapacityGrowths;
     }
+    return true;
 }
 
 std::span<const DrawCommand> DisplayList::commands() const noexcept { return mCommands; }
@@ -25,6 +34,8 @@ std::span<const DrawCommand> DisplayList::commands() const noexcept { return mCo
 std::size_t DisplayList::size() const noexcept { return mCommands.size(); }
 
 std::size_t DisplayList::capacity() const noexcept { return mCommands.capacity(); }
+
+CapacityPolicy DisplayList::capacityPolicy() const noexcept { return mCapacityPolicy; }
 
 std::uint64_t DisplayList::capacityGrowths() const noexcept { return mCapacityGrowths; }
 

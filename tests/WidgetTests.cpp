@@ -11,6 +11,8 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -35,6 +37,15 @@ struct ValueRecorder final {
     double value = 0.0;
     int calls = 0;
 };
+
+struct ThrowingCallbacks final {
+    void clicked() { throw std::runtime_error("button callback"); }
+    void changed(double) { throw std::runtime_error("numeric callback"); }
+};
+
+static_assert(!noexcept(std::declval<Button&>().handleInput(std::declval<const InputEvent&>())));
+static_assert(!noexcept(std::declval<NumericInput&>().handleInput(std::declval<const InputEvent&>())));
+static_assert(!noexcept(std::declval<UiDocument&>().dispatch(std::declval<const InputEvent&>())));
 
 [[nodiscard]] FontHandle createFont(TextureStore& textures, FontStore& fonts) {
     const std::array<std::byte, 16> pixels{};
@@ -188,6 +199,35 @@ int main() {
     static_cast<void>(document.dispatch({.kind = InputEventKind::KeyDown, .key = KeyCode::Enter}));
     if (numeric.value() != 42.0 || recorder.value != 42.0 || recorder.calls != 2) {
         fail("Numeric input keyboard editing failed");
+    }
+
+    ThrowingCallbacks throwingCallbacks;
+    Button throwingButton("Throw", ButtonStyle{.font = font});
+    throwingButton.arrange(painter, {{0.0F, 0.0F}, {80.0F, 30.0F}});
+    throwingButton.setOnClick(
+        Callback<>::bind<ThrowingCallbacks, &ThrowingCallbacks::clicked>(throwingCallbacks));
+    try {
+        static_cast<void>(throwingButton.handleInput({
+            .kind = InputEventKind::PointerUp,
+            .position = {10.0F, 10.0F},
+            .button = PointerButton::Primary,
+        }));
+        fail("Button callback exception was swallowed");
+    } catch (const std::runtime_error&) {
+    }
+
+    NumericInput throwingNumeric(1.0, NumericInputStyle{.font = font});
+    throwingNumeric.arrange(painter, {{0.0F, 0.0F}, {176.0F, 38.0F}});
+    throwingNumeric.setOnValueChanged(
+        Callback<double>::bind<ThrowingCallbacks, &ThrowingCallbacks::changed>(throwingCallbacks));
+    try {
+        static_cast<void>(throwingNumeric.handleInput({
+            .kind = InputEventKind::PointerScroll,
+            .position = {80.0F, 10.0F},
+            .scrollY = 1.0F,
+        }));
+        fail("Numeric callback exception was swallowed");
+    } catch (const std::runtime_error&) {
     }
 
     std::cout << "HeniaUI retained widget tests passed\n";
