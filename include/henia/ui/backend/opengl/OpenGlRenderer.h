@@ -23,11 +23,15 @@ struct OpenGlRenderStatistics final {
     std::uint64_t rejectedFrames = 0;
     std::uint64_t invalidInputFrames = 0;
     std::uint64_t capacityRejectedFrames = 0;
+    std::uint64_t wrongContextCalls = 0;
+    std::uint64_t ignoredHostErrors = 0;
+    std::uint64_t stateRestoreFailures = 0;
 };
 
 // OpenGlRenderer never creates, binds, or swaps a native context. Its owner must
-// keep one renderer instance per resource-sharing context group and make the
-// correct OpenGL 3.3+ context current for every call. The renderer is not
+// keep the exact OpenGL 3.3+ context used by initialize() current for every
+// call. Shared contexts are not accepted because WGL cannot portably prove
+// share-group membership. The renderer is not
 // movable: its resources must be shut down on the owning context and thread.
 // Instance upload slots are fence-owned and polled with zero timeout; render()
 // returns false rather than waiting when changed content has no safe slot.
@@ -52,7 +56,9 @@ public:
         const RenderPacket& packet,
         std::uint32_t viewportWidth,
         std::uint32_t viewportHeight) noexcept;
-    void shutdown() noexcept;
+    // Returns false and preserves every GL object when the owner context is not
+    // current, allowing the host to make it current and retry destruction.
+    [[nodiscard]] bool shutdown() noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;
     [[nodiscard]] std::size_t instanceCapacity() const noexcept;

@@ -24,13 +24,17 @@ struct OpenGlGfxStatistics final {
     std::uint64_t rejectedFrames = 0;
     std::uint64_t invalidInputFrames = 0;
     std::uint64_t capacityRejectedFrames = 0;
+    std::uint64_t wrongContextCalls = 0;
+    std::uint64_t ignoredHostErrors = 0;
+    std::uint64_t stateRestoreFailures = 0;
     RenderProfile profile{};
 };
 
 // Host-owned OpenGL context contract. The device allocates only its own pipeline
 // and instance-buffer ring; it never creates, switches, or presents a native context.
 // The device is not movable: its resources must be shut down on the owning
-// context and thread.
+// context and thread. The exact context used by initialize() must be current;
+// WGL cannot portably validate membership of a different shared context.
 // Instance upload slots are fence-owned and polled with zero timeout; render()
 // returns false rather than waiting when changed content has no safe slot.
 class OpenGlRenderDevice final {
@@ -51,7 +55,9 @@ public:
         const ViewParameters& view,
         bool depthAttachmentAvailable = false) noexcept;
     void reportGpuTime(std::uint64_t nanoseconds) noexcept;
-    void shutdown() noexcept;
+    // Returns false and preserves every GL object when the owner context is not
+    // current, allowing the host to make it current and retry destruction.
+    [[nodiscard]] bool shutdown() noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;
     [[nodiscard]] std::size_t boxCapacity() const noexcept;
