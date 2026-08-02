@@ -349,8 +349,8 @@ void printResult(const Result& result) {
               << std::right << std::fixed << std::setprecision(2)
               << std::setw(11) << result.medianGpuMicroseconds
               << std::setw(12) << result.medianRecordMicroseconds
-              << std::setw(14) << result.copiedBytes
-              << std::setw(14) << result.uploadHeapReadBytes
+              << std::setw(18) << result.copiedBytes
+              << std::setw(22) << result.uploadHeapReadBytes
               << std::setw(14) << result.residentBytes
               << std::setw(8) << result.gpuLocalFrames
               << std::setw(8) << result.directFrames << '\n';
@@ -379,17 +379,20 @@ int main(int argc, char** argv) {
 
     std::cout << "HeniaUI D3D12 instance-storage benchmark (GPU timestamps)\n"
               << "iterations=" << options.iterations << ", warmup=" << options.warmup << "\n"
+              << "GPU/record medians are per measured frame; copied/read bytes and "
+                 "strategy frame counts are measured-window cumulative totals; resident bytes "
+                 "are a post-window snapshot.\n"
               << std::left << std::setw(31) << "adapter"
               << std::setw(14) << "architecture"
               << std::setw(15) << "workload"
               << std::setw(15) << "strategy"
               << std::right << std::setw(11) << "GPU us"
               << std::setw(12) << "record us"
-              << std::setw(14) << "copied B"
-              << std::setw(14) << "upload-read B"
+              << std::setw(18) << "copied B (total)"
+              << std::setw(22) << "upload-read B (total)"
               << std::setw(14) << "resident B"
-              << std::setw(8) << "local"
-              << std::setw(8) << "direct" << '\n';
+              << std::setw(8) << "local T"
+              << std::setw(8) << "direct T" << '\n';
 
     std::uint32_t testedAdapters = 0;
     std::vector<std::uint64_t> testedHardwareIds;

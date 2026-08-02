@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -33,6 +34,8 @@ struct RenderPacketStorage final {
     CapacityPolicy capacityPolicy = CapacityPolicy::Grow;
     std::uint64_t identity = nextPacketIdentity();
     std::uint64_t revision = 0;
+    std::chrono::steady_clock::time_point buildStarted{};
+    std::uint64_t cpuBuildNanoseconds = 0;
 };
 
 struct RenderPacketPool final {
@@ -152,6 +155,10 @@ std::uint64_t RenderPacket::revision() const noexcept {
     return mStorage == nullptr ? 0 : mStorage->revision;
 }
 
+std::uint64_t RenderPacket::cpuBuildNanoseconds() const noexcept {
+    return mStorage == nullptr ? 0 : mStorage->cpuBuildNanoseconds;
+}
+
 std::size_t RenderPacket::instanceCapacity() const noexcept {
     return mStorage == nullptr ? 0 : mStorage->instances.capacity();
 }
@@ -244,6 +251,7 @@ bool RenderPacketBuilder::begin() noexcept {
         }
         mStorage = storage.get();
         clear();
+        mStorage->buildStarted = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -260,6 +268,7 @@ bool RenderPacketBuilder::begin() noexcept {
     ++mPool->slotGrowths;
     mStorage = mPool->slots.back().get();
     clear();
+    mStorage->buildStarted = std::chrono::steady_clock::now();
     return true;
 }
 
@@ -271,6 +280,9 @@ RenderPacket RenderPacketBuilder::publish() noexcept {
     if (mStorage->revision == 0) {
         mStorage->revision = mPool->nextRevision++;
     }
+    mStorage->cpuBuildNanoseconds = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - mStorage->buildStarted).count());
     RenderPacket packet(mPool, mStorage);
     mStorage = nullptr;
     return packet;
@@ -299,6 +311,7 @@ void RenderPacketBuilder::clear() noexcept {
     mStorage->statistics = {};
     mStorage->statistics.instanceCapacityGrowths = instanceGrowths;
     mStorage->statistics.batchCapacityGrowths = batchGrowths;
+    mStorage->cpuBuildNanoseconds = 0;
 }
 
 DrawBatch* RenderPacketBuilder::lastBatch() noexcept {

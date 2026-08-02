@@ -3,6 +3,7 @@
 #include "henia/gfx/Validation.h"
 
 #include "../FixedError.h"
+#include "../ProfileTimeline.h"
 #include "OpenGlFailure.h"
 #include "OpenGlUploadRing.h"
 
@@ -490,6 +491,7 @@ struct OpenGlRenderDevice::Implementation final {
     std::size_t capacity = 0;
     std::vector<UploadSlot> uploadSlots;
     henia::detail::OpenGlUploadRing uploadRing;
+    henia::detail::ProfileTimeline profileTimeline;
     OpenGlGfxStatistics statistics{};
     henia::detail::FixedError error;
     HGLRC ownerContext = nullptr;
@@ -540,6 +542,8 @@ bool OpenGlRenderDevice::Implementation::initialize(
         return false;
     }
     ownerContext = currentContext;
+    statistics = {};
+    profileTimeline.reset();
     uploadSlots.resize(requestedUploadSlots);
     uploadRing.reset(requestedUploadSlots);
     if (!loadFunctions(gl)) {
@@ -667,8 +671,7 @@ bool OpenGlRenderDevice::Implementation::render(
     const InstanceBatch& batch,
     const ViewParameters& view,
     bool depthAttachmentAvailable) noexcept {
-    ++statistics.frames;
-    statistics.profile.cpuBuildNanoseconds = batch.cpuBuildNanoseconds();
+    const std::uint64_t frameAttemptId = ++statistics.frameAttempts;
     const BoxInstanceView boxes = batch.boxes();
     if (!ready) {
         ++statistics.rejectedFrames;
@@ -748,6 +751,7 @@ bool OpenGlRenderDevice::Implementation::render(
     configureAttributes();
     bool partialUpload = false;
     std::size_t uploadedBytes = 0;
+    std::uint64_t cpuUploadNanoseconds = 0;
     if (upload.requiresUpload()) {
         const auto uploadStarted = std::chrono::steady_clock::now();
         const bool partial = upload.kind == henia::detail::UploadSelectionKind::Partial;
@@ -817,9 +821,7 @@ bool OpenGlRenderDevice::Implementation::render(
         }
         uploadRing.markUploaded(upload.slot, batch.identity(), batch.revision());
         partialUpload = partial;
-        statistics.profile.cpuUploadNanoseconds = elapsedNanoseconds(uploadStarted);
-    } else {
-        statistics.profile.cpuUploadNanoseconds = 0;
+        cpuUploadNanoseconds = elapsedNanoseconds(uploadStarted);
     }
     if (consumeOperationErrors() != GL_NO_ERROR) {
         if (upload.requiresUpload()) {
@@ -831,7 +833,9 @@ bool OpenGlRenderDevice::Implementation::render(
         return false;
     }
     if (upload.requiresUpload()) {
-        if (partialUpload) {
+        if (boxes.empty()) {
+            ++statistics.zeroWorkInstanceRevisions;
+        } else if (partialUpload) {
             ++statistics.partialInstanceUploads;
         } else {
             ++statistics.fullInstanceUploads;
@@ -916,11 +920,34 @@ bool OpenGlRenderDevice::Implementation::render(
         ++statistics.rejectedFrames;
         return false;
     }
-    statistics.profile.cpuDrawSubmitNanoseconds = elapsedNanoseconds(submitStarted);
+    const std::uint64_t cpuDrawSubmitNanoseconds = elapsedNanoseconds(submitStarted);
     if (!restoreState(state)) {
         ++statistics.rejectedFrames;
         return false;
     }
+    ++statistics.successfulFrames;
+    const InstanceUploadKind uploadKind = !upload.requiresUpload()
+        ? InstanceUploadKind::None
+        : boxes.empty()
+            ? InstanceUploadKind::ZeroWorkRevision
+            : partialUpload
+                ? InstanceUploadKind::DirtyRanges
+                : InstanceUploadKind::Full;
+    static_cast<void>(profileTimeline.complete({
+        .frameAttemptId = frameAttemptId,
+        .producerIdentity = batch.identity(),
+        .producerRevision = batch.revision(),
+        .producerBuildNanoseconds = batch.cpuBuildNanoseconds(),
+        .cpuUploadNanoseconds = cpuUploadNanoseconds,
+        .cpuDrawSubmitNanoseconds = cpuDrawSubmitNanoseconds,
+        .uploadedInstanceBytes = uploadedBytes,
+        .uploadRangeCount = uploadKind == InstanceUploadKind::DirtyRanges
+            ? static_cast<std::uint32_t>(dirtyRanges.size())
+            : uploadKind == InstanceUploadKind::Full ? 1U : 0U,
+        .submissionSlot = static_cast<std::uint32_t>(upload.slot),
+        .uploadKind = uploadKind,
+    }));
+    statistics.profile = profileTimeline.profile();
     error.clear();
     return true;
 }
@@ -1162,9 +1189,13 @@ bool OpenGlRenderDevice::render(
     bool depthAttachmentAvailable) noexcept {
     return mImplementation->render(batch, view, depthAttachmentAvailable);
 }
-void OpenGlRenderDevice::reportGpuTime(std::uint64_t nanoseconds) noexcept {
-    mImplementation->statistics.profile.gpuNanoseconds = nanoseconds;
-    mImplementation->statistics.profile.gpuTimingAvailable = true;
+bool OpenGlRenderDevice::reportGpuTime(
+    std::uint64_t sampleId,
+    std::uint64_t nanoseconds) noexcept {
+    if (!mImplementation->ready) return false;
+    const bool reported = mImplementation->profileTimeline.reportGpuTime(sampleId, nanoseconds);
+    mImplementation->statistics.profile = mImplementation->profileTimeline.profile();
+    return reported;
 }
 bool OpenGlRenderDevice::shutdown() noexcept {
     return mImplementation == nullptr || mImplementation->shutdown();

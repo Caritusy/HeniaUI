@@ -105,6 +105,7 @@ public:
     [[nodiscard]] const PacketStatistics& statistics() const noexcept;
     [[nodiscard]] std::uint64_t identity() const noexcept;
     [[nodiscard]] std::uint64_t revision() const noexcept;
+    [[nodiscard]] std::uint64_t cpuBuildNanoseconds() const noexcept;
     [[nodiscard]] std::size_t instanceCapacity() const noexcept;
     [[nodiscard]] std::size_t batchCapacity() const noexcept;
     [[nodiscard]] CapacityPolicy capacityPolicy() const noexcept;

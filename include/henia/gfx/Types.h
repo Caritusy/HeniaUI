@@ -1,5 +1,7 @@
 #pragma once
 
+#include "henia/RenderProfile.h"
+
 #include <array>
 #include <cstdint>
 
@@ -86,12 +88,6 @@ struct BoxInstance final {
     [[nodiscard]] constexpr bool operator==(const BoxInstance&) const noexcept = default;
 };
 
-struct RenderProfile final {
-    std::uint64_t cpuBuildNanoseconds = 0;
-    std::uint64_t cpuUploadNanoseconds = 0;
-    std::uint64_t cpuDrawSubmitNanoseconds = 0;
-    std::uint64_t gpuNanoseconds = 0;
-    bool gpuTimingAvailable = false;
-};
+using RenderProfile = henia::RenderProfile;
 
 } // namespace henia::gfx

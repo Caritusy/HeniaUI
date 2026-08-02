@@ -27,11 +27,13 @@ struct D3D12GfxConfiguration final {
 };
 
 struct D3D12GfxStatistics final {
-    std::uint64_t recordedFrames = 0;
+    std::uint64_t frameAttempts = 0;
+    std::uint64_t successfulFrames = 0;
     std::uint64_t drawCalls = 0;
     std::uint64_t submittedInstances = 0;
     std::uint64_t fullInstanceUploads = 0;
     std::uint64_t partialInstanceUploads = 0;
+    std::uint64_t zeroWorkInstanceRevisions = 0;
     // CPU writes into the submission slot's mapped staging resource.
     std::uint64_t uploadedInstanceBytes = 0;
     // Default-heap CopyBufferRegion work, separate from staging writes.
@@ -85,7 +87,11 @@ public:
         ID3D12GraphicsCommandList& commandList,
         std::uint32_t submissionSlot,
         henia::backend::d3d12::SubmissionReuse submissionReuse = {}) noexcept;
-    void reportGpuTime(std::uint64_t nanoseconds) noexcept;
+    // Associates a resolved host timestamp with a retained successful sample.
+    // Unknown, duplicate, expired, and previous-lifetime IDs return false.
+    [[nodiscard]] bool reportGpuTime(
+        std::uint64_t sampleId,
+        std::uint64_t nanoseconds) noexcept;
     void shutdown() noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;

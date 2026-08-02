@@ -3,6 +3,7 @@
 #include "henia/gfx/Validation.h"
 
 #include "../FixedError.h"
+#include "../ProfileTimeline.h"
 
 #include <d3dcompiler.h>
 #include <wrl/client.h>
@@ -359,6 +360,7 @@ struct D3D12RenderDevice::Implementation final {
     std::vector<Submission> submissions;
     D3D12GfxConfiguration configuration{};
     D3D12GfxStatistics statistics{};
+    henia::detail::ProfileTimeline profileTimeline;
     henia::detail::FixedError error;
     std::uint32_t instanceBufferBytes = 0;
     bool adapterArchitectureKnown = false;
@@ -558,6 +560,7 @@ bool D3D12RenderDevice::Implementation::initialize(
         }
     }
     statistics = {};
+    profileTimeline.reset();
     statistics.adapterArchitectureKnown = adapterArchitectureKnown;
     statistics.adapterUma = adapterUma;
     if (gpuLocalResourcesEnabled) {
@@ -604,8 +607,7 @@ bool D3D12RenderDevice::Implementation::record(
     ID3D12GraphicsCommandList& commandList,
     std::uint32_t submissionSlot,
     henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
-    ++statistics.recordedFrames;
-    statistics.profile.cpuBuildNanoseconds = batch.cpuBuildNanoseconds();
+    const std::uint64_t frameAttemptId = ++statistics.frameAttempts;
     const BoxInstanceView boxes = batch.boxes();
     if (!ready || submissionSlot >= submissions.size()) {
         ++statistics.rejectedFrames;
@@ -661,6 +663,10 @@ bool D3D12RenderDevice::Implementation::record(
     std::uint64_t& uploadedRevision = useGpuLocal
         ? submission.gpuLocalUploadedRevision
         : submission.directUploadedRevision;
+    std::uint64_t cpuUploadNanoseconds = 0;
+    std::uint64_t profileUploadedBytes = 0;
+    std::uint32_t profileUploadRangeCount = 0;
+    InstanceUploadKind profileUploadKind = InstanceUploadKind::None;
     if (uploadedIdentity != batch.identity() || uploadedRevision != batch.revision()) {
         const auto uploadStarted = std::chrono::steady_clock::now();
         const std::span<const DirtyRange> dirtyRanges = batch.dirtyRanges();
@@ -761,12 +767,21 @@ bool D3D12RenderDevice::Implementation::record(
         }
         uploadedIdentity = batch.identity();
         uploadedRevision = batch.revision();
-        if (partial) ++statistics.partialInstanceUploads;
-        else ++statistics.fullInstanceUploads;
+        if (boxes.empty()) {
+            ++statistics.zeroWorkInstanceRevisions;
+            profileUploadKind = InstanceUploadKind::ZeroWorkRevision;
+        } else if (partial) {
+            ++statistics.partialInstanceUploads;
+            profileUploadKind = InstanceUploadKind::DirtyRanges;
+            profileUploadRangeCount = static_cast<std::uint32_t>(dirtyRanges.size());
+        } else {
+            ++statistics.fullInstanceUploads;
+            profileUploadKind = InstanceUploadKind::Full;
+            profileUploadRangeCount = 1;
+        }
         statistics.uploadedInstanceBytes += uploadedBytes;
-        statistics.profile.cpuUploadNanoseconds = elapsedNanoseconds(uploadStarted);
-    } else {
-        statistics.profile.cpuUploadNanoseconds = 0;
+        profileUploadedBytes = uploadedBytes;
+        cpuUploadNanoseconds = elapsedNanoseconds(uploadStarted);
     }
     if (useGpuLocal) ++statistics.gpuLocalFrames;
     else ++statistics.directUploadFrames;
@@ -819,7 +834,21 @@ bool D3D12RenderDevice::Implementation::record(
         statistics.submittedInstances += boxes.size();
         if (!useGpuLocal) statistics.uploadHeapReadBytes += submittedBytes;
     }
-    statistics.profile.cpuDrawSubmitNanoseconds = elapsedNanoseconds(submitStarted);
+    const std::uint64_t cpuDrawSubmitNanoseconds = elapsedNanoseconds(submitStarted);
+    ++statistics.successfulFrames;
+    static_cast<void>(profileTimeline.complete({
+        .frameAttemptId = frameAttemptId,
+        .producerIdentity = batch.identity(),
+        .producerRevision = batch.revision(),
+        .producerBuildNanoseconds = batch.cpuBuildNanoseconds(),
+        .cpuUploadNanoseconds = cpuUploadNanoseconds,
+        .cpuDrawSubmitNanoseconds = cpuDrawSubmitNanoseconds,
+        .uploadedInstanceBytes = profileUploadedBytes,
+        .uploadRangeCount = profileUploadRangeCount,
+        .submissionSlot = submissionSlot,
+        .uploadKind = profileUploadKind,
+    }));
+    statistics.profile = profileTimeline.profile();
     error.clear();
     return true;
 }
@@ -939,9 +968,13 @@ bool D3D12RenderDevice::record(
     henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
     return mImplementation->record(batch, view, commandList, slot, submissionReuse);
 }
-void D3D12RenderDevice::reportGpuTime(std::uint64_t nanoseconds) noexcept {
-    mImplementation->statistics.profile.gpuNanoseconds = nanoseconds;
-    mImplementation->statistics.profile.gpuTimingAvailable = true;
+bool D3D12RenderDevice::reportGpuTime(
+    std::uint64_t sampleId,
+    std::uint64_t nanoseconds) noexcept {
+    if (!mImplementation->ready) return false;
+    const bool reported = mImplementation->profileTimeline.reportGpuTime(sampleId, nanoseconds);
+    mImplementation->statistics.profile = mImplementation->profileTimeline.profile();
+    return reported;
 }
 void D3D12RenderDevice::shutdown() noexcept { if (mImplementation != nullptr) mImplementation->shutdown(); }
 bool D3D12RenderDevice::initialized() const noexcept { return mImplementation->ready; }

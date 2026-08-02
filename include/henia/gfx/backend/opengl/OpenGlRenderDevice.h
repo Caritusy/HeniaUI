@@ -10,11 +10,13 @@
 namespace henia::gfx {
 
 struct OpenGlGfxStatistics final {
-    std::uint64_t frames = 0;
+    std::uint64_t frameAttempts = 0;
+    std::uint64_t successfulFrames = 0;
     std::uint64_t drawCalls = 0;
     std::uint64_t submittedInstances = 0;
     std::uint64_t fullInstanceUploads = 0;
     std::uint64_t partialInstanceUploads = 0;
+    std::uint64_t zeroWorkInstanceRevisions = 0;
     std::uint64_t uploadedInstanceBytes = 0;
     std::uint64_t uploadSlotExhaustions = 0;
     std::uint64_t fullUploadFallbacks = 0;
@@ -59,7 +61,11 @@ public:
         const InstanceBatch& batch,
         const ViewParameters& view,
         bool depthAttachmentAvailable = false) noexcept;
-    void reportGpuTime(std::uint64_t nanoseconds) noexcept;
+    // Associates a resolved host timestamp with a retained successful sample.
+    // Unknown, duplicate, expired, and previous-lifetime IDs return false.
+    [[nodiscard]] bool reportGpuTime(
+        std::uint64_t sampleId,
+        std::uint64_t nanoseconds) noexcept;
     // Returns false and preserves every GL object when the owner context is not
     // current, allowing the host to make it current and retry destruction.
     [[nodiscard]] bool shutdown() noexcept;

@@ -391,7 +391,26 @@ allocation or API call; configurations whose instance-buffer view would exceed
 
 ## Profiling
 
-Statistics separate producer build time, instance upload time, draw-recording/submit time, and optional GPU time. GPU timing is unavailable until the host reports a resolved timestamp sample; a zero value is therefore never silently presented as a measured GPU duration.
+Every backend defines `frameAttempts` as calls to `render()`/`record()`,
+`successfulFrames` as calls returning `true`, and `rejectedFrames` as calls
+returning `false`; consequently `frameAttempts == successfulFrames +
+rejectedFrames`. Successful UI and gfx submissions publish a profile sample
+identified by sample ID, attempt ID, packet/batch identity and revision, and the
+actual OpenGL upload-ring or D3D12 submission slot. Rejected attempts create a
+gap in attempt IDs but never a successful sample.
+
+`latestSample`, `cumulative`, and the fixed 60-sample `rollingAverage` are
+separate views. Producer build time is counted only on the first consumer
+sample for an immutable revision, while full uploads, exact dirty-range uploads,
+zero-byte revision changes, and uploaded bytes are labeled independently. The
+timeline retains 64 successful submissions without allocation or locking.
+
+The host resolves a timestamp with `reportGpuTime(sampleId, nanoseconds)`.
+Delayed results update the matching retained sample and `latestGpuSample`; they
+never make a newer `latestSample` appear GPU-timed. Unknown, duplicate, expired,
+or previous-lifetime sample IDs are rejected. A current sample with no resolved
+timestamp keeps `gpuTimingAvailable == false`, including when an older result
+has arrived.
 
 ## Threading
 

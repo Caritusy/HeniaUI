@@ -556,7 +556,8 @@ int main() {
         fail("OpenGL rejected a valid fully off-screen scissor");
     }
     const OpenGlRenderStatistics afterOffscreen = renderer.statistics();
-    if (afterOffscreen.frames != beforeOffscreen.frames + 1U
+    if (afterOffscreen.successfulFrames != beforeOffscreen.successfulFrames + 1U
+        || afterOffscreen.frameAttempts != beforeOffscreen.frameAttempts + 1U
         || afterOffscreen.drawCalls != beforeOffscreen.drawCalls
         || afterOffscreen.instanceUploads != beforeOffscreen.instanceUploads) {
         fail("OpenGL submitted or uploaded a fully off-screen scissor batch");
@@ -839,7 +840,8 @@ int main() {
         glFinish();
     }
     const OpenGlRenderStatistics statistics = renderer.statistics();
-    if (statistics.frames != 99 || statistics.instanceUploads != 65
+    if (statistics.successfulFrames != 99 || statistics.frameAttempts != 101
+        || statistics.instanceUploads != 65
         || statistics.textureUploads != 3
         || statistics.fullTextureUploads != 2 || statistics.partialTextureUploads != 1
         || statistics.uploadedTextureBytes != 33 || statistics.gpuTextureBytes != 16
@@ -847,7 +849,11 @@ int main() {
         || statistics.invalidInputFrames != 1 || statistics.capacityRejectedFrames != 0
         || statistics.wrongContextCalls != 3 || statistics.ignoredHostErrors == 0
         || statistics.stateRestoreFailures != 0 || statistics.initializationFailures != 0
-        || statistics.textureSynchronizationFailures != 0) {
+        || statistics.textureSynchronizationFailures != 0
+        || statistics.frameAttempts != statistics.successfulFrames + statistics.rejectedFrames
+        || statistics.profile.cumulative.samples != statistics.successfulFrames
+        || statistics.profile.latestSample.identity.sampleId == 0
+        || statistics.profile.latestSample.gpuTimingAvailable) {
         fail("OpenGL multi-slot stress statistics are incorrect");
     }
 
@@ -886,7 +892,7 @@ int main() {
 
     ViewParameters validView{.viewport = {128.0F, 128.0F}};
     glEnable(0xFFFFFFFFU);
-    for (int iteration = 0; iteration < 32; ++iteration) {
+    for (int iteration = 0; iteration < 100; ++iteration) {
         setHostState(testGl, hostTextures, hostSamplers, random);
         const GlState gfxBefore = captureState(testGl);
         if (!gfx.render(boxBatch, validView)) {
@@ -964,11 +970,24 @@ int main() {
 
     const OpenGlGfxStatistics gfxStatistics = gfx.statistics();
     if (gfxStatistics.invalidInputFrames != 1 || gfxStatistics.capacityRejectedFrames != 0
-        || gfxStatistics.drawCalls != 35 || gfxStatistics.fullInstanceUploads != 1
+        || gfxStatistics.drawCalls != 103 || gfxStatistics.fullInstanceUploads != 1
         || gfxStatistics.partialInstanceUploads != 2
         || gfxStatistics.uploadedInstanceBytes != 514U * sizeof(BoxInstance)
         || gfxStatistics.wrongContextCalls != 2 || gfxStatistics.ignoredHostErrors == 0
-        || gfxStatistics.stateRestoreFailures != 0 || gfxStatistics.initializationFailures != 0) {
+        || gfxStatistics.stateRestoreFailures != 0 || gfxStatistics.initializationFailures != 0
+        || gfxStatistics.frameAttempts
+            != gfxStatistics.successfulFrames + gfxStatistics.rejectedFrames
+        || gfxStatistics.profile.cumulative.samples != gfxStatistics.successfulFrames
+        || gfxStatistics.profile.cumulative.producerBuilds != 3
+        || gfxStatistics.profile.latestSample.identity.producerIdentity
+            != sparseBoxBatch.identity()
+        || gfxStatistics.profile.latestSample.identity.producerRevision
+            != sparseBoxBatch.revision()
+        || gfxStatistics.profile.latestSample.uploadKind
+            != henia::InstanceUploadKind::DirtyRanges
+        || gfxStatistics.profile.latestSample.uploadRangeCount != 2
+        || gfxStatistics.profile.latestSample.uploadedInstanceBytes
+            != 2U * sizeof(BoxInstance)) {
         fail("OpenGL gfx isolation statistics are incorrect");
     }
 

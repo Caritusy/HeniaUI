@@ -36,6 +36,12 @@ allocators.
 `copied_box_instances` records producer-side box data copied into replacement or
 COW pages, independently of directory metadata and GPU upload bytes.
 
+Each JSON metric group carries an explicit `measurement_scope`: CPU values are
+per-iteration distributions, cache counters are cumulative over measured
+iterations, batching is the latest packet snapshot, GPU work is per iteration,
+and memory is a resident snapshot. These labels prevent cumulative counters
+from being compared as if they were frame samples.
+
 GPU-work fields are deterministic submission facts: draw calls, submitted
 instances, steady-state upload bytes, cold upload bytes, configured GPU-buffer
 bytes, texture bytes, and the conservative pre-clip pixel area of generated
@@ -43,8 +49,9 @@ quads. The area is a deterministic fragment-work upper bound, not a hardware
 occlusion query. The portable harness does not create a graphics
 device, so `timestamp_available` is false and `timestamp_ns` is zero. A host
 benchmark with timestamp queries can populate the same fields from
-`RenderProfile::gpuNanoseconds`; HeniaUI never substitutes CPU time for a GPU
-timestamp.
+`RenderProfile::latestSample.gpuNanoseconds`; HeniaUI never substitutes CPU time
+for a GPU timestamp. Backend cumulative and rolling profile fields are not
+written into these per-iteration portable fields.
 
 Packet-level batching diagnostics use the same literal definitions as the
 console sandbox: source commands and compiled instances are never conflated;
@@ -126,6 +133,10 @@ timestamp queries around the instance copies and draws. It enumerates one
 adapter per hardware ID and runs 64-instance (4 KiB) and 32,768-instance
 (2 MiB) workloads in static and full-replacement modes with forced direct,
 forced GPU-local, and automatic selection:
+
+Its GPU/record medians are per measured frame. Copied bytes, upload-heap read
+bytes, and strategy frame counts are explicitly labeled as cumulative totals
+over the measured window; resident bytes are a post-window snapshot.
 
 ```powershell
 cmake --build --preset release --target HeniaUID3D12InstanceBenchmarks
