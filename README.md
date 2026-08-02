@@ -195,7 +195,9 @@ One box instance stores bounds, linear color, pixel line width, hue offset, and 
 Box edges are homogeneously clipped before the perspective divide, including
 camera crossings and all six frustum planes. Set `ViewParameters::clipDepthRange`
 to match whether the supplied matrix emits `[-w,+w]` or `[0,+w]` clip-space
-depth; both OpenGL and D3D12 accept either convention.
+depth; both OpenGL and D3D12 accept either convention. Pixel-space along/across
+distances use non-perspective interpolation, and analytic butt-cap fringes keep
+requested width and AA stable across strong depth gradients.
 
 `InstanceBatch::boxes()` is a segmented immutable view with `size()`, indexed
 access, and iteration. It intentionally has no `data()` member because the

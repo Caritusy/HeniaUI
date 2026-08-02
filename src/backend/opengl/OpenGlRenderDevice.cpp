@@ -222,10 +222,12 @@ uniform mat4 viewProjection;
 uniform vec2 viewportSize;
 uniform int zeroToOneDepth;
 
-out vec4 lineColor;
-out float edgeDistance;
-out float halfWidth;
-out float hueOffset;
+flat out vec4 lineColor;
+noperspective out float edgeAcross;
+noperspective out float edgeAlong;
+flat out float segmentLength;
+flat out float halfWidth;
+flat out float hueOffset;
 flat out uint effects;
 flat out float validEdge;
 
@@ -314,8 +316,11 @@ void main() {
     validEdge = clipSegment(startClip, finishClip, zeroToOne) ? 1.0 : 0.0;
 
     halfWidth = max(instanceMinimumAndWidth.w, 0.5) * 0.5;
-    float expandedWidth = halfWidth + 1.25;
-    edgeDistance = vertex.y * expandedWidth;
+    float fringe = 1.25;
+    float expandedWidth = halfWidth + fringe;
+    edgeAcross = 0.0;
+    edgeAlong = 0.0;
+    segmentLength = 0.0;
     lineColor = instanceColor;
     hueOffset = instanceMaximumAndHue.w;
     effects = instanceEffects;
@@ -327,11 +332,19 @@ void main() {
     vec2 startNdc = startClip.xy / startClip.w;
     vec2 finishNdc = finishClip.xy / finishClip.w;
     vec2 directionPixels = (finishNdc - startNdc) * viewportSize * 0.5;
-    vec2 normalPixels = length(directionPixels) > 0.0001
-        ? normalize(vec2(-directionPixels.y, directionPixels.x))
-        : vec2(0.0, 1.0);
-    vec2 offsetNdc = normalPixels * expandedWidth * 2.0 / viewportSize * vertex.y;
-    vec4 endpoint = mix(startClip, finishClip, vertex.x);
+    segmentLength = length(directionPixels);
+    vec2 direction = segmentLength > 0.0001
+        ? directionPixels / segmentLength
+        : vec2(1.0, 0.0);
+    vec2 normalPixels = vec2(-direction.y, direction.x);
+    bool finishVertex = vertex.x > 0.5;
+    edgeAlong = finishVertex ? segmentLength + fringe : -fringe;
+    edgeAcross = vertex.y * expandedWidth;
+    float capOffset = finishVertex ? fringe : -fringe;
+    vec2 offsetPixels = direction * capOffset
+        + normalPixels * expandedWidth * vertex.y;
+    vec2 offsetNdc = offsetPixels * 2.0 / viewportSize;
+    vec4 endpoint = finishVertex ? finishClip : startClip;
     endpoint.xy += offsetNdc * endpoint.w;
     if (zeroToOne) {
         endpoint.z = endpoint.z * 2.0 - endpoint.w;
@@ -342,10 +355,12 @@ void main() {
 
 constexpr const char* kFragmentShaderSource = R"glsl(
 #version 330 core
-in vec4 lineColor;
-in float edgeDistance;
-in float halfWidth;
-in float hueOffset;
+flat in vec4 lineColor;
+noperspective in float edgeAcross;
+noperspective in float edgeAlong;
+flat in float segmentLength;
+flat in float halfWidth;
+flat in float hueOffset;
 flat in uint effects;
 flat in float validEdge;
 uniform float timeSeconds;
@@ -358,8 +373,12 @@ vec3 hue(float value) {
 
 void main() {
     if (validEdge < 0.5) discard;
-    float antiAlias = max(fwidth(edgeDistance), 0.75);
-    float coverage = 1.0 - smoothstep(halfWidth - antiAlias, halfWidth + antiAlias, abs(edgeDistance));
+    vec2 centered = vec2(edgeAlong - segmentLength * 0.5, edgeAcross);
+    vec2 outside = abs(centered) - vec2(segmentLength * 0.5, halfWidth);
+    float distanceToEdge = length(max(outside, vec2(0.0)))
+        + min(max(outside.x, outside.y), 0.0);
+    float antiAlias = max(fwidth(distanceToEdge), 0.75);
+    float coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
     vec4 color = lineColor;
     if ((effects & 1u) != 0u) {
         color.rgb *= hue(fract(timeSeconds * 0.08 + hueOffset));

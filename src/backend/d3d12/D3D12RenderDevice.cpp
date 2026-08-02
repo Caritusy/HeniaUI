@@ -45,10 +45,12 @@ struct VertexInput {
 
 struct PixelInput {
     float4 position : SV_Position;
-    float4 color : COLOR;
-    float edgeDistance : EDGE_DISTANCE;
-    float halfWidth : HALF_WIDTH;
-    float hueOffset : HUE_OFFSET;
+    nointerpolation float4 color : COLOR;
+    noperspective float edgeAcross : EDGE_ACROSS;
+    noperspective float edgeAlong : EDGE_ALONG;
+    nointerpolation float segmentLength : SEGMENT_LENGTH;
+    nointerpolation float halfWidth : HALF_WIDTH;
+    nointerpolation float hueOffset : HUE_OFFSET;
     nointerpolation uint effects : EFFECTS;
     nointerpolation float validEdge : VALID_EDGE;
 };
@@ -131,9 +133,12 @@ PixelInput vertexMain(VertexInput input) {
     output.validEdge = clipSegment(startClip, finishClip, zeroToOne) ? 1.0 : 0.0;
 
     output.halfWidth = max(input.minimumAndWidth.w, 0.5) * 0.5;
-    float expandedWidth = output.halfWidth + 1.25;
+    float fringe = 1.25;
+    float expandedWidth = output.halfWidth + fringe;
     output.color = input.color;
-    output.edgeDistance = vertex.y * expandedWidth;
+    output.edgeAcross = 0.0;
+    output.edgeAlong = 0.0;
+    output.segmentLength = 0.0;
     output.hueOffset = input.maximumAndHue.w;
     output.effects = input.effects;
     if (output.validEdge < 0.5) {
@@ -144,11 +149,19 @@ PixelInput vertexMain(VertexInput input) {
     float2 startNdc = startClip.xy / startClip.w;
     float2 finishNdc = finishClip.xy / finishClip.w;
     float2 directionPixels = (finishNdc - startNdc) * viewportSize * 0.5;
-    float2 normalPixels = length(directionPixels) > 0.0001
-        ? normalize(float2(-directionPixels.y, directionPixels.x))
-        : float2(0.0, 1.0);
-    float2 offsetNdc = normalPixels * expandedWidth * 2.0 / viewportSize * vertex.y;
-    float4 endpoint = lerp(startClip, finishClip, vertex.x);
+    output.segmentLength = length(directionPixels);
+    float2 direction = output.segmentLength > 0.0001
+        ? directionPixels / output.segmentLength
+        : float2(1.0, 0.0);
+    float2 normalPixels = float2(-direction.y, direction.x);
+    bool finishVertex = vertex.x > 0.5;
+    output.edgeAlong = finishVertex ? output.segmentLength + fringe : -fringe;
+    output.edgeAcross = vertex.y * expandedWidth;
+    float capOffset = finishVertex ? fringe : -fringe;
+    float2 offsetPixels = direction * capOffset
+        + normalPixels * expandedWidth * vertex.y;
+    float2 offsetNdc = offsetPixels * 2.0 / viewportSize;
+    float4 endpoint = finishVertex ? finishClip : startClip;
     endpoint.xy += offsetNdc * endpoint.w;
     if (!zeroToOne) {
         endpoint.z = endpoint.z * 0.5 + endpoint.w * 0.5;
@@ -164,11 +177,14 @@ float3 hue(float value) {
 
 float4 pixelMain(PixelInput input) : SV_Target {
     clip(input.validEdge - 0.5);
-    float antiAlias = max(fwidth(input.edgeDistance), 0.75);
-    float coverage = 1.0 - smoothstep(
-        input.halfWidth - antiAlias,
-        input.halfWidth + antiAlias,
-        abs(input.edgeDistance));
+    float2 centered = float2(
+        input.edgeAlong - input.segmentLength * 0.5,
+        input.edgeAcross);
+    float2 outside = abs(centered) - float2(input.segmentLength * 0.5, input.halfWidth);
+    float distanceToEdge = length(max(outside, 0.0))
+        + min(max(outside.x, outside.y), 0.0);
+    float antiAlias = max(fwidth(distanceToEdge), 0.75);
+    float coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
     float4 color = input.color;
     if ((input.effects & 1u) != 0u) {
         color.rgb *= hue(frac(timeSeconds * 0.08 + input.hueOffset));
