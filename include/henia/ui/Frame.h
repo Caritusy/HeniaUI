@@ -11,7 +11,10 @@ class Frame final {
 public:
     Frame();
 
-    void reserve(std::size_t commandCapacity, std::size_t batchCapacity);
+    void reserve(
+        std::size_t commandCapacity,
+        std::size_t batchCapacity,
+        CapacityPolicy capacityPolicy = CapacityPolicy::Grow);
     [[nodiscard]] Canvas& begin() noexcept;
     [[nodiscard]] const RenderPacket& finish();
 

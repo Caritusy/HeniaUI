@@ -130,7 +130,7 @@ Widget* Widget::hitTest(Vec2 point) noexcept {
     return this;
 }
 
-bool Widget::handleInput(const InputEvent&) noexcept { return false; }
+bool Widget::handleInput(const InputEvent&) { return false; }
 
 void Widget::markLayoutDirty() noexcept {
     mLayoutDirty = true;

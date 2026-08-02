@@ -23,7 +23,7 @@ public:
     explicit TextRunCache(const FontStore& fonts) noexcept;
 
     void reserve(std::size_t entries, std::size_t glyphsPerEntry);
-    void setMaximumEntries(std::size_t maximumEntries) noexcept;
+    void setMaximumEntries(std::size_t maximumEntries);
     [[nodiscard]] const TextRun* layout(FontHandle font, float size, std::string_view text);
     void clear() noexcept;
 
@@ -53,7 +53,7 @@ private:
         float size,
         std::string_view text,
         TextRun& output) const;
-    void removeIndex(std::uint64_t hash, std::size_t entryIndex) noexcept;
+    void removeIndex(std::uint64_t hash, std::size_t entryIndex);
 
     const FontStore* mFonts = nullptr;
     std::vector<Entry> mEntries;

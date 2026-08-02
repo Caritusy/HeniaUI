@@ -4,11 +4,14 @@ namespace henia::ui {
 
 UiDocument::UiDocument(TextPainter& text, Theme theme) : mText(&text), mTheme(theme) {}
 
-void UiDocument::reserve(std::size_t commandCapacity, std::size_t batchCapacity) {
-    mFrame.reserve(commandCapacity, batchCapacity);
+void UiDocument::reserve(
+    std::size_t commandCapacity,
+    std::size_t batchCapacity,
+    CapacityPolicy capacityPolicy) {
+    mFrame.reserve(commandCapacity, batchCapacity, capacityPolicy);
 }
 
-void UiDocument::setRoot(std::unique_ptr<Widget> rootWidget) noexcept {
+void UiDocument::setRoot(std::unique_ptr<Widget> rootWidget) {
     clearInteraction();
     mRoot = std::move(rootWidget);
     if (mRoot != nullptr) {
@@ -66,7 +69,7 @@ const RenderPacket& UiDocument::compose() {
     return mFrame.packet();
 }
 
-bool UiDocument::dispatch(const InputEvent& event) noexcept {
+bool UiDocument::dispatch(const InputEvent& event) {
     if (mRoot == nullptr) {
         return false;
     }
@@ -113,7 +116,7 @@ bool UiDocument::dispatch(const InputEvent& event) noexcept {
     return false;
 }
 
-void UiDocument::clearInteraction() noexcept {
+void UiDocument::clearInteraction() {
     if (mHovered != nullptr) {
         mHovered->setHovered(false);
     }
@@ -145,7 +148,7 @@ void UiDocument::updateHover(Vec2 position) noexcept {
     }
 }
 
-void UiDocument::setFocus(Widget* widget) noexcept {
+void UiDocument::setFocus(Widget* widget) {
     if (widget == mFocused) {
         return;
     }

@@ -39,7 +39,7 @@ public:
     [[nodiscard]] double step() const noexcept;
     void setPrecision(std::size_t precision) noexcept;
     void setOnValueChanged(Callback<double> callback) noexcept;
-    [[nodiscard]] bool handleInput(const InputEvent& event) noexcept override;
+    [[nodiscard]] bool handleInput(const InputEvent& event) override;
 
 protected:
     [[nodiscard]] Vec2 onMeasure(TextPainter& text, Constraints constraints) override;
@@ -51,9 +51,9 @@ private:
     [[nodiscard]] Region regionAt(Vec2 point) const noexcept;
     [[nodiscard]] std::string formatValue() const;
     void beginEditing();
-    void commitEditing() noexcept;
+    void commitEditing();
     void cancelEditing() noexcept;
-    void adjust(double delta) noexcept;
+    void adjust(double delta);
 
     NumericInputStyle mStyle{};
     Callback<double> mOnValueChanged{};

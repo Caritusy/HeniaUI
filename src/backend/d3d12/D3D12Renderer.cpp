@@ -1,5 +1,7 @@
 #include "henia/ui/backend/d3d12/D3D12Renderer.h"
 
+#include "../FixedError.h"
+
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
@@ -8,7 +10,6 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
-#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -183,7 +184,7 @@ float4 pixelMain(PixelInput input) : SV_Target {
     const char* entry,
     const char* target,
     ComPtr<ID3DBlob>& output,
-    std::string& error) noexcept {
+    henia::detail::FixedError& error) noexcept {
     ComPtr<ID3DBlob> errors;
     const UINT flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
     const HRESULT result = D3DCompile(
@@ -293,24 +294,26 @@ struct D3D12Renderer::Implementation final {
     ComPtr<ID3D12DescriptorHeap> gpuBatchHeap;
     std::vector<Submission> submissions;
     std::vector<GpuTexture> textures;
+    std::vector<std::uint32_t> dirtyTextures;
+    std::vector<ComPtr<ID3D12Resource>> textureUploads;
     D3D12RendererConfiguration configuration{};
     DXGI_FORMAT renderTargetFormat = DXGI_FORMAT_UNKNOWN;
     std::uint32_t descriptorStride = 0;
     D3D12RenderStatistics statistics{};
-    std::string error;
+    henia::detail::FixedError error;
     bool ready = false;
 
     [[nodiscard]] bool initialize(
         ID3D12Device& nativeDevice,
         DXGI_FORMAT format,
-        D3D12RendererConfiguration requested) noexcept;
+        D3D12RendererConfiguration requested);
     [[nodiscard]] bool createRootSignature() noexcept;
     [[nodiscard]] bool createPipelines() noexcept;
     [[nodiscard]] bool createDescriptorHeaps() noexcept;
     [[nodiscard]] bool createSubmissionBuffers() noexcept;
     [[nodiscard]] bool synchronizeTextures(
         const TextureStore& store,
-        ID3D12CommandQueue& queue) noexcept;
+        ID3D12CommandQueue& queue);
     [[nodiscard]] bool record(
         const RenderPacket& packet,
         ID3D12GraphicsCommandList& commandList,
@@ -326,7 +329,7 @@ struct D3D12Renderer::Implementation final {
 bool D3D12Renderer::Implementation::initialize(
     ID3D12Device& nativeDevice,
     DXGI_FORMAT format,
-    D3D12RendererConfiguration requested) noexcept {
+    D3D12RendererConfiguration requested) {
     if (ready) {
         return true;
     }
@@ -343,6 +346,10 @@ bool D3D12Renderer::Implementation::initialize(
     device = &nativeDevice;
     configuration = requested;
     renderTargetFormat = format;
+    submissions.resize(configuration.submissionCapacity);
+    textures.resize(configuration.textureCapacity);
+    dirtyTextures.reserve(configuration.textureCapacity);
+    textureUploads.reserve(configuration.textureCapacity);
     if (!createRootSignature() || !createPipelines() || !createDescriptorHeaps()
         || !createSubmissionBuffers()) {
         shutdown();
@@ -500,7 +507,6 @@ bool D3D12Renderer::Implementation::createSubmissionBuffers() noexcept {
     const std::uint64_t bufferSize = configuration.instanceCapacity * sizeof(DrawInstance);
     const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
     const D3D12_RESOURCE_DESC description = bufferDescription(bufferSize);
-    submissions.resize(configuration.submissionCapacity);
     for (Submission& submission : submissions) {
         if (FAILED(device->CreateCommittedResource(
                 &uploadHeap,
@@ -525,24 +531,20 @@ bool D3D12Renderer::Implementation::createSubmissionBuffers() noexcept {
 
 bool D3D12Renderer::Implementation::synchronizeTextures(
     const TextureStore& store,
-    ID3D12CommandQueue& queue) noexcept {
+    ID3D12CommandQueue& queue) {
     if (!ready || store.size() > configuration.textureCapacity) {
         error = "D3D12 texture store exceeds configured capacity";
         return false;
     }
-    if (textures.size() < store.size()) {
-        textures.resize(store.size());
-    }
-
-    std::vector<std::uint32_t> dirty;
-    dirty.reserve(store.size());
+    dirtyTextures.clear();
+    textureUploads.clear();
     for (std::uint32_t value = 1; value <= store.size(); ++value) {
         const TextureView view = store.view(TextureHandle{value});
         if (view.handle.valid() && textures[value - 1U].revision != view.revision) {
-            dirty.push_back(value);
+            dirtyTextures.push_back(value);
         }
     }
-    if (dirty.empty()) {
+    if (dirtyTextures.empty()) {
         error.clear();
         return true;
     }
@@ -562,9 +564,7 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
         return false;
     }
 
-    std::vector<ComPtr<ID3D12Resource>> uploads;
-    uploads.reserve(dirty.size());
-    for (const std::uint32_t value : dirty) {
+    for (const std::uint32_t value : dirtyTextures) {
         const TextureView view = store.view(TextureHandle{value});
         const D3D12_RESOURCE_DESC textureDesc = textureDescription(view);
         const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
@@ -650,7 +650,7 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
 
         textures[value - 1U].resource = std::move(texture);
         textures[value - 1U].revision = view.revision;
-        uploads.push_back(std::move(upload));
+        textureUploads.push_back(std::move(upload));
     }
 
     if (FAILED(commandList->Close())) {
@@ -664,7 +664,8 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
         return false;
     }
 
-    statistics.textureUploads += dirty.size();
+    statistics.textureUploads += dirtyTextures.size();
+    textureUploads.clear();
     error.clear();
     return true;
 }
@@ -789,6 +790,8 @@ void D3D12Renderer::Implementation::shutdown() noexcept {
     }
     submissions.clear();
     textures.clear();
+    dirtyTextures.clear();
+    textureUploads.clear();
     gpuBatchHeap.Reset();
     cpuTextureHeap.Reset();
     additivePipeline.Reset();
@@ -827,13 +830,24 @@ bool D3D12Renderer::initialize(
     ID3D12Device& device,
     DXGI_FORMAT renderTargetFormat,
     D3D12RendererConfiguration configuration) noexcept {
-    return mImplementation->initialize(device, renderTargetFormat, configuration);
+    try {
+        return mImplementation->initialize(device, renderTargetFormat, configuration);
+    } catch (...) {
+        mImplementation->shutdown();
+        mImplementation->error = "D3D12 renderer initialization exhausted CPU bookkeeping storage";
+        return false;
+    }
 }
 
 bool D3D12Renderer::synchronizeTextures(
     const TextureStore& textures,
     ID3D12CommandQueue& directQueue) noexcept {
-    return mImplementation->synchronizeTextures(textures, directQueue);
+    try {
+        return mImplementation->synchronizeTextures(textures, directQueue);
+    } catch (...) {
+        mImplementation->error = "D3D12 texture synchronization exhausted CPU bookkeeping storage";
+        return false;
+    }
 }
 
 bool D3D12Renderer::record(
@@ -866,6 +880,6 @@ D3D12RenderStatistics D3D12Renderer::statistics() const noexcept {
     return mImplementation->statistics;
 }
 
-std::string_view D3D12Renderer::lastError() const noexcept { return mImplementation->error; }
+std::string_view D3D12Renderer::lastError() const noexcept { return mImplementation->error.view(); }
 
 } // namespace henia::ui

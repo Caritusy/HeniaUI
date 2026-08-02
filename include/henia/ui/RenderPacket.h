@@ -38,6 +38,7 @@ struct PacketStatistics final {
     std::uint64_t instances = 0;
     std::uint64_t batches = 0;
     std::uint64_t mergedCommands = 0;
+    std::uint64_t rejectedCommands = 0;
     std::uint64_t instanceCapacityGrowths = 0;
     std::uint64_t batchCapacityGrowths = 0;
 };
@@ -50,7 +51,10 @@ public:
     RenderPacket(RenderPacket&&) = delete;
     RenderPacket& operator=(RenderPacket&&) = delete;
 
-    void reserve(std::size_t instanceCapacity, std::size_t batchCapacity);
+    void reserve(
+        std::size_t instanceCapacity,
+        std::size_t batchCapacity,
+        CapacityPolicy capacityPolicy = CapacityPolicy::Grow);
     void clear() noexcept;
 
     [[nodiscard]] std::span<const DrawInstance> instances() const noexcept;
@@ -60,16 +64,18 @@ public:
     [[nodiscard]] std::uint64_t revision() const noexcept;
     [[nodiscard]] std::size_t instanceCapacity() const noexcept;
     [[nodiscard]] std::size_t batchCapacity() const noexcept;
+    [[nodiscard]] CapacityPolicy capacityPolicy() const noexcept;
 
 private:
     friend class BatchCompiler;
 
-    void appendInstance(const DrawInstance& instance);
-    DrawBatch& appendBatch(const DrawBatch& batch);
+    [[nodiscard]] bool appendInstance(const DrawInstance& instance) noexcept;
+    [[nodiscard]] DrawBatch* appendBatch(const DrawBatch& batch) noexcept;
 
     std::vector<DrawInstance> mInstances;
     std::vector<DrawBatch> mBatches;
     PacketStatistics mStatistics{};
+    CapacityPolicy mCapacityPolicy = CapacityPolicy::Grow;
     std::uint64_t mIdentity = 0;
     std::uint64_t mRevision = 0;
 };

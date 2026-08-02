@@ -29,7 +29,7 @@ public:
     [[nodiscard]] std::string_view text() const noexcept;
     void setStyle(ButtonStyle style) noexcept;
     void setOnClick(Callback<> callback) noexcept;
-    [[nodiscard]] bool handleInput(const InputEvent& event) noexcept override;
+    [[nodiscard]] bool handleInput(const InputEvent& event) override;
 
 protected:
     [[nodiscard]] Vec2 onMeasure(TextPainter& text, Constraints constraints) override;

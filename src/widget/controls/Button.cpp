@@ -25,7 +25,7 @@ void Button::setStyle(ButtonStyle styleValue) noexcept {
 
 void Button::setOnClick(Callback<> callback) noexcept { mOnClick = callback; }
 
-bool Button::handleInput(const InputEvent& event) noexcept {
+bool Button::handleInput(const InputEvent& event) {
     if (!enabled() || event.button != PointerButton::Primary) {
         return false;
     }

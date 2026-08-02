@@ -2,6 +2,8 @@
 #include "henia/ui/backend/d3d12/D3D12Renderer.h"
 #include "henia/ui/resource/TextureStore.h"
 
+#include "../src/backend/FixedError.h"
+
 #include <Windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -67,6 +69,14 @@ using Microsoft::WRL::ComPtr;
 int main() {
     using namespace henia::ui;
 
+    henia::detail::FixedError diagnostic;
+    std::array<char, henia::detail::FixedError::kCapacity + 32U> oversizedDiagnostic{};
+    oversizedDiagnostic.fill('x');
+    diagnostic.assign(oversizedDiagnostic.data(), oversizedDiagnostic.size());
+    if (diagnostic.view().size() != henia::detail::FixedError::kCapacity - 1U) {
+        fail("Fixed backend diagnostics did not truncate without allocation");
+    }
+
     ComPtr<IDXGIFactory6> factory;
     ComPtr<IDXGIAdapter> warpAdapter;
     ComPtr<ID3D12Device> device;
@@ -98,10 +108,16 @@ int main() {
     if (!renderer.initialize(
             *device.Get(),
             DXGI_FORMAT_R8G8B8A8_UNORM,
-            {.instanceCapacity = 128, .submissionCapacity = 2, .batchCapacity = 8, .textureCapacity = 8})
+            {.instanceCapacity = 128, .submissionCapacity = 2, .batchCapacity = 8, .textureCapacity = 1})
         || !renderer.synchronizeTextures(textures, *queue.Get())) {
         std::cerr << renderer.lastError() << '\n';
         return EXIT_FAILURE;
+    }
+
+    const TextureHandle overflowTexture = textures.create(TextureFormat::Alpha8, 4, 4, 4, alpha);
+    if (!overflowTexture.valid() || renderer.synchronizeTextures(textures, *queue.Get())
+        || renderer.lastError() != "D3D12 texture store exceeds configured capacity") {
+        fail("D3D12 texture bookkeeping overflow was not rejected deterministically");
     }
 
     Frame frame;

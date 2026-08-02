@@ -140,6 +140,29 @@ void testNestedClipIntersection() {
         "nested clip was not intersected");
 }
 
+void testFixedCapacityOverflowIsRejected() {
+    Frame frame;
+    frame.reserve(1, 1, CapacityPolicy::Fixed);
+    Canvas& canvas = frame.begin();
+    canvas.fillRect({{0.0F, 0.0F}, {10.0F, 10.0F}}, {});
+    canvas.fillRect({{12.0F, 0.0F}, {22.0F, 10.0F}}, {});
+    require(canvas.rejectedCommands() == 1, "fixed display-list overflow was not rejected");
+    const RenderPacket& framePacket = frame.finish();
+    require(framePacket.instances().size() == 1, "fixed display-list overflow changed accepted work");
+
+    DisplayList displayList;
+    displayList.reserve(2);
+    DrawCommand command{};
+    require(displayList.append(command) && displayList.append(command), "test commands were not recorded");
+    RenderPacket packet;
+    packet.reserve(1, 1, CapacityPolicy::Fixed);
+    BatchCompiler compiler;
+    require(!compiler.compile(displayList, packet), "fixed packet overflow unexpectedly compiled");
+    require(packet.instances().empty() && packet.batches().empty(), "packet overflow published partial work");
+    require(packet.statistics().sourceCommands == 2 && packet.statistics().rejectedCommands == 2,
+        "packet overflow statistics are incorrect");
+}
+
 void testUtf8Validation() {
     const std::string_view text = "A\xE4\xB8\xAD\xF0\x9F\x94\xA5";
     const Utf8Codepoint ascii = decodeUtf8(text, 0);
@@ -214,6 +237,7 @@ int main() {
     testTextureTableOverflowStartsOneNewBatch();
     testWarmFrameDoesNotGrow();
     testNestedClipIntersection();
+    testFixedCapacityOverflowIsRejected();
     testUtf8Validation();
     testTextRunsAreCachedAndBatched();
     std::cout << "HeniaUI core tests passed\n";

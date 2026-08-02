@@ -15,7 +15,7 @@ void TextRunCache::reserve(std::size_t entries, std::size_t glyphsPerEntry) {
     mGlyphReserve = glyphsPerEntry;
 }
 
-void TextRunCache::setMaximumEntries(std::size_t maximumEntries) noexcept {
+void TextRunCache::setMaximumEntries(std::size_t maximumEntries) {
     mMaximumEntries = maximumEntries;
     if (mMaximumEntries == 0) {
         clear();
@@ -97,7 +97,7 @@ std::uint64_t TextRunCache::hits() const noexcept { return mHits; }
 
 std::uint64_t TextRunCache::misses() const noexcept { return mMisses; }
 
-void TextRunCache::removeIndex(std::uint64_t hash, std::size_t entryIndex) noexcept {
+void TextRunCache::removeIndex(std::uint64_t hash, std::size_t entryIndex) {
     const auto [begin, end] = mIndex.equal_range(hash);
     for (auto iterator = begin; iterator != end; ++iterator) {
         if (iterator->second == entryIndex) {

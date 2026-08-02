@@ -21,8 +21,11 @@ class UiDocument final {
 public:
     explicit UiDocument(TextPainter& text, Theme theme = {});
 
-    void reserve(std::size_t commandCapacity, std::size_t batchCapacity);
-    void setRoot(std::unique_ptr<Widget> root) noexcept;
+    void reserve(
+        std::size_t commandCapacity,
+        std::size_t batchCapacity,
+        CapacityPolicy capacityPolicy = CapacityPolicy::Grow);
+    void setRoot(std::unique_ptr<Widget> root);
     [[nodiscard]] Widget* root() const noexcept;
     void setViewport(Vec2 viewport) noexcept;
     [[nodiscard]] Vec2 viewport() const noexcept;
@@ -30,14 +33,15 @@ public:
     [[nodiscard]] const Theme& theme() const noexcept;
 
     [[nodiscard]] const RenderPacket& compose();
-    [[nodiscard]] bool dispatch(const InputEvent& event) noexcept;
-    void clearInteraction() noexcept;
+    // Exceptions raised by client callbacks propagate to the host boundary.
+    [[nodiscard]] bool dispatch(const InputEvent& event);
+    void clearInteraction();
 
     [[nodiscard]] UiDocumentStatistics statistics() const noexcept;
 
 private:
     void updateHover(Vec2 position) noexcept;
-    void setFocus(Widget* widget) noexcept;
+    void setFocus(Widget* widget);
 
     TextPainter* mText = nullptr;
     Theme mTheme{};

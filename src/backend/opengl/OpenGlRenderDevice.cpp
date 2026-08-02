@@ -1,5 +1,7 @@
 #include "henia/gfx/backend/opengl/OpenGlRenderDevice.h"
 
+#include "../FixedError.h"
+
 #define NOMINMAX
 #include <Windows.h>
 #include <gl/GL.h>
@@ -14,10 +16,8 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
-#include <string>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 namespace henia::gfx {
 namespace {
@@ -256,7 +256,10 @@ void main() {
 )glsl";
 
 [[nodiscard]] GLuint compileShader(
-    const GlFunctions& gl, GLenum type, const char* source, std::string& error) {
+    const GlFunctions& gl,
+    GLenum type,
+    const char* source,
+    henia::detail::FixedError& error) noexcept {
     const GLuint shader = gl.createShader(type);
     if (shader == 0) {
         error = "OpenGL failed to create a gfx shader";
@@ -271,9 +274,11 @@ void main() {
     }
     GLint length = 0;
     gl.getShaderIv(shader, kInfoLogLength, &length);
-    std::vector<char> log(static_cast<std::size_t>(std::max(length, 1)));
-    gl.getShaderInfoLog(shader, length, nullptr, log.data());
-    error.assign(log.data());
+    std::array<char, henia::detail::FixedError::kCapacity> log{};
+    const GLsizei logCapacity = static_cast<GLsizei>(log.size() - 1U);
+    GLsizei written = 0;
+    gl.getShaderInfoLog(shader, std::min(length, logCapacity), &written, log.data());
+    error.assign(log.data(), static_cast<std::size_t>(std::max(written, 0)));
     gl.deleteShader(shader);
     return 0;
 }
@@ -326,7 +331,7 @@ struct OpenGlRenderDevice::Implementation final {
     std::uint64_t uploadedIdentity = 0;
     std::uint64_t uploadedRevision = 0;
     OpenGlGfxStatistics statistics{};
-    std::string error;
+    henia::detail::FixedError error;
     bool ready = false;
 
     [[nodiscard]] bool initialize(std::size_t requestedCapacity) noexcept;
@@ -368,9 +373,11 @@ bool OpenGlRenderDevice::Implementation::initialize(std::size_t requestedCapacit
     if (linked != GL_TRUE) {
         GLint length = 0;
         gl.getProgramIv(program, kInfoLogLength, &length);
-        std::vector<char> log(static_cast<std::size_t>(std::max(length, 1)));
-        gl.getProgramInfoLog(program, length, nullptr, log.data());
-        error.assign(log.data());
+        std::array<char, henia::detail::FixedError::kCapacity> log{};
+        const GLsizei logCapacity = static_cast<GLsizei>(log.size() - 1U);
+        GLsizei written = 0;
+        gl.getProgramInfoLog(program, std::min(length, logCapacity), &written, log.data());
+        error.assign(log.data(), static_cast<std::size_t>(std::max(written, 0)));
         shutdown();
         return false;
     }
@@ -601,6 +608,6 @@ void OpenGlRenderDevice::shutdown() noexcept { if (mImplementation != nullptr) m
 bool OpenGlRenderDevice::initialized() const noexcept { return mImplementation->ready; }
 std::size_t OpenGlRenderDevice::boxCapacity() const noexcept { return mImplementation->capacity; }
 OpenGlGfxStatistics OpenGlRenderDevice::statistics() const noexcept { return mImplementation->statistics; }
-std::string_view OpenGlRenderDevice::lastError() const noexcept { return mImplementation->error; }
+std::string_view OpenGlRenderDevice::lastError() const noexcept { return mImplementation->error.view(); }
 
 } // namespace henia::gfx

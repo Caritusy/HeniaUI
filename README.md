@@ -26,7 +26,7 @@ Shapes, images, and glyphs use one ordered UI pipeline. Each batch carries a sma
 #include <henia/ui/Frame.h>
 
 henia::ui::Frame frame;
-frame.reserve(4096, 32);
+frame.reserve(4096, 32, henia::ui::CapacityPolicy::Fixed);
 
 auto& canvas = frame.begin();
 canvas.fillRect(
@@ -37,7 +37,13 @@ canvas.fillRect(
 const henia::ui::RenderPacket& packet = frame.finish();
 ```
 
-`Frame::reserve` establishes reusable capacities. `begin` clears logical contents without releasing memory, and `finish` compiles the ordered display list while coalescing compatible commands.
+`Frame::reserve` establishes reusable capacities. `CapacityPolicy::Fixed` makes
+recording and packet compilation reject overflow without allocating or throwing;
+the default `Grow` policy permits capacity growth but still converts allocation
+failure into rejected work. `begin` clears logical contents without releasing
+memory, and `finish` compiles the ordered display list while coalescing compatible
+commands. Rejected command and packet-overflow counts are observable through the
+canvas and packet statistics.
 
 ## Build
 
@@ -83,6 +89,8 @@ target_link_libraries(MyApplication PRIVATE
 - Compatible adjacent commands are merged.
 - Up to eight live textures share one batch before a new batch is opened.
 - Capacity is retained between frames.
+- Fixed-capacity recording and rendering paths do not allocate after initialization.
+- Backend diagnostics use bounded storage and remain available after allocation failure.
 - Invalid or invisible primitives do not reach the render packet.
 - RTTI is not required by the library.
 - OpenGL consumes an already-current context and restores the pipeline state it changes.
@@ -95,6 +103,11 @@ target_link_libraries(MyApplication PRIVATE
 ## Retained controls
 
 `UiDocument` retains layout and paint output until a dirty reason occurs. `Panel`, `Label`, `Button`, and `NumericInput` use direct context/function-pointer callbacks and platform-neutral input events. The Win32 adapter translates an existing host `WndProc` message stream without subclassing or owning the window.
+
+Client callback exceptions propagate through `handleInput`, `UiDocument::dispatch`,
+and `Win32InputAdapter::handleMessage`; hosts that require a non-throwing native
+message boundary should catch there. HeniaUI does not convert a throwing callback
+into process termination.
 
 The numeric control reserves fixed, separately centered decrement/value/increment regions, supports direct typing, wheel and key stepping, range clamping and precision, and does not depend on a debug UI library.
 

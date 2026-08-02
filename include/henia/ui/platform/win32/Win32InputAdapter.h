@@ -18,7 +18,7 @@ class Win32InputAdapter final {
 public:
     explicit Win32InputAdapter(UiDocument& document) noexcept;
 
-    [[nodiscard]] bool handleMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam) noexcept;
+    [[nodiscard]] bool handleMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
 
 private:
     [[nodiscard]] InputEvent makePointerEvent(
