@@ -67,6 +67,58 @@ float3 corner(int code) {
     return float3(float(code & 1), float((code >> 1) & 1), float((code >> 2) & 1));
 }
 
+float planeDistance(float4 clipPoint, int planeIndex, bool zeroToOne) {
+    if (planeIndex == 0) return clipPoint.w + clipPoint.x;
+    if (planeIndex == 1) return clipPoint.w - clipPoint.x;
+    if (planeIndex == 2) return clipPoint.w + clipPoint.y;
+    if (planeIndex == 3) return clipPoint.w - clipPoint.y;
+    if (planeIndex == 4) return zeroToOne ? clipPoint.z : clipPoint.w + clipPoint.z;
+    if (planeIndex == 5) return clipPoint.w - clipPoint.z;
+    return clipPoint.w - 0.0001;
+}
+
+bool clipAgainstPlane(
+    inout float4 startClip,
+    inout float4 finishClip,
+    int plane,
+    bool zeroToOne) {
+    float startDistance = planeDistance(startClip, plane, zeroToOne);
+    float finishDistance = planeDistance(finishClip, plane, zeroToOne);
+    if (!isfinite(startDistance) || !isfinite(finishDistance)) return false;
+    bool startInside = startDistance >= 0.0;
+    bool finishInside = finishDistance >= 0.0;
+    if (!startInside && !finishInside) return false;
+    if (startInside && finishInside) return true;
+
+    float denominator = startDistance - finishDistance;
+    if (abs(denominator) <= 1e-20 || !isfinite(denominator)) return false;
+    float amount = clamp(startDistance / denominator, 0.0, 1.0);
+    if (!isfinite(amount)) return false;
+    float4 clipped = lerp(startClip, finishClip, amount);
+    if (!all(isfinite(clipped))) return false;
+    if (startInside) {
+        finishClip = clipped;
+    } else {
+        startClip = clipped;
+    }
+    return true;
+}
+
+bool clipSegment(inout float4 startClip, inout float4 finishClip, bool zeroToOne) {
+    if (!all(isfinite(startClip)) || !all(isfinite(finishClip))
+        || !clipAgainstPlane(startClip, finishClip, 6, zeroToOne)) {
+        return false;
+    }
+    [unroll]
+    for (int plane = 0; plane < 6; ++plane) {
+        if (!clipAgainstPlane(startClip, finishClip, plane, zeroToOne)) {
+            return false;
+        }
+    }
+    return all(isfinite(startClip)) && all(isfinite(finishClip))
+        && startClip.w >= 0.0001 && finishClip.w >= 0.0001;
+}
+
 PixelInput vertexMain(VertexInput input) {
     PixelInput output;
     int edgeIndex = input.vertexId / 6;
@@ -75,27 +127,33 @@ PixelInput vertexMain(VertexInput input) {
     float3 finish = lerp(input.minimumAndWidth.xyz, input.maximumAndHue.xyz, corner(edges[edgeIndex].y));
     float4 startClip = mul(viewProjection, float4(start, 1.0));
     float4 finishClip = mul(viewProjection, float4(finish, 1.0));
-    output.validEdge = startClip.w > 0.0001 && finishClip.w > 0.0001 ? 1.0 : 0.0;
+    bool zeroToOne = (frameFlags & 1u) == 0u;
+    output.validEdge = clipSegment(startClip, finishClip, zeroToOne) ? 1.0 : 0.0;
 
-    float2 startNdc = startClip.xy / max(startClip.w, 0.0001);
-    float2 finishNdc = finishClip.xy / max(finishClip.w, 0.0001);
-    float2 directionPixels = (finishNdc - startNdc) * viewportSize * 0.5;
-    float2 normalPixels = length(directionPixels) > 0.0001
-        ? normalize(float2(-directionPixels.y, directionPixels.x))
-        : float2(0.0, 1.0);
     output.halfWidth = max(input.minimumAndWidth.w, 0.5) * 0.5;
     float expandedWidth = output.halfWidth + 1.25;
-    float2 offsetNdc = normalPixels * expandedWidth * 2.0 / viewportSize * vertex.y;
-    float4 endpoint = lerp(startClip, finishClip, vertex.x);
-    endpoint.xy += offsetNdc * endpoint.w;
-    if ((frameFlags & 1u) != 0u) {
-        endpoint.z = endpoint.z * 0.5 + endpoint.w * 0.5;
-    }
-    output.position = output.validEdge > 0.5 ? endpoint : float4(2.0, 2.0, 2.0, 1.0);
     output.color = input.color;
     output.edgeDistance = vertex.y * expandedWidth;
     output.hueOffset = input.maximumAndHue.w;
     output.effects = input.effects;
+    if (output.validEdge < 0.5) {
+        output.position = float4(2.0, 2.0, 2.0, 1.0);
+        return output;
+    }
+
+    float2 startNdc = startClip.xy / startClip.w;
+    float2 finishNdc = finishClip.xy / finishClip.w;
+    float2 directionPixels = (finishNdc - startNdc) * viewportSize * 0.5;
+    float2 normalPixels = length(directionPixels) > 0.0001
+        ? normalize(float2(-directionPixels.y, directionPixels.x))
+        : float2(0.0, 1.0);
+    float2 offsetNdc = normalPixels * expandedWidth * 2.0 / viewportSize * vertex.y;
+    float4 endpoint = lerp(startClip, finishClip, vertex.x);
+    endpoint.xy += offsetNdc * endpoint.w;
+    if (!zeroToOne) {
+        endpoint.z = endpoint.z * 0.5 + endpoint.w * 0.5;
+    }
+    output.position = endpoint;
     return output;
 }
 

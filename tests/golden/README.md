@@ -11,7 +11,10 @@ placement differences are expected between WARP and OpenGL drivers. A backend
 whose interior output falls outside these bounds is considered visually
 incompatible.
 
-3D output is covered by the D3D12 readback test with separate stable probes for
-an ordinary box edge and a box crossing the zero-to-one near plane. Its edge
-pixels are not compared cross-API until the near-plane clipping work tracked
-separately in issue #18 is complete.
+3D output uses the same generated clip-sweep scenes in the D3D12 WARP and
+desktop OpenGL readback tests. For both zero-to-one and minus-one-to-one depth,
+each test renders a box fully outside, crossing, and fully inside every frustum
+plane. A separate perspective scene crosses the camera plane and probes the
+shortened depth edges outside the surviving front face. Fully outside scenes
+must remain black, intersecting scenes must retain bounded finite coverage, and
+the camera-crossing probe fails if crossing edges are dropped wholesale.

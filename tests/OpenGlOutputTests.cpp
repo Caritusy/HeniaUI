@@ -15,6 +15,7 @@
 #include <iostream>
 #include <limits>
 #include <random>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -185,6 +186,30 @@ struct GlState final {
 [[noreturn]] void fail(const char* message) {
     std::cerr << message << '\n';
     std::exit(EXIT_FAILURE);
+}
+
+[[nodiscard]] std::vector<henia::test::Rgba8> readCurrentPixels() {
+    std::vector<henia::test::Rgba8> bottomUp(
+        static_cast<std::size_t>(henia::test::kVisualWidth) * henia::test::kVisualHeight);
+    glReadPixels(
+        0,
+        0,
+        henia::test::kVisualWidth,
+        henia::test::kVisualHeight,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        bottomUp.data());
+    std::vector<henia::test::Rgba8> topDown(bottomUp.size());
+    for (std::uint32_t y = 0; y < henia::test::kVisualHeight; ++y) {
+        const std::size_t source = static_cast<std::size_t>(
+            henia::test::kVisualHeight - 1U - y) * henia::test::kVisualWidth;
+        const std::size_t destination = static_cast<std::size_t>(y) * henia::test::kVisualWidth;
+        std::copy_n(
+            bottomUp.data() + source,
+            henia::test::kVisualWidth,
+            topDown.data() + destination);
+    }
+    return topDown;
 }
 
 class HiddenOpenGlContext final {
@@ -917,6 +942,78 @@ int main() {
         || gfxStatistics.wrongContextCalls != 2 || gfxStatistics.ignoredHostErrors == 0
         || gfxStatistics.stateRestoreFailures != 0 || gfxStatistics.initializationFailures != 0) {
         fail("OpenGL gfx isolation statistics are incorrect");
+    }
+
+    OpenGlRenderDevice clipGfx;
+    if (!clipGfx.initialize(1, 1)) {
+        fail("OpenGL gfx clip-sweep renderer did not initialize");
+    }
+    const auto renderClipFrame = [&](const BoxInstance& box, ClipDepthRange depthRange) {
+        glViewport(
+            0,
+            0,
+            henia::test::kVisualWidth,
+            henia::test::kVisualHeight);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(kRasterizerDiscard);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+        glClear(GL_COLOR_BUFFER_BIT);
+        const InstanceBatch clipBatch = henia::test::gfxClipBatch(box);
+        if (!clipGfx.render(clipBatch, henia::test::gfxClipView(depthRange))) {
+            std::cerr << clipGfx.lastError() << '\n';
+            fail("OpenGL gfx clip-sweep render failed");
+        }
+        glFinish();
+        return readCurrentPixels();
+    };
+    constexpr std::array depthRanges{
+        ClipDepthRange::ZeroToOne,
+        ClipDepthRange::MinusOneToOne,
+    };
+    for (const ClipDepthRange depthRange : depthRanges) {
+        const std::string_view rangeName = depthRange == ClipDepthRange::ZeroToOne
+            ? "zero-to-one"
+            : "minus-one-to-one";
+        for (const henia::test::GfxClipSweep& sweep : henia::test::kGfxClipSweeps) {
+            for (const henia::test::GfxClipFrame& frameValue : sweep.frames) {
+                const std::vector<henia::test::Rgba8> clipPixels = renderClipFrame(
+                    frameValue.box,
+                    depthRange);
+                if (!henia::test::matchesGfxClipFrame(clipPixels, frameValue.position)) {
+                    const std::string filename = "opengl-gfx-clip-" + std::string(sweep.plane)
+                        + '-' + std::string(rangeName) + "-actual.ppm";
+                    henia::test::writePpm(
+                        filename,
+                        clipPixels,
+                        henia::test::kVisualWidth,
+                        henia::test::kVisualHeight);
+                    std::cerr << "OpenGL gfx clip sweep failed at " << sweep.plane << " ("
+                              << rangeName << "), visible pixels="
+                              << henia::test::visibleGfxPixelCount(clipPixels) << '\n';
+                    return EXIT_FAILURE;
+                }
+            }
+        }
+        const std::vector<henia::test::Rgba8> cameraPixels = renderClipFrame(
+            henia::test::kGfxCameraCrossingBox,
+            depthRange);
+        if (!henia::test::matchesGfxCameraCrossing(cameraPixels)) {
+            const std::string filename = "opengl-gfx-camera-crossing-"
+                + std::string(rangeName) + "-actual.ppm";
+            henia::test::writePpm(
+                filename,
+                cameraPixels,
+                henia::test::kVisualWidth,
+                henia::test::kVisualHeight);
+            std::cerr << "OpenGL camera-crossing edges were not shortened continuously ("
+                      << rangeName << "), visible pixels="
+                      << henia::test::visibleGfxPixelCount(cameraPixels) << '\n';
+            return EXIT_FAILURE;
+        }
+    }
+    if (!clipGfx.shutdown()) {
+        fail("OpenGL gfx clip-sweep renderer did not shut down");
     }
 
     for (std::uint32_t slot = 0; slot < hostTextures.size(); ++slot) {

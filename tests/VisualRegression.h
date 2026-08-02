@@ -1,10 +1,13 @@
 #pragma once
 
+#include "henia/gfx/Math.h"
+#include "henia/gfx/ShapeBatch3D.h"
 #include "henia/ui/Frame.h"
 #include "henia/ui/resource/TextureStore.h"
 #include "henia/ui/text/FontStore.h"
 #include "henia/ui/text/TextLayout.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +37,130 @@ struct GoldenProbe final {
 
 inline constexpr std::uint32_t kVisualWidth = 128;
 inline constexpr std::uint32_t kVisualHeight = 128;
+
+enum class GfxClipPosition : std::uint8_t {
+    Outside,
+    Crossing,
+    Inside,
+};
+
+struct GfxClipFrame final {
+    henia::gfx::BoxInstance box{};
+    GfxClipPosition position = GfxClipPosition::Outside;
+};
+
+struct GfxClipSweep final {
+    std::string_view plane;
+    std::array<GfxClipFrame, 3> frames{};
+};
+
+[[nodiscard]] constexpr henia::gfx::BoxInstance gfxClipBox(
+    henia::gfx::Vec3 minimum,
+    henia::gfx::Vec3 maximum) noexcept {
+    return {
+        .minimum = minimum,
+        .lineWidth = 4.0F,
+        .maximum = maximum,
+        .color = {0.95F, 0.95F, 0.95F, 1.0F},
+    };
+}
+
+// With a 90-degree perspective, the side planes are x/y = +/-z. Each
+// sequence moves one wire box from fully outside through the plane and into
+// the frustum. The near/far values match gfxClipView().
+inline constexpr std::array kGfxClipSweeps{
+    GfxClipSweep{"left", {{
+        {gfxClipBox({-1.55F, -0.08F, 0.90F}, {-1.30F, 0.08F, 1.10F}), GfxClipPosition::Outside},
+        {gfxClipBox({-1.20F, -0.08F, 0.90F}, {-0.80F, 0.08F, 1.10F}), GfxClipPosition::Crossing},
+        {gfxClipBox({-0.70F, -0.08F, 0.90F}, {-0.50F, 0.08F, 1.10F}), GfxClipPosition::Inside},
+    }}},
+    GfxClipSweep{"right", {{
+        {gfxClipBox({1.30F, -0.08F, 0.90F}, {1.55F, 0.08F, 1.10F}), GfxClipPosition::Outside},
+        {gfxClipBox({0.80F, -0.08F, 0.90F}, {1.20F, 0.08F, 1.10F}), GfxClipPosition::Crossing},
+        {gfxClipBox({0.50F, -0.08F, 0.90F}, {0.70F, 0.08F, 1.10F}), GfxClipPosition::Inside},
+    }}},
+    GfxClipSweep{"bottom", {{
+        {gfxClipBox({-0.08F, -1.55F, 0.90F}, {0.08F, -1.30F, 1.10F}), GfxClipPosition::Outside},
+        {gfxClipBox({-0.08F, -1.20F, 0.90F}, {0.08F, -0.80F, 1.10F}), GfxClipPosition::Crossing},
+        {gfxClipBox({-0.08F, -0.70F, 0.90F}, {0.08F, -0.50F, 1.10F}), GfxClipPosition::Inside},
+    }}},
+    GfxClipSweep{"top", {{
+        {gfxClipBox({-0.08F, 1.30F, 0.90F}, {0.08F, 1.55F, 1.10F}), GfxClipPosition::Outside},
+        {gfxClipBox({-0.08F, 0.80F, 0.90F}, {0.08F, 1.20F, 1.10F}), GfxClipPosition::Crossing},
+        {gfxClipBox({-0.08F, 0.50F, 0.90F}, {0.08F, 0.70F, 1.10F}), GfxClipPosition::Inside},
+    }}},
+    GfxClipSweep{"near", {{
+        {gfxClipBox({-0.05F, -0.05F, 0.10F}, {0.05F, 0.05F, 0.30F}), GfxClipPosition::Outside},
+        {gfxClipBox({-0.05F, -0.05F, 0.25F}, {0.05F, 0.05F, 0.75F}), GfxClipPosition::Crossing},
+        {gfxClipBox({-0.05F, -0.05F, 0.70F}, {0.05F, 0.05F, 1.00F}), GfxClipPosition::Inside},
+    }}},
+    GfxClipSweep{"far", {{
+        {gfxClipBox({-0.20F, -0.20F, 4.20F}, {0.20F, 0.20F, 4.60F}), GfxClipPosition::Outside},
+        {gfxClipBox({-0.20F, -0.20F, 3.50F}, {0.20F, 0.20F, 4.50F}), GfxClipPosition::Crossing},
+        {gfxClipBox({-0.20F, -0.20F, 3.10F}, {0.20F, 0.20F, 3.50F}), GfxClipPosition::Inside},
+    }}},
+};
+
+inline constexpr henia::gfx::BoxInstance kGfxCameraCrossingBox = gfxClipBox(
+    {0.18F, -0.04F, -0.25F},
+    {0.28F, 0.04F, 1.00F});
+
+[[nodiscard]] inline henia::gfx::ViewParameters gfxClipView(
+    henia::gfx::ClipDepthRange depthRange) noexcept {
+    constexpr float halfPi = 1.57079632679489661923F;
+    henia::gfx::Mat4 projection = henia::gfx::perspective(halfPi, 1.0F, 0.5F, 4.0F);
+    if (depthRange == henia::gfx::ClipDepthRange::MinusOneToOne) {
+        for (std::size_t column = 0; column < 4; ++column) {
+            const std::size_t z = column * 4U + 2U;
+            const std::size_t w = column * 4U + 3U;
+            projection.values[z] = projection.values[z] * 2.0F - projection.values[w];
+        }
+    }
+    return {
+        .viewProjection = projection,
+        .viewport = {static_cast<float>(kVisualWidth), static_cast<float>(kVisualHeight)},
+        .clipDepthRange = depthRange,
+    };
+}
+
+[[nodiscard]] inline henia::gfx::InstanceBatch gfxClipBatch(
+    const henia::gfx::BoxInstance& box) {
+    henia::gfx::ShapeBatch3D shapes;
+    static_cast<void>(shapes.addBox(box));
+    return shapes.snapshot();
+}
+
+[[nodiscard]] inline std::size_t visibleGfxPixelCount(
+    std::span<const Rgba8> pixels) noexcept {
+    return static_cast<std::size_t>(std::count_if(
+        pixels.begin(), pixels.end(), [](Rgba8 pixel) noexcept {
+            return pixel.red > 16 || pixel.green > 16 || pixel.blue > 16;
+        }));
+}
+
+[[nodiscard]] inline bool matchesGfxClipFrame(
+    std::span<const Rgba8> pixels,
+    GfxClipPosition position) noexcept {
+    if (pixels.size() != static_cast<std::size_t>(kVisualWidth) * kVisualHeight) return false;
+    const std::size_t visible = visibleGfxPixelCount(pixels);
+    if (position == GfxClipPosition::Outside) return visible == 0;
+    return visible >= 8 && visible <= pixels.size() / 2U;
+}
+
+[[nodiscard]] inline bool matchesGfxCameraCrossing(
+    std::span<const Rgba8> pixels) noexcept {
+    if (!matchesGfxClipFrame(pixels, GfxClipPosition::Crossing)) return false;
+    std::size_t shortenedEdgePixels = 0;
+    for (std::uint32_t y = 56; y <= 60; ++y) {
+        for (std::uint32_t x = 84; x <= 94; ++x) {
+            const Rgba8 pixel = pixels[static_cast<std::size_t>(y) * kVisualWidth + x];
+            if (pixel.red > 16 || pixel.green > 16 || pixel.blue > 16) {
+                ++shortenedEdgePixels;
+            }
+        }
+    }
+    return shortenedEdgePixels >= 3;
+}
 
 // Stable interior probes plus a few explicitly tolerant AA-fringe/cap probes
 // form a compact golden image. The latter catch clipped analytic geometry while
