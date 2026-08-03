@@ -154,6 +154,18 @@ Press Escape to close it. Add `--headless --snapshot` for an unattended
 three-frame smoke run that writes `HeniaUIEffectsExample.bmp` in the current
 directory.
 
+`HeniaUIWidgetGallery.exe` is the retained-control equivalent of an ImGui demo
+window. It presents every built-in control in one native OpenGL application:
+buttons, text and numeric editors, checkbox/toggle/slider, combo and tabs,
+scrolling list/tree views, nested scrolling, color and key capture, tooltip,
+and a modal popup layer. Mouse, wheel, clipboard, keyboard focus, and Per-Monitor
+V2 DPI input remain live. Run it directly, or use `--headless --snapshot` for a
+three-frame smoke run that writes `HeniaUIWidgetGallery.bmp`.
+
+```powershell
+.\out\build\vs2022\Release\HeniaUIWidgetGallery.exe
+```
+
 Top-level non-sanitizer builds also produce `HeniaUIBenchmarks`. Run it with
 `--verify --iterations 25 --warmup 5 --json out/benchmark.json`; the complete
 scene definitions, metrics, reference baseline, and same-runner CI comparison
