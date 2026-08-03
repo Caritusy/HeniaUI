@@ -16,6 +16,25 @@ enum class TextureFormat : std::uint8_t {
     Rgba8,
 };
 
+enum class TextureAlphaMode : std::uint8_t {
+    // Resolves to AlphaMask for Alpha8 and Straight for Rgba8 at creation.
+    FormatDefault,
+    Straight,
+    Premultiplied,
+    Opaque,
+    AlphaMask,
+};
+
+static_assert(static_cast<std::uint8_t>(TextureAlphaMode::Straight) == 1);
+static_assert(static_cast<std::uint8_t>(TextureAlphaMode::Premultiplied) == 2);
+static_assert(static_cast<std::uint8_t>(TextureAlphaMode::Opaque) == 3);
+static_assert(static_cast<std::uint8_t>(TextureAlphaMode::AlphaMask) == 4);
+
+enum class TextureColorSpace : std::uint8_t {
+    Linear,
+    Srgb,
+};
+
 enum class TextureBackingPolicy : std::uint8_t {
     Retained,
     DiscardAfterUpload,
@@ -37,6 +56,8 @@ using TextureRegenerator = std::function<std::vector<std::byte>()>;
 struct TextureCreateOptions final {
     TextureBackingPolicy backingPolicy = TextureBackingPolicy::Retained;
     TextureRegenerator regenerator;
+    TextureAlphaMode alphaMode = TextureAlphaMode::FormatDefault;
+    TextureColorSpace colorSpace = TextureColorSpace::Linear;
 };
 
 struct TextureView final {
@@ -47,6 +68,9 @@ struct TextureView final {
     std::uint32_t rowPitch = 0;
     std::uint64_t revision = 0;
     TextureBackingPolicy backingPolicy = TextureBackingPolicy::Retained;
+    // Always resolved: FormatDefault is never returned by TextureStore::view.
+    TextureAlphaMode alphaMode = TextureAlphaMode::Straight;
+    TextureColorSpace colorSpace = TextureColorSpace::Linear;
     TextureRegion dirtyRegion{};
     bool fullUpdate = true;
     bool backingAvailable = false;
@@ -76,10 +100,13 @@ public:
         std::uint32_t rowPitch,
         std::span<const std::byte> pixels,
         TextureCreateOptions options = {});
+    // Only alphaMode/colorSpace from options are used. External entries always
+    // have ExternalGpu backing and never retain a regenerator.
     [[nodiscard]] TextureHandle createExternal(
         TextureFormat format,
         std::uint32_t width,
-        std::uint32_t height);
+        std::uint32_t height,
+        TextureCreateOptions options = {});
     [[nodiscard]] bool destroy(TextureHandle handle) noexcept;
     [[nodiscard]] bool update(
         TextureHandle handle,
@@ -115,6 +142,8 @@ private:
         std::uint16_t generation = 1;
         TextureBackingPolicy backingPolicy = TextureBackingPolicy::Retained;
         TextureRegenerator regenerator;
+        TextureAlphaMode alphaMode = TextureAlphaMode::Straight;
+        TextureColorSpace colorSpace = TextureColorSpace::Linear;
         TextureRegion dirtyRegion{};
         std::uint32_t nextFree = std::numeric_limits<std::uint32_t>::max();
         bool fullUpdate = true;

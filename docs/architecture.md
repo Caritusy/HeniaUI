@@ -64,6 +64,15 @@ OpenGL and D3D12 both consume the same 60-byte, four-byte-aligned layout through
 five vertex attributes. Header and backend `static_assert`s lock its size,
 offsets, standard-layout property, and shader input compatibility.
 
+All instance colors are straight-alpha linear values. RGBA texture entries
+carry resolved straight, premultiplied, or opaque alpha semantics plus linear or
+sRGB transfer metadata; R8 entries are linear alpha masks. Native sRGB texture
+formats decode samples before filtering/shading, and the shared shaders
+normalize premultiplied samples before applying tint and perform exactly one
+final premultiplication. Render-target transfer is an explicit host declaration,
+not inherited state or a format guess. The complete public and backend contract
+is in [Color, alpha, and texture contract](color-and-texture-contract.md).
+
 `PacketStatistics` keeps source commands, compiled instances, and draw batches
 as independent counts. `batchedInstancesBeyondFirst` is the sum of instances
 after the first in each batch; it describes draw-call sharing, not compression.

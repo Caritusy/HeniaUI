@@ -121,8 +121,8 @@ public:
         Color color,
         float rounding,
         float thickness) noexcept;
-    // R8/RGBA textures are interpreted as a signed-distance coverage field in
-    // the red channel. edge and softness are normalized texture values.
+    // Alpha8 or linear RGBA textures are interpreted as a signed-distance
+    // coverage field in the red channel. edge and softness are normalized.
     void sdfIcon(
         TextureHandle texture,
         Rect rect,

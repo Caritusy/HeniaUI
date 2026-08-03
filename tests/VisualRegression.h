@@ -403,6 +403,109 @@ inline constexpr std::array kUiGolden{
     GoldenProbe{122, 96, {220, 45, 35, 255}, 10},
 };
 
+// A compact cross-backend texture contract. The first two probes sample the
+// same translucent red edge stored once as straight alpha and once as
+// premultiplied alpha; their rendered values must match.
+inline constexpr std::array kTextureContractGolden{
+    GoldenProbe{3, 4, {159, 0, 0, 255}, 12},
+    GoldenProbe{11, 4, {159, 0, 0, 255}, 12},
+    GoldenProbe{20, 4, {128, 128, 128, 255}, 5},
+    GoldenProbe{28, 4, {30, 200, 40, 255}, 5},
+    GoldenProbe{35, 4, {255, 0, 0, 255}, 5},
+    GoldenProbe{44, 4, {32, 16, 64, 255}, 5},
+};
+
+[[nodiscard]] inline henia::ui::RenderPacket buildTextureContractScene(
+    henia::ui::TextureStore& textures,
+    henia::ui::Frame& frame) {
+    using namespace henia::ui;
+    const std::array straightEdge{
+        std::byte{0xFF}, std::byte{0x00}, std::byte{0x00}, std::byte{0xFF},
+        std::byte{0xFF}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+    };
+    const TextureHandle straight = textures.create(
+        TextureFormat::Rgba8,
+        2,
+        1,
+        8,
+        straightEdge,
+        {.alphaMode = TextureAlphaMode::Straight});
+    const std::array premultipliedEdge{
+        std::byte{0xFF}, std::byte{0x00}, std::byte{0x00}, std::byte{0xFF},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+    };
+    const TextureHandle premultiplied = textures.create(
+        TextureFormat::Rgba8,
+        2,
+        1,
+        8,
+        premultipliedEdge,
+        {.alphaMode = TextureAlphaMode::Premultiplied});
+    const std::array srgbPixel{
+        std::byte{0xBC}, std::byte{0xBC}, std::byte{0xBC}, std::byte{0xFF},
+    };
+    const TextureHandle srgb = textures.create(
+        TextureFormat::Rgba8,
+        1,
+        1,
+        4,
+        srgbPixel,
+        {
+            .alphaMode = TextureAlphaMode::Straight,
+            .colorSpace = TextureColorSpace::Srgb,
+        });
+    const std::array opaquePixel{
+        std::byte{30}, std::byte{200}, std::byte{40}, std::byte{0},
+    };
+    const TextureHandle opaque = textures.create(
+        TextureFormat::Rgba8,
+        1,
+        1,
+        4,
+        opaquePixel,
+        {.alphaMode = TextureAlphaMode::Opaque});
+
+    frame.reserve(8, 4);
+    Canvas& canvas = frame.begin();
+    canvas.fillRect({{0.0F, 0.0F}, {48.0F, 8.0F}}, {0.0F, 0.0F, 0.0F, 1.0F});
+    canvas.image(straight, {{0.0F, 0.0F}, {8.0F, 8.0F}});
+    canvas.image(premultiplied, {{8.0F, 0.0F}, {16.0F, 8.0F}});
+    canvas.image(srgb, {{16.0F, 0.0F}, {24.0F, 8.0F}});
+    canvas.image(opaque, {{24.0F, 0.0F}, {32.0F, 8.0F}});
+    canvas.setBlendMode(BlendMode::Additive);
+    canvas.image(straight, {{32.0F, 0.0F}, {40.0F, 8.0F}});
+    canvas.image(straight, {{32.0F, 0.0F}, {40.0F, 8.0F}});
+    canvas.setBlendMode(BlendMode::PremultipliedAlpha);
+    canvas.image(
+        srgb,
+        {{40.0F, 0.0F}, {48.0F, 8.0F}},
+        {0.5F, 0.25F, 1.0F, 0.5F});
+    return frame.finish();
+}
+
+[[nodiscard]] inline bool matchesTextureContractGolden(
+    std::span<const Rgba8> pixels,
+    std::uint32_t width,
+    std::uint32_t height) noexcept {
+    if (width < 48 || height < 8
+        || pixels.size() != static_cast<std::size_t>(width) * height) {
+        return false;
+    }
+    const auto difference = [](std::uint8_t left, std::uint8_t right) noexcept {
+        return left > right ? left - right : right - left;
+    };
+    for (const GoldenProbe& probe : kTextureContractGolden) {
+        const Rgba8 actual = pixels[static_cast<std::size_t>(probe.y) * width + probe.x];
+        if (difference(actual.red, probe.expected.red) > probe.tolerance
+            || difference(actual.green, probe.expected.green) > probe.tolerance
+            || difference(actual.blue, probe.expected.blue) > probe.tolerance
+            || difference(actual.alpha, probe.expected.alpha) > probe.tolerance) {
+            return false;
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] inline henia::ui::RenderPacket buildUiVisualScene(
     henia::ui::TextureStore& textures,
     henia::ui::Frame& frame) {

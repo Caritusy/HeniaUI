@@ -22,6 +22,10 @@ struct OpenGlTextureState final {
     std::uint32_t stagedHeight = 0;
     std::uint8_t format = 0;
     std::uint8_t stagedFormat = 0;
+    std::uint8_t alphaMode = 0;
+    std::uint8_t stagedAlphaMode = 0;
+    std::uint8_t colorSpace = 0;
+    std::uint8_t stagedColorSpace = 0;
     bool external = false;
     bool stagedExternal = false;
     bool owned = true;
@@ -77,6 +81,8 @@ public:
                 texture.stagedWidth = 0;
                 texture.stagedHeight = 0;
                 texture.stagedFormat = 0;
+                texture.stagedAlphaMode = 0;
+                texture.stagedColorSpace = 0;
                 texture.stagedExternal = false;
                 texture.stagedOwned = true;
             }
@@ -99,6 +105,8 @@ public:
             texture.width = texture.stagedWidth;
             texture.height = texture.stagedHeight;
             texture.format = texture.stagedFormat;
+            texture.alphaMode = texture.stagedAlphaMode;
+            texture.colorSpace = texture.stagedColorSpace;
             texture.external = texture.stagedExternal;
             texture.owned = texture.stagedOwned;
             texture.stagedObject = 0;
@@ -108,6 +116,8 @@ public:
             texture.stagedWidth = 0;
             texture.stagedHeight = 0;
             texture.stagedFormat = 0;
+            texture.stagedAlphaMode = 0;
+            texture.stagedColorSpace = 0;
             texture.stagedExternal = false;
             texture.stagedOwned = true;
             if (previous != 0 && previousOwned) {

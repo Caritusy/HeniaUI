@@ -45,6 +45,13 @@ destruction or update as globally visible.
 - `ExternalGpu` is created with `createExternal()` and has no CPU pixels.
   Bind a matching native object separately on each renderer.
 
+Alpha representation and transfer metadata are immutable for a texture handle.
+`TextureAlphaMode::FormatDefault` is resolved at creation, and the resolved mode
+plus `TextureColorSpace` remain visible through `TextureView` across updates,
+discard/restoration, and regeneration. Recreate the entry when those semantics
+change. Native format selection and external-resource validation follow
+[Color, alpha, and texture contract](color-and-texture-contract.md).
+
 Use `updateRegion()` for a rectangular edit. The store copies only the supplied
 rows and retains the previous tight rectangle for transactional OpenGL
 rollback. A renderer exactly one revision behind can issue a subresource
@@ -134,7 +141,7 @@ commits only when its packed handle and revision are still current, so a
 destroyed/reused slot cannot resurrect an old generation.
 
 `bindExternalTexture()` retains a host-provided `ID3D12Resource` and validates
-its device, dimensions, format, and sample layout. The host owns transitions and
+its device, dimensions, transfer-derived format, and sample layout. The host owns transitions and
 must keep it in `D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE` whenever HeniaUI
 records it.
 

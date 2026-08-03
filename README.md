@@ -189,6 +189,9 @@ target_link_libraries(MyApplication PRIVATE
 - Compatible adjacent instances share a draw batch; source commands and
   compiled instance counts remain reported separately.
 - Up to eight live textures share one batch before a new batch is opened.
+- UI colors and tint are straight-alpha linear values; texture alpha/transfer
+  metadata and linear versus sRGB render targets follow the explicit
+  [color and texture contract](docs/color-and-texture-contract.md).
 - Capacity is retained between frames.
 - Fixed-capacity recording and rendering paths do not allocate after initialization.
 - Backend diagnostics use bounded storage and remain available after allocation failure.

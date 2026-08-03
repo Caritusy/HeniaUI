@@ -26,6 +26,9 @@ struct D3D12RendererConfiguration final {
         henia::backend::d3d12::InstanceStorageStrategy::Automatic;
     std::size_t gpuLocalInstanceThresholdBytes =
         henia::backend::d3d12::kDefaultGpuLocalInstanceThresholdBytes;
+    // Must match the transfer function of renderTargetFormat. For example,
+    // Srgb requires DXGI_FORMAT_R8G8B8A8_UNORM_SRGB rather than its UNORM peer.
+    RenderTargetColorSpace targetColorSpace = RenderTargetColorSpace::Linear;
 };
 
 struct D3D12RenderStatistics final {

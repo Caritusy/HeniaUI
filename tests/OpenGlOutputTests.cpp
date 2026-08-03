@@ -792,6 +792,67 @@ int main() {
         fail("OpenGL output exceeded the documented golden-image tolerance");
     }
 
+    TextureStore contractTextures;
+    Frame contractFrame;
+    const RenderPacket contractPacket =
+        henia::test::buildTextureContractScene(contractTextures, contractFrame);
+    OpenGlRenderer contractRenderer;
+    if (!contractRenderer.initialize(8, 4, 2)
+        || !contractRenderer.synchronizeTextures(contractTextures)) {
+        fail("OpenGL texture-contract renderer setup failed");
+    }
+    if (contractRenderer.render(
+            contractPacket,
+            henia::test::kVisualWidth,
+            henia::test::kVisualHeight,
+            static_cast<RenderTargetColorSpace>(0xFFU))
+        || contractRenderer.lastError() != "targetColorSpace is invalid") {
+        fail("OpenGL renderer accepted an invalid target color space");
+    }
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (!contractRenderer.render(
+            contractPacket,
+            henia::test::kVisualWidth,
+            henia::test::kVisualHeight)) {
+        std::cerr << contractRenderer.lastError() << '\n';
+        fail("OpenGL texture-contract render failed");
+    }
+    glFinish();
+    glReadPixels(
+        0,
+        0,
+        henia::test::kVisualWidth,
+        henia::test::kVisualHeight,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        bottomUp.data());
+    for (std::uint32_t y = 0; y < henia::test::kVisualHeight; ++y) {
+        const std::size_t source = static_cast<std::size_t>(
+            henia::test::kVisualHeight - 1U - y) * henia::test::kVisualWidth;
+        const std::size_t destination = static_cast<std::size_t>(y) * henia::test::kVisualWidth;
+        std::copy_n(
+            bottomUp.data() + source,
+            henia::test::kVisualWidth,
+            topDown.data() + destination);
+    }
+    if (!henia::test::matchesTextureContractGolden(
+            topDown,
+            henia::test::kVisualWidth,
+            henia::test::kVisualHeight)) {
+        henia::test::writePpm(
+            "opengl-texture-contract-actual.ppm",
+            topDown,
+            henia::test::kVisualWidth,
+            henia::test::kVisualHeight);
+        fail("OpenGL texture contract exceeded the golden tolerance");
+    }
+    if (!contractRenderer.shutdown()) {
+        fail("OpenGL texture-contract renderer shutdown failed");
+    }
+
     for (int iteration = 0; iteration < 32; ++iteration) {
         setHostState(testGl, hostTextures, hostSamplers, random);
         const GlState randomizedBefore = captureState(testGl);

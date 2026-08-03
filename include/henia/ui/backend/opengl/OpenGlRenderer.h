@@ -81,10 +81,13 @@ public:
         TextureHandle handle,
         std::uint32_t textureObject,
         OpenGlExternalTextureOwnership ownership = OpenGlExternalTextureOwnership::Borrowed) noexcept;
+    // targetColorSpace controls GL_FRAMEBUFFER_SRGB for this draw; the host's
+    // previous state is restored. The bound attachment must support it.
     [[nodiscard]] bool render(
         const RenderPacket& packet,
         std::uint32_t viewportWidth,
-        std::uint32_t viewportHeight) noexcept;
+        std::uint32_t viewportHeight,
+        RenderTargetColorSpace targetColorSpace = RenderTargetColorSpace::Linear) noexcept;
     // Associates a resolved host timestamp with a retained successful sample.
     // Unknown, duplicate, expired, and previous-lifetime IDs return false.
     [[nodiscard]] bool reportGpuTime(

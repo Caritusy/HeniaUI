@@ -14,6 +14,7 @@
 #include <array>
 #include <atomic>
 #include <cstdlib>
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -41,6 +42,29 @@ void require(bool condition, std::string_view message) {
     if (!condition) {
         fail(message);
     }
+}
+
+void testColorSpaceAndAlphaConversions() {
+    const Color encoded{0.7353569F, 0.5F, 0.04045F, 0.25F};
+    const Color linear = srgbToLinear(encoded);
+    require(std::abs(linear.red - 0.5F) < 0.0001F
+            && std::abs(linear.green - 0.214041F) < 0.0001F
+            && std::abs(linear.blue - 0.0031308F) < 0.0001F
+            && linear.alpha == encoded.alpha,
+        "sRGB-to-linear conversion is incorrect");
+    const Color roundTrip = linearToSrgb(linear);
+    require(std::abs(roundTrip.red - encoded.red) < 0.0001F
+            && std::abs(roundTrip.green - encoded.green) < 0.0001F
+            && std::abs(roundTrip.blue - encoded.blue) < 0.0001F
+            && roundTrip.alpha == encoded.alpha,
+        "linear-to-sRGB conversion did not round trip");
+    const Color straight{0.8F, 0.4F, 0.2F, 0.25F};
+    const Color premultiplied = straightToPremultiplied(straight);
+    require(premultiplied == Color{0.2F, 0.1F, 0.05F, 0.25F}
+            && premultipliedToStraight(premultiplied) == straight
+            && premultipliedToStraight({1.0F, 1.0F, 1.0F, 0.0F})
+                == Color{0.0F, 0.0F, 0.0F, 0.0F},
+        "straight/premultiplied conversion is incorrect");
 }
 
 void testMixedUiUsesOneBatch() {
@@ -1055,6 +1079,47 @@ void testResourceLifetimeAndTextureBackingPolicies() {
         "destroyed texture retained CPU pixel storage");
 
     const TextureHandle atlas = textures.create(TextureFormat::Rgba8, 4, 4, 16, rgba);
+    require(textures.view(atlas).alphaMode == TextureAlphaMode::Straight
+            && textures.view(atlas).colorSpace == TextureColorSpace::Linear,
+        "default RGBA texture semantics were not resolved");
+    const std::array<std::byte, 4> alphaPixels{};
+    const TextureHandle alphaMask = textures.create(
+        TextureFormat::Alpha8,
+        2,
+        2,
+        2,
+        alphaPixels);
+    require(textures.view(alphaMask).alphaMode == TextureAlphaMode::AlphaMask
+            && textures.view(alphaMask).colorSpace == TextureColorSpace::Linear,
+        "Alpha8 did not resolve to a linear alpha mask");
+    const TextureHandle srgbPremultiplied = textures.create(
+        TextureFormat::Rgba8,
+        4,
+        4,
+        16,
+        rgba,
+        {
+            .alphaMode = TextureAlphaMode::Premultiplied,
+            .colorSpace = TextureColorSpace::Srgb,
+        });
+    require(textures.view(srgbPremultiplied).alphaMode == TextureAlphaMode::Premultiplied
+            && textures.view(srgbPremultiplied).colorSpace == TextureColorSpace::Srgb,
+        "explicit RGBA texture semantics were not retained");
+    require(!textures.create(
+                TextureFormat::Alpha8,
+                2,
+                2,
+                2,
+                alphaPixels,
+                {.colorSpace = TextureColorSpace::Srgb}).valid()
+            && !textures.create(
+                TextureFormat::Rgba8,
+                4,
+                4,
+                16,
+                rgba,
+                {.alphaMode = TextureAlphaMode::AlphaMask}).valid(),
+        "incompatible texture semantics were accepted");
     const std::array<std::byte, 24> patch{
         std::byte{0xA0}, std::byte{0xA1}, std::byte{0xA2}, std::byte{0xA3},
         std::byte{0xB0}, std::byte{0xB1}, std::byte{0xB2}, std::byte{0xB3},
@@ -1166,6 +1231,7 @@ void testResourceLifetimeAndTextureBackingPolicies() {
 
 int main() {
     testMixedUiUsesOneBatch();
+    testColorSpaceAndAlphaConversions();
     testClipAndBlendPreserveOrdering();
     testTextureTableOverflowStartsOneNewBatch();
     testBatchStatisticsDescribeWorkWithoutClaimingCompression();

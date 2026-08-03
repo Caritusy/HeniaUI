@@ -55,6 +55,7 @@ constexpr GLenum kClampToEdge = 0x812F;
 constexpr GLenum kR8 = 0x8229;
 constexpr GLenum kRed = 0x1903;
 constexpr GLenum kRgba8 = 0x8058;
+constexpr GLenum kSrgb8Alpha8 = 0x8C43;
 constexpr GLenum kMapWriteBit = 0x0002;
 constexpr GLenum kMapUnsynchronizedBit = 0x0020;
 constexpr GLenum kSyncGpuCommandsComplete = 0x9117;
@@ -344,6 +345,7 @@ flat in uint lineFlags;
 flat in uint shaderParameter;
 
 uniform sampler2D textures[8];
+uniform int textureAlphaModes[8];
 out vec4 outputColor;
 
 vec4 sampleTexture(uint slot, vec2 uv) {
@@ -355,6 +357,17 @@ vec4 sampleTexture(uint slot, vec2 uv) {
     if (slot == 5u) return texture(textures[5], uv);
     if (slot == 6u) return texture(textures[6], uv);
     return texture(textures[7], uv);
+}
+
+vec4 straightTextureSample(uint slot, vec2 uv) {
+    vec4 sampled = sampleTexture(slot, uv);
+    int alphaMode = textureAlphaModes[int(slot)];
+    if (alphaMode == 2) {
+        sampled.rgb = sampled.a > 0.00001 ? sampled.rgb / sampled.a : vec3(0.0);
+    } else if (alphaMode == 3) {
+        sampled.a = 1.0;
+    }
+    return sampled;
 }
 
 float roundedBoxDistance(vec2 point, vec2 halfSize, float radius) {
@@ -621,7 +634,7 @@ void main() {
         float inner = 1.0 - smoothstep(-antiAlias, antiAlias, innerDistance);
         coverage = max(outer - inner, 0.0);
     } else if (primitiveKind == 3u) {
-        color *= sampleTexture(textureSlot, textureUv);
+        color *= straightTextureSample(textureSlot, textureUv);
     } else if (primitiveKind == 4u) {
         color.a *= sampleTexture(textureSlot, textureUv).r;
     } else if (primitiveKind == 11u) {
@@ -634,7 +647,7 @@ void main() {
             ninePatchCoordinate(local.x, destinationBorder.x, shapeMetrics.y),
             ninePatchCoordinate(local.y, destinationBorder.y, shapeMetrics.y));
         vec2 uv = mix(lineNeighbors.xy, lineNeighbors.zw, mapped);
-        color *= sampleTexture(textureSlot, uv);
+        color *= straightTextureSample(textureSlot, uv);
     } else if (primitiveKind == 16u) {
         float distanceValue = sampleTexture(textureSlot, textureUv).r;
         coverage = smoothstep(
@@ -728,6 +741,7 @@ struct OpenGlRenderer::Implementation final {
     GLuint vertexArray = 0;
     GLint viewportLocation = -1;
     GLint texturesLocation = -1;
+    GLint textureAlphaModesLocation = -1;
     GLint maximumTextureSize = 0;
     std::size_t capacity = 0;
     std::size_t instanceBufferBytes = 0;
@@ -755,7 +769,8 @@ struct OpenGlRenderer::Implementation final {
     [[nodiscard]] bool render(
         const RenderPacket& packet,
         std::uint32_t width,
-        std::uint32_t height) noexcept;
+        std::uint32_t height,
+        RenderTargetColorSpace targetColorSpace) noexcept;
     [[nodiscard]] bool shutdown() noexcept;
     void abandon() noexcept;
     [[nodiscard]] henia::detail::UploadFenceStatus pollUploadSlot(std::size_t index) noexcept;
@@ -872,12 +887,13 @@ bool OpenGlRenderer::Implementation::initialize(
 
     viewportLocation = gl.getUniformLocation(program, "viewportSize");
     texturesLocation = gl.getUniformLocation(program, "textures");
+    textureAlphaModesLocation = gl.getUniformLocation(program, "textureAlphaModes");
     const GLenum uniformError = consumeOperationErrors();
     if (uniformError != GL_NO_ERROR) {
         assignGlFailure(error, "OpenGL UI uniform lookup failed", uniformError, "program", program);
         return false;
     }
-    if (viewportLocation < 0 || texturesLocation < 0) {
+    if (viewportLocation < 0 || texturesLocation < 0 || textureAlphaModesLocation < 0) {
         error = "HeniaUI shader uniforms are unavailable";
         return false;
     }
@@ -1195,7 +1211,9 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(TextureStore& store) no
                     return false;
                 }
 
-                const GLenum internalFormat = view.format == TextureFormat::Alpha8 ? kR8 : kRgba8;
+                const GLenum internalFormat = view.format == TextureFormat::Alpha8
+                    ? kR8
+                    : (view.colorSpace == TextureColorSpace::Srgb ? kSrgb8Alpha8 : kRgba8);
                 const GLenum sourceFormat = view.format == TextureFormat::Alpha8 ? kRed : GL_RGBA;
                 if (immutableTextureStorage) {
                     gl.texStorage2D(
@@ -1269,6 +1287,8 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(TextureStore& store) no
         texture.stagedWidth = view.width;
         texture.stagedHeight = view.height;
         texture.stagedFormat = static_cast<std::uint8_t>(view.format);
+        texture.stagedAlphaMode = static_cast<std::uint8_t>(view.alphaMode);
+        texture.stagedColorSpace = static_cast<std::uint8_t>(view.colorSpace);
         texture.stagedExternal = false;
         texture.stagedOwned = true;
         pendingFullBytes += texture.stagedByteSize;
@@ -1396,7 +1416,9 @@ bool OpenGlRenderer::Implementation::bindExternalTexture(
             handle.packed());
         return false;
     }
-    const GLint expectedFormat = view.format == TextureFormat::Alpha8 ? kR8 : kRgba8;
+    const GLint expectedFormat = view.format == TextureFormat::Alpha8
+        ? kR8
+        : (view.colorSpace == TextureColorSpace::Srgb ? kSrgb8Alpha8 : kRgba8);
     if (width != static_cast<GLint>(view.width)
         || height != static_cast<GLint>(view.height)
         || internalFormat != expectedFormat) {
@@ -1430,6 +1452,8 @@ bool OpenGlRenderer::Implementation::bindExternalTexture(
         .width = view.width,
         .height = view.height,
         .format = static_cast<std::uint8_t>(view.format),
+        .alphaMode = static_cast<std::uint8_t>(view.alphaMode),
+        .colorSpace = static_cast<std::uint8_t>(view.colorSpace),
         .external = true,
         .owned = ownership == OpenGlExternalTextureOwnership::Transferred,
     };
@@ -1446,7 +1470,8 @@ bool OpenGlRenderer::Implementation::bindExternalTexture(
 bool OpenGlRenderer::Implementation::render(
     const RenderPacket& packet,
     std::uint32_t width,
-    std::uint32_t height) noexcept {
+    std::uint32_t height,
+    RenderTargetColorSpace targetColorSpace) noexcept {
     const std::uint64_t frameAttemptId = ++statistics.frameAttempts;
     if (!ready) {
         ++statistics.rejectedFrames;
@@ -1455,6 +1480,13 @@ bool OpenGlRenderer::Implementation::render(
     }
     if (!validateOwnerContext("render")) {
         ++statistics.rejectedFrames;
+        return false;
+    }
+    if (targetColorSpace != RenderTargetColorSpace::Linear
+        && targetColorSpace != RenderTargetColorSpace::Srgb) {
+        ++statistics.rejectedFrames;
+        ++statistics.invalidInputFrames;
+        error = "targetColorSpace is invalid";
         return false;
     }
     if (width == 0 || height == 0
@@ -1536,6 +1568,37 @@ bool OpenGlRenderer::Implementation::render(
                 return false;
             }
         }
+        for (std::size_t index = batch.firstInstance;
+             index < static_cast<std::size_t>(batch.firstInstance) + batch.instanceCount;
+             ++index) {
+            const DrawInstance& instance = packet.instances()[index];
+            const bool image = instance.kind == PrimitiveKind::Image
+                || instance.kind == PrimitiveKind::NinePatch;
+            const bool mask = instance.kind == PrimitiveKind::Glyph;
+            const bool sdf = instance.kind == PrimitiveKind::SdfIcon;
+            if (!image && !mask && !sdf) continue;
+            if (instance.textureSlot >= batch.textureCount) {
+                ++statistics.rejectedFrames;
+                ++statistics.invalidInputFrames;
+                error = "Render packet textured instance has an invalid texture slot";
+                return false;
+            }
+            const detail::OpenGlTextureState& texture =
+                textures[batch.textures[instance.textureSlot].value() - 1U];
+            const bool alphaMask = texture.alphaMode
+                == static_cast<std::uint8_t>(TextureAlphaMode::AlphaMask);
+            const bool premultiplied = texture.alphaMode
+                == static_cast<std::uint8_t>(TextureAlphaMode::Premultiplied);
+            const bool srgb = texture.colorSpace
+                == static_cast<std::uint8_t>(TextureColorSpace::Srgb);
+            if ((image && alphaMask) || (mask && !alphaMask)
+                || (sdf && (premultiplied || srgb))) {
+                ++statistics.rejectedFrames;
+                ++statistics.invalidInputFrames;
+                error = "Render packet primitive is incompatible with its texture semantics";
+                return false;
+            }
+        }
     }
 
     const henia::detail::UploadSelection upload = uploadRing.select(
@@ -1562,7 +1625,8 @@ bool OpenGlRenderer::Implementation::render(
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_STENCIL_TEST);
-    glDisable(kFramebufferSrgb);
+    if (targetColorSpace == RenderTargetColorSpace::Srgb) glEnable(kFramebufferSrgb);
+    else glDisable(kFramebufferSrgb);
     glDisable(kRasterizerDiscard);
     glDisable(GL_COLOR_LOGIC_OP);
     glDisable(GL_DITHER);
@@ -1683,6 +1747,15 @@ bool OpenGlRenderer::Implementation::render(
                 : 0;
             glBindTexture(GL_TEXTURE_2D, object);
         }
+        std::array<GLint, DrawBatch::kTextureCapacity> alphaModes{};
+        for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
+            alphaModes[slot] = static_cast<GLint>(
+                textures[batch.textures[slot].value() - 1U].alphaMode);
+        }
+        gl.uniform1iv(
+            textureAlphaModesLocation,
+            static_cast<GLsizei>(alphaModes.size()),
+            alphaModes.data());
 
         configureAttributes(batch.firstInstance);
         gl.drawArraysInstanced(
@@ -1833,6 +1906,7 @@ bool OpenGlRenderer::Implementation::shutdown() noexcept {
     vertexArray = 0;
     viewportLocation = -1;
     texturesLocation = -1;
+    textureAlphaModesLocation = -1;
     maximumTextureSize = 0;
     capacity = 0;
     instanceBufferBytes = 0;
@@ -1859,6 +1933,7 @@ void OpenGlRenderer::Implementation::abandon() noexcept {
     vertexArray = 0;
     viewportLocation = -1;
     texturesLocation = -1;
+    textureAlphaModesLocation = -1;
     maximumTextureSize = 0;
     capacity = 0;
     instanceBufferBytes = 0;
@@ -2042,8 +2117,9 @@ bool OpenGlRenderer::bindExternalTexture(
 bool OpenGlRenderer::render(
     const RenderPacket& packet,
     std::uint32_t viewportWidth,
-    std::uint32_t viewportHeight) noexcept {
-    return mImplementation->render(packet, viewportWidth, viewportHeight);
+    std::uint32_t viewportHeight,
+    RenderTargetColorSpace targetColorSpace) noexcept {
+    return mImplementation->render(packet, viewportWidth, viewportHeight, targetColorSpace);
 }
 bool OpenGlRenderer::reportGpuTime(
     std::uint64_t sampleId,

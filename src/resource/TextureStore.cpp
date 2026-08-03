@@ -18,6 +18,35 @@ constexpr std::uint32_t kInvalidSlot = std::numeric_limits<std::uint32_t>::max()
     return format == TextureFormat::Alpha8 ? 1U : 4U;
 }
 
+[[nodiscard]] bool resolveTextureSemantics(
+    TextureFormat format,
+    TextureAlphaMode requestedAlphaMode,
+    TextureColorSpace colorSpace,
+    TextureAlphaMode& resolvedAlphaMode) noexcept {
+    if (colorSpace != TextureColorSpace::Linear && colorSpace != TextureColorSpace::Srgb) {
+        return false;
+    }
+    if (format == TextureFormat::Alpha8) {
+        if (requestedAlphaMode != TextureAlphaMode::FormatDefault
+            && requestedAlphaMode != TextureAlphaMode::AlphaMask) {
+            return false;
+        }
+        // Coverage is scalar data, never transfer-encoded color.
+        if (colorSpace != TextureColorSpace::Linear) return false;
+        resolvedAlphaMode = TextureAlphaMode::AlphaMask;
+        return true;
+    }
+    if (format != TextureFormat::Rgba8 || requestedAlphaMode == TextureAlphaMode::AlphaMask) {
+        return false;
+    }
+    resolvedAlphaMode = requestedAlphaMode == TextureAlphaMode::FormatDefault
+        ? TextureAlphaMode::Straight
+        : requestedAlphaMode;
+    return resolvedAlphaMode == TextureAlphaMode::Straight
+        || resolvedAlphaMode == TextureAlphaMode::Premultiplied
+        || resolvedAlphaMode == TextureAlphaMode::Opaque;
+}
+
 [[nodiscard]] bool validatePixels(
     TextureFormat format,
     std::uint32_t width,
@@ -44,7 +73,9 @@ TextureHandle TextureStore::create(
     std::uint32_t rowPitch,
     std::span<const std::byte> pixels,
     TextureCreateOptions options) {
+    TextureAlphaMode alphaMode = TextureAlphaMode::Straight;
     if (!validatePixels(format, width, height, rowPitch, pixels)
+        || !resolveTextureSemantics(format, options.alphaMode, options.colorSpace, alphaMode)
         || options.backingPolicy == TextureBackingPolicy::ExternalGpu
         || (options.backingPolicy == TextureBackingPolicy::Regenerable
             && !options.regenerator)) {
@@ -58,6 +89,8 @@ TextureHandle TextureStore::create(
     entry.rowPitch = rowPitch;
     entry.backingPolicy = options.backingPolicy;
     entry.regenerator = std::move(options.regenerator);
+    entry.alphaMode = alphaMode;
+    entry.colorSpace = options.colorSpace;
     entry.dirtyRegion = {0, 0, width, height};
     entry.fullUpdate = true;
     entry.occupied = true;
@@ -68,9 +101,12 @@ TextureHandle TextureStore::create(
 TextureHandle TextureStore::createExternal(
     TextureFormat format,
     std::uint32_t width,
-    std::uint32_t height) {
+    std::uint32_t height,
+    TextureCreateOptions options) {
     std::size_t pitch = 0;
+    TextureAlphaMode alphaMode = TextureAlphaMode::Straight;
     if (!validFormat(format) || width == 0 || height == 0
+        || !resolveTextureSemantics(format, options.alphaMode, options.colorSpace, alphaMode)
         || !checkedMultiply(static_cast<std::size_t>(width), bytesPerPixel(format), pitch)
         || pitch > std::numeric_limits<std::uint32_t>::max()) {
         return {};
@@ -81,6 +117,8 @@ TextureHandle TextureStore::createExternal(
     entry.height = height;
     entry.rowPitch = static_cast<std::uint32_t>(pitch);
     entry.backingPolicy = TextureBackingPolicy::ExternalGpu;
+    entry.alphaMode = alphaMode;
+    entry.colorSpace = options.colorSpace;
     entry.dirtyRegion = {0, 0, width, height};
     entry.fullUpdate = true;
     entry.occupied = true;
@@ -254,6 +292,8 @@ TextureView TextureStore::view(TextureHandle handle) const noexcept {
         .rowPitch = entry->rowPitch,
         .revision = entry->revision,
         .backingPolicy = entry->backingPolicy,
+        .alphaMode = entry->alphaMode,
+        .colorSpace = entry->colorSpace,
         .dirtyRegion = entry->dirtyRegion,
         .fullUpdate = entry->fullUpdate,
         .backingAvailable = !entry->pixels.empty(),

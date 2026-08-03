@@ -124,6 +124,21 @@ int main() {
                     / sizeof(DrawInstance) + 1U})) {
         fail("D3D12 renderer accepted a buffer-view byte capacity above UINT");
     }
+    D3D12Renderer mismatchedTargetRenderer;
+    if (mismatchedTargetRenderer.initialize(
+            *device.Get(),
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            {.targetColorSpace = RenderTargetColorSpace::Srgb})) {
+        fail("D3D12 renderer accepted a target color-space/format mismatch");
+    }
+    D3D12Renderer srgbTargetRenderer;
+    if (!srgbTargetRenderer.initialize(
+            *device.Get(),
+            DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+            {.targetColorSpace = RenderTargetColorSpace::Srgb})) {
+        fail("D3D12 renderer rejected an explicitly matched sRGB target format");
+    }
+    srgbTargetRenderer.shutdown();
     D3D12Renderer renderer;
     const D3D12RendererConfiguration rendererConfiguration{
         .instanceCapacity = 128,
@@ -453,6 +468,83 @@ int main() {
         fail("D3D12 output exceeded the documented golden-image tolerance");
     }
 
+    TextureStore contractTextures;
+    Frame contractFrame;
+    const RenderPacket contractPacket =
+        henia::test::buildTextureContractScene(contractTextures, contractFrame);
+    D3D12Renderer contractRenderer;
+    if (!contractRenderer.initialize(
+            *device.Get(),
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            {
+                .instanceCapacity = 8,
+                .submissionCapacity = 1,
+                .batchCapacity = 4,
+                .textureCapacity = 4,
+                .textureUploadBatchCapacity = 1,
+            })
+        || !contractRenderer.synchronizeTextures(contractTextures, *queue.Get())
+        || !waitForQueue(*device.Get(), *queue.Get())
+        || !contractRenderer.pollTextureUploads()) {
+        std::cerr << contractRenderer.lastError() << '\n';
+        fail("D3D12 texture-contract renderer setup failed");
+    }
+    if (FAILED(allocator->Reset()) || FAILED(commandList->Reset(allocator.Get(), nullptr))) {
+        fail("Unable to reset D3D12 recording objects for texture-contract validation");
+    }
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    commandList->ResourceBarrier(1, &barrier);
+    commandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);
+    commandList->ClearRenderTargetView(renderTarget, clearColor.data(), 0, nullptr);
+    if (!contractRenderer.record(contractPacket, *commandList.Get(), 0, width, height)) {
+        std::cerr << contractRenderer.lastError() << '\n';
+        fail("D3D12 texture-contract render failed");
+    }
+    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+    commandList->ResourceBarrier(1, &barrier);
+    commandList->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+    if (FAILED(commandList->Close())) {
+        fail("Unable to close the D3D12 texture-contract command list");
+    }
+    queue->ExecuteCommandLists(1, lists);
+    if (!waitForQueue(*device.Get(), *queue.Get())) {
+        fail("D3D12 texture-contract submission timed out");
+    }
+    mapped = nullptr;
+    if (FAILED(readback->Map(
+            0,
+            &readRange,
+            reinterpret_cast<void**>(const_cast<std::byte**>(&mapped))))
+        || mapped == nullptr) {
+        fail("Unable to map the D3D12 texture-contract readback buffer");
+    }
+    std::vector<henia::test::Rgba8> contractPixels(
+        static_cast<std::size_t>(width) * height);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::size_t sourceOffset = footprint.Offset
+                + static_cast<std::size_t>(y) * footprint.Footprint.RowPitch
+                + static_cast<std::size_t>(x) * 4U;
+            contractPixels[static_cast<std::size_t>(y) * width + x] = {
+                static_cast<std::uint8_t>(mapped[sourceOffset]),
+                static_cast<std::uint8_t>(mapped[sourceOffset + 1U]),
+                static_cast<std::uint8_t>(mapped[sourceOffset + 2U]),
+                static_cast<std::uint8_t>(mapped[sourceOffset + 3U]),
+            };
+        }
+    }
+    readback->Unmap(0, nullptr);
+    if (!henia::test::matchesTextureContractGolden(contractPixels, width, height)) {
+        henia::test::writePpm(
+            "d3d12-texture-contract-actual.ppm",
+            contractPixels,
+            width,
+            height);
+        fail("D3D12 texture contract exceeded the golden tolerance");
+    }
+    contractRenderer.shutdown();
+
     if (FAILED(allocator->Reset()) || FAILED(commandList->Reset(allocator.Get(), nullptr))) {
         fail("Unable to reset D3D12 recording objects for descriptor-cache validation");
     }
@@ -630,8 +722,11 @@ int main() {
         || renderer.record(packet, *commandList.Get(), 0, width, height)) {
         fail("D3D12 renderer accepted a packet holding a destroyed texture generation");
     }
+    const std::array<std::byte, 4> replacementPixels{
+        std::byte{0x80}, std::byte{0x40}, std::byte{0x20}, std::byte{0xFF},
+    };
     const TextureHandle replacementAtlas = textures.create(
-        TextureFormat::Alpha8, 4, 4, 4, alpha);
+        TextureFormat::Rgba8, 1, 1, 4, replacementPixels);
     if (!replacementAtlas.valid() || replacementAtlas.value() != atlas.value()
         || replacementAtlas.generation() == atlas.generation()
         || !renderer.synchronizeTextures(textures, *queue.Get())
@@ -653,14 +748,14 @@ int main() {
         fail("D3D12 external texture fixture could not retire its CPU predecessor");
     }
     const TextureHandle externalHandle = textures.createExternal(
-        TextureFormat::Alpha8, 4, 4);
+        TextureFormat::Rgba8, 1, 1);
     D3D12_RESOURCE_DESC externalDescription{};
     externalDescription.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    externalDescription.Width = 4;
-    externalDescription.Height = 4;
+    externalDescription.Width = 1;
+    externalDescription.Height = 1;
     externalDescription.DepthOrArraySize = 1;
     externalDescription.MipLevels = 1;
-    externalDescription.Format = DXGI_FORMAT_R8_UNORM;
+    externalDescription.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     externalDescription.SampleDesc.Count = 1;
     ComPtr<ID3D12Resource> externalResource;
     if (FAILED(device->CreateCommittedResource(

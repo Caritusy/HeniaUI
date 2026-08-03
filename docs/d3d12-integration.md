@@ -11,6 +11,11 @@ The host owns command allocators, list reset/close, resource transitions,
 `OMSetRenderTargets`, clears, queue execution, and fence completion. Before a UI
 recording call, the host must bind a render target whose format matches the
 format passed to `D3D12Renderer::initialize()` and whose sample count is one.
+`D3D12RendererConfiguration::targetColorSpace` must also match that format:
+linear targets use `*_UNORM`, while sRGB targets use `*_UNORM_SRGB`.
+Initialization rejects a mismatch. Shader output is premultiplied linear light;
+the sRGB RTV performs the output transfer. See
+[Color, alpha, and texture contract](color-and-texture-contract.md).
 
 Before a gfx recording call, the host must bind an RT matching
 `D3D12GfxConfiguration::renderTargetFormat` and `sampleCount`. When a compatible

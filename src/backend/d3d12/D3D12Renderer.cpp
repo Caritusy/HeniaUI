@@ -36,6 +36,13 @@ cbuffer FrameConstants : register(b0) {
 };
 
 #ifndef HENIA_TEXTURE_FREE
+cbuffer TextureConstants : register(b1) {
+    uint4 textureAlphaModes0;
+    uint4 textureAlphaModes1;
+};
+#endif
+
+#ifndef HENIA_TEXTURE_FREE
 Texture2D textures[8] : register(t0);
 SamplerState linearSampler : register(s0);
 #endif
@@ -139,6 +146,21 @@ float4 sampleTexture(uint slot, float2 uv) {
     if (slot == 6) return textures[6].Sample(linearSampler, uv);
     return textures[7].Sample(linearSampler, uv);
 #endif
+}
+
+float4 straightTextureSample(uint slot, float2 uv) {
+    float4 sampled = sampleTexture(slot, uv);
+#ifndef HENIA_TEXTURE_FREE
+    uint alphaMode = slot < 4
+        ? textureAlphaModes0[slot]
+        : textureAlphaModes1[slot - 4];
+    if (alphaMode == 2) {
+        sampled.rgb = sampled.a > 0.00001 ? sampled.rgb / sampled.a : 0.0;
+    } else if (alphaMode == 3) {
+        sampled.a = 1.0;
+    }
+#endif
+    return sampled;
 }
 
 float roundedBoxDistance(float2 positionValue, float2 halfSize, float radius) {
@@ -426,7 +448,7 @@ float4 pixelMain(PixelInput input) : SV_Target {
         float inner = 1.0 - smoothstep(-antiAlias, antiAlias, innerDistance);
         coverage = max(outer - inner, 0.0);
     } else if (input.primitiveKind == 3) {
-        color *= sampleTexture(input.textureSlot, input.textureUv);
+        color *= straightTextureSample(input.textureSlot, input.textureUv);
     } else if (input.primitiveKind == 4) {
         color.a *= sampleTexture(input.textureSlot, input.textureUv).r;
     } else if (input.primitiveKind == 11) {
@@ -439,7 +461,7 @@ float4 pixelMain(PixelInput input) : SV_Target {
             ninePatchCoordinate(local.x, destinationBorder.x, input.shapeMetrics.y),
             ninePatchCoordinate(local.y, destinationBorder.y, input.shapeMetrics.y));
         float2 uv = lerp(input.lineNeighbors.xy, input.lineNeighbors.zw, mapped);
-        color *= sampleTexture(input.textureSlot, uv);
+        color *= straightTextureSample(input.textureSlot, uv);
     } else if (input.primitiveKind == 16) {
         float distanceValue = sampleTexture(input.textureSlot, input.textureUv).r;
         coverage = smoothstep(
@@ -520,10 +542,18 @@ struct AdapterArchitecture final {
     description.MipLevels = 1;
     description.Format = view.format == TextureFormat::Alpha8
         ? DXGI_FORMAT_R8_UNORM
-        : DXGI_FORMAT_R8G8B8A8_UNORM;
+        : (view.colorSpace == TextureColorSpace::Srgb
+            ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+            : DXGI_FORMAT_R8G8B8A8_UNORM);
     description.SampleDesc.Count = 1;
     description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     return description;
+}
+
+[[nodiscard]] bool isSrgbFormat(DXGI_FORMAT format) noexcept {
+    return format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+        || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+        || format == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
 }
 
 [[nodiscard]] bool compileShader(
@@ -629,6 +659,8 @@ struct D3D12Renderer::Implementation final {
         std::uint64_t revision = 0;
         std::uint64_t descriptorRevision = 0;
         std::uint64_t byteSize = 0;
+        TextureAlphaMode alphaMode = TextureAlphaMode::Straight;
+        TextureColorSpace colorSpace = TextureColorSpace::Linear;
         bool pendingInPlace = false;
         bool external = false;
     };
@@ -642,6 +674,8 @@ struct D3D12Renderer::Implementation final {
         std::uint64_t revision = 0;
         std::uint64_t byteSize = 0;
         std::uint64_t uploadedBytes = 0;
+        TextureAlphaMode alphaMode = TextureAlphaMode::Straight;
+        TextureColorSpace colorSpace = TextureColorSpace::Linear;
         bool partial = false;
     };
 
@@ -744,7 +778,8 @@ bool D3D12Renderer::Implementation::initialize(
             || requested.textureUploadBatchCapacity != configuration.textureUploadBatchCapacity
             || requested.instanceStorage != configuration.instanceStorage
             || requested.gpuLocalInstanceThresholdBytes
-                != configuration.gpuLocalInstanceThresholdBytes) {
+                != configuration.gpuLocalInstanceThresholdBytes
+            || requested.targetColorSpace != configuration.targetColorSpace) {
             ++statistics.lifecycleRejections;
             error = "D3D12 renderer is already initialized with a different configuration";
             return false;
@@ -777,8 +812,12 @@ bool D3D12Renderer::Implementation::initialize(
         || gpuDescriptors > std::numeric_limits<std::uint32_t>::max()
         || !checkedAdd(requested.textureCapacity, 1U, cpuDescriptors)
         || !validInstanceStorageStrategy(requested.instanceStorage)
+        || (requested.targetColorSpace != RenderTargetColorSpace::Linear
+            && requested.targetColorSpace != RenderTargetColorSpace::Srgb)
+        || isSrgbFormat(format)
+            != (requested.targetColorSpace == RenderTargetColorSpace::Srgb)
         || format == DXGI_FORMAT_UNKNOWN) {
-        error = "D3D12 renderer configuration has an invalid capacity or format";
+        error = "D3D12 renderer configuration has an invalid capacity, format, or target color space";
         return false;
     }
     D3D12_FEATURE_DATA_FORMAT_SUPPORT formatSupport{.Format = format};
@@ -846,7 +885,7 @@ bool D3D12Renderer::Implementation::createRootSignature() noexcept {
     range.RegisterSpace = 0;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    std::array<D3D12_ROOT_PARAMETER, 2> parameters{};
+    std::array<D3D12_ROOT_PARAMETER, 3> parameters{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[0].DescriptorTable.NumDescriptorRanges = 1;
     parameters[0].DescriptorTable.pDescriptorRanges = &range;
@@ -856,6 +895,11 @@ bool D3D12Renderer::Implementation::createRootSignature() noexcept {
     parameters[1].Constants.RegisterSpace = 0;
     parameters[1].Constants.Num32BitValues = 2;
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[2].Constants.ShaderRegister = 1;
+    parameters[2].Constants.RegisterSpace = 0;
+    parameters[2].Constants.Num32BitValues = 8;
+    parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -1256,6 +1300,8 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
         staged.handle = handle.packed();
         staged.revision = view.revision;
         staged.byteSize = static_cast<std::uint64_t>(view.width) * view.height * pixelBytes;
+        staged.alphaMode = view.alphaMode;
+        staged.colorSpace = view.colorSpace;
         staged.partial = partial;
         if (partial) {
             staged.resource = current.resource;
@@ -1503,6 +1549,8 @@ bool D3D12Renderer::Implementation::pollTextureUploads() noexcept {
                 }
                 texture.resource = std::move(staged.resource);
                 texture.byteSize = staged.byteSize;
+                texture.alphaMode = staged.alphaMode;
+                texture.colorSpace = staged.colorSpace;
                 texture.external = false;
             }
             texture.handle = staged.handle;
@@ -1542,7 +1590,9 @@ bool D3D12Renderer::Implementation::bindExternalTexture(
     const D3D12_RESOURCE_DESC description = nativeTexture.GetDesc();
     const DXGI_FORMAT expectedFormat = view.format == TextureFormat::Alpha8
         ? DXGI_FORMAT_R8_UNORM
-        : DXGI_FORMAT_R8G8B8A8_UNORM;
+        : (view.colorSpace == TextureColorSpace::Srgb
+            ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+            : DXGI_FORMAT_R8G8B8A8_UNORM);
     if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D
         || description.Width != view.width || description.Height != view.height
         || description.DepthOrArraySize != 1 || description.MipLevels != 1
@@ -1569,6 +1619,8 @@ bool D3D12Renderer::Implementation::bindExternalTexture(
         .revision = view.revision,
         .descriptorRevision = nextDescriptorRevision++,
         .byteSize = static_cast<std::uint64_t>(view.rowPitch) * view.height,
+        .alphaMode = view.alphaMode,
+        .colorSpace = view.colorSpace,
         .pendingInPlace = false,
         .external = true,
     };
@@ -1692,6 +1744,33 @@ bool D3D12Renderer::Implementation::record(
                 || textures[handle.value() - 1U].pendingInPlace) {
                 ++statistics.rejectedFrames;
                 error = "D3D12 render packet references an unsynchronized texture";
+                return false;
+            }
+        }
+        for (std::size_t index = batch.firstInstance;
+             index < static_cast<std::size_t>(batch.firstInstance) + batch.instanceCount;
+             ++index) {
+            const DrawInstance& instance = packet.instances()[index];
+            const bool image = instance.kind == PrimitiveKind::Image
+                || instance.kind == PrimitiveKind::NinePatch;
+            const bool mask = instance.kind == PrimitiveKind::Glyph;
+            const bool sdf = instance.kind == PrimitiveKind::SdfIcon;
+            if (!image && !mask && !sdf) continue;
+            if (instance.textureSlot >= batch.textureCount) {
+                ++statistics.rejectedFrames;
+                ++statistics.invalidInputFrames;
+                error = "Render packet textured instance has an invalid texture slot";
+                return false;
+            }
+            const GpuTexture& texture =
+                textures[batch.textures[instance.textureSlot].value() - 1U];
+            const bool alphaMask = texture.alphaMode == TextureAlphaMode::AlphaMask;
+            if ((image && alphaMask) || (mask && !alphaMask)
+                || (sdf && (texture.alphaMode == TextureAlphaMode::Premultiplied
+                    || texture.colorSpace == TextureColorSpace::Srgb))) {
+                ++statistics.rejectedFrames;
+                ++statistics.invalidInputFrames;
+                error = "Render packet primitive is incompatible with its texture semantics";
                 return false;
             }
         }
@@ -1849,6 +1928,16 @@ bool D3D12Renderer::Implementation::record(
                 ++statistics.descriptorTableCacheHits;
             }
             commandList.SetGraphicsRootDescriptorTable(0, gpuDescriptor(tableIndex));
+            std::array<std::uint32_t, DrawBatch::kTextureCapacity> alphaModes{};
+            for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
+                alphaModes[slot] = static_cast<std::uint32_t>(
+                    textures[batch.textures[slot].value() - 1U].alphaMode);
+            }
+            commandList.SetGraphicsRoot32BitConstants(
+                2,
+                static_cast<UINT>(alphaModes.size()),
+                alphaModes.data(),
+                0);
         }
 
         D3D12_RECT scissor{};
