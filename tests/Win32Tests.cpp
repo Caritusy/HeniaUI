@@ -26,6 +26,7 @@ class InputProbe final : public Widget {
 public:
     [[nodiscard]] bool acceptsPointerInput() const noexcept override { return true; }
     [[nodiscard]] bool acceptsKeyboardFocus() const noexcept override { return true; }
+    [[nodiscard]] bool wantsTabKey() const noexcept override { return true; }
 
     [[nodiscard]] bool handleInput(const InputEvent& event) override {
         switch (event.kind) {
@@ -236,11 +237,110 @@ void verifyWin32InputAdapter(TextPainter& painter) {
     }
 
     focusProbe(adapter, window);
-    if (!adapter.handleMessage(window, WM_KEYDOWN, VK_F5, 0)
-        || probe.lastKey != KeyCode::F5
-        || !adapter.handleMessage(window, WM_KEYDOWN, VK_SPACE, 0)
-        || probe.lastKey != KeyCode::Space) {
-        fail("Expanded Win32 overlay key mapping did not reach the focused widget");
+    struct KeyMapping final {
+        WPARAM virtualKey = 0;
+        LPARAM flags = 0;
+        KeyCode expected = KeyCode::Unknown;
+    };
+    constexpr auto kExtendedKey = static_cast<LPARAM>(1ULL << 24U);
+    constexpr std::array keyMappings{
+        KeyMapping{VK_BACK, 0, KeyCode::Backspace},
+        KeyMapping{VK_DELETE, 0, KeyCode::Delete},
+        KeyMapping{VK_INSERT, 0, KeyCode::Insert},
+        KeyMapping{VK_HOME, 0, KeyCode::Home},
+        KeyMapping{VK_END, 0, KeyCode::End},
+        KeyMapping{VK_LEFT, 0, KeyCode::Left},
+        KeyMapping{VK_RIGHT, 0, KeyCode::Right},
+        KeyMapping{VK_UP, 0, KeyCode::Up},
+        KeyMapping{VK_DOWN, 0, KeyCode::Down},
+        KeyMapping{VK_RETURN, 0, KeyCode::Enter},
+        KeyMapping{VK_ESCAPE, 0, KeyCode::Escape},
+        KeyMapping{VK_TAB, 0, KeyCode::Tab},
+        KeyMapping{VK_PRIOR, 0, KeyCode::PageUp},
+        KeyMapping{VK_NEXT, 0, KeyCode::PageDown},
+        KeyMapping{VK_F5, 0, KeyCode::F5},
+        KeyMapping{VK_SPACE, 0, KeyCode::Space},
+        KeyMapping{VK_SHIFT, 0, KeyCode::Shift},
+        KeyMapping{VK_LSHIFT, 0, KeyCode::Shift},
+        KeyMapping{VK_RSHIFT, 0, KeyCode::Shift},
+        KeyMapping{VK_CONTROL, 0, KeyCode::Control},
+        KeyMapping{VK_LCONTROL, 0, KeyCode::Control},
+        KeyMapping{VK_RCONTROL, 0, KeyCode::Control},
+        KeyMapping{VK_MENU, 0, KeyCode::Alt},
+        KeyMapping{VK_LMENU, 0, KeyCode::Alt},
+        KeyMapping{VK_RMENU, 0, KeyCode::Alt},
+        KeyMapping{VK_CAPITAL, 0, KeyCode::CapsLock},
+        KeyMapping{VK_NUMLOCK, 0, KeyCode::NumLock},
+        KeyMapping{VK_SCROLL, 0, KeyCode::ScrollLock},
+        KeyMapping{VK_SNAPSHOT, 0, KeyCode::PrintScreen},
+        KeyMapping{VK_PAUSE, 0, KeyCode::Pause},
+        KeyMapping{VK_LWIN, 0, KeyCode::LeftSuper},
+        KeyMapping{VK_RWIN, 0, KeyCode::RightSuper},
+        KeyMapping{VK_APPS, 0, KeyCode::Menu},
+        KeyMapping{VK_OEM_1, 0, KeyCode::Semicolon},
+        KeyMapping{VK_OEM_PLUS, 0, KeyCode::Equal},
+        KeyMapping{VK_OEM_COMMA, 0, KeyCode::Comma},
+        KeyMapping{VK_OEM_MINUS, 0, KeyCode::Minus},
+        KeyMapping{VK_OEM_PERIOD, 0, KeyCode::Period},
+        KeyMapping{VK_OEM_2, 0, KeyCode::Slash},
+        KeyMapping{VK_OEM_3, 0, KeyCode::Backtick},
+        KeyMapping{VK_OEM_4, 0, KeyCode::LeftBracket},
+        KeyMapping{VK_OEM_5, 0, KeyCode::Backslash},
+        KeyMapping{VK_OEM_6, 0, KeyCode::RightBracket},
+        KeyMapping{VK_OEM_7, 0, KeyCode::Apostrophe},
+        KeyMapping{VK_OEM_102, 0, KeyCode::IntlBackslash},
+        KeyMapping{VK_NUMPAD0, 0, KeyCode::Numpad0},
+        KeyMapping{VK_NUMPAD5, 0, KeyCode::Numpad5},
+        KeyMapping{VK_NUMPAD9, 0, KeyCode::Numpad9},
+        KeyMapping{VK_MULTIPLY, 0, KeyCode::NumpadMultiply},
+        KeyMapping{VK_ADD, 0, KeyCode::NumpadAdd},
+        KeyMapping{VK_SEPARATOR, 0, KeyCode::NumpadSeparator},
+        KeyMapping{VK_SUBTRACT, 0, KeyCode::NumpadSubtract},
+        KeyMapping{VK_DECIMAL, 0, KeyCode::NumpadDecimal},
+        KeyMapping{VK_DIVIDE, 0, KeyCode::NumpadDivide},
+        KeyMapping{VK_RETURN, kExtendedKey, KeyCode::NumpadEnter},
+    };
+    for (const KeyMapping& mapping : keyMappings) {
+        if (!adapter.handleMessage(
+                window, WM_KEYDOWN, mapping.virtualKey, mapping.flags)
+            || probe.lastKey != mapping.expected) {
+            fail("Standard Win32 keyboard mapping did not reach the focused widget");
+        }
+    }
+    const auto verifyContiguousKeys = [&](WPARAM firstVirtualKey, KeyCode firstKey, std::size_t count) {
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto virtualKey = firstVirtualKey + static_cast<WPARAM>(index);
+            const auto expected = static_cast<KeyCode>(
+                static_cast<std::uint16_t>(firstKey) + static_cast<std::uint16_t>(index));
+            if (!adapter.handleMessage(window, WM_KEYDOWN, virtualKey, 0)
+                || probe.lastKey != expected) {
+                fail("A contiguous standard Win32 key range was not mapped");
+            }
+        }
+    };
+    verifyContiguousKeys('0', KeyCode::Digit0, 10);
+    verifyContiguousKeys('A', KeyCode::A, 26);
+    verifyContiguousKeys(VK_F1, KeyCode::F1, 12);
+    verifyContiguousKeys(VK_NUMPAD0, KeyCode::Numpad0, 10);
+
+    probe.text.clear();
+    constexpr std::array controlCharacters{
+        WPARAM{0x01},
+        WPARAM{0x08},
+        WPARAM{0x09},
+        WPARAM{0x0D},
+        WPARAM{0x1B},
+        WPARAM{0x7F},
+        WPARAM{0x85},
+    };
+    for (WPARAM control : controlCharacters) {
+        if (!adapter.handleMessage(window, WM_CHAR, control, 0)) {
+            fail("A duplicate WM_CHAR control code was not consumed");
+        }
+    }
+    if (!adapter.handleMessage(window, WM_UNICHAR, 0x9F, 0)
+        || !probe.text.empty()) {
+        fail("Win32 control codes leaked into committed text input");
     }
     probe.text.clear();
     if (!adapter.handleMessage(window, WM_CHAR, 0xD83D, 0)

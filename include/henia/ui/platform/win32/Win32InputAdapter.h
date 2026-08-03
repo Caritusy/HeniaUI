@@ -39,8 +39,9 @@ class Win32InputAdapter final {
 public:
     explicit Win32InputAdapter(UiDocument& document) noexcept;
 
-    // Returns true only when translated input was handled, a UTF-16 high
-    // surrogate was buffered, or WM_UNICHAR queried Unicode support. Capture,
+    // Returns true only when translated input was handled, a duplicate
+    // WM_CHAR control code was consumed, a UTF-16 high surrogate was buffered,
+    // or WM_UNICHAR queried Unicode support. Capture,
     // IME composition is dispatched synchronously as UTF-8 start/update/
     // commit/cancel events. Focus, cancellation, and destruction notifications
     // are observed and return false so the host can continue normal processing.
@@ -70,7 +71,7 @@ private:
     [[nodiscard]] static PressedButtonMask buttonMask(UINT message) noexcept;
     [[nodiscard]] static bool validUnicodeScalar(std::uint64_t value) noexcept;
     [[nodiscard]] static std::string utf8FromUtf16(std::u16string_view text);
-    [[nodiscard]] static KeyCode translateKey(WPARAM key) noexcept;
+    [[nodiscard]] static KeyCode translateKey(WPARAM key, LPARAM flags) noexcept;
     static void addModifiers(InputEvent& event) noexcept;
 
     UiDocument* mDocument = nullptr;

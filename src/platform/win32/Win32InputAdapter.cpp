@@ -13,6 +13,10 @@ namespace {
 
 constexpr char32_t kReplacementCharacter = U'\uFFFD';
 
+[[nodiscard]] constexpr bool isControlCharacter(char32_t value) noexcept {
+    return value < U' ' || (value >= 0x7FU && value <= 0x9FU);
+}
+
 template <typename Callback>
 class ScopeExit final {
 public:
@@ -229,7 +233,7 @@ const Win32DpiChange& Win32InputAdapter::dpiState() const noexcept {
 InputEvent Win32InputAdapter::makeKeyEvent(InputEventKind kind, WPARAM wParam, LPARAM lParam) const noexcept {
     InputEvent event{
         .kind = kind,
-        .key = translateKey(wParam),
+        .key = translateKey(wParam, lParam),
         .repeated = (static_cast<unsigned long long>(lParam) & (1ULL << 30U)) != 0,
     };
     addModifiers(event);
@@ -352,6 +356,9 @@ void Win32InputAdapter::cancelComposition() {
 }
 
 bool Win32InputAdapter::dispatchText(char32_t value) {
+    // WM_CHAR repeats editing/navigation keys as C0 control codes after the
+    // corresponding WM_KEYDOWN. They are key events, never committed text.
+    if (isControlCharacter(value)) return true;
     InputEvent event{.kind = InputEventKind::TextInput, .text = value};
     addModifiers(event);
     return mDocument->dispatch(event);
@@ -438,7 +445,12 @@ std::string Win32InputAdapter::utf8FromUtf16(std::u16string_view text) {
     return result;
 }
 
-KeyCode Win32InputAdapter::translateKey(WPARAM key) noexcept {
+KeyCode Win32InputAdapter::translateKey(WPARAM key, LPARAM flags) noexcept {
+    constexpr auto kExtendedKey = static_cast<unsigned long long>(1ULL << 24U);
+    if (key == VK_RETURN
+        && (static_cast<unsigned long long>(flags) & kExtendedKey) != 0) {
+        return KeyCode::NumpadEnter;
+    }
     switch (key) {
         case VK_BACK: return KeyCode::Backspace;
         case VK_DELETE: return KeyCode::Delete;
@@ -504,8 +516,50 @@ KeyCode Win32InputAdapter::translateKey(WPARAM key) noexcept {
         case VK_F11: return KeyCode::F11;
         case VK_F12: return KeyCode::F12;
         case VK_SHIFT: return KeyCode::Shift;
+        case VK_LSHIFT: return KeyCode::Shift;
+        case VK_RSHIFT: return KeyCode::Shift;
         case VK_CONTROL: return KeyCode::Control;
+        case VK_LCONTROL: return KeyCode::Control;
+        case VK_RCONTROL: return KeyCode::Control;
         case VK_MENU: return KeyCode::Alt;
+        case VK_LMENU: return KeyCode::Alt;
+        case VK_RMENU: return KeyCode::Alt;
+        case VK_CAPITAL: return KeyCode::CapsLock;
+        case VK_NUMLOCK: return KeyCode::NumLock;
+        case VK_SCROLL: return KeyCode::ScrollLock;
+        case VK_SNAPSHOT: return KeyCode::PrintScreen;
+        case VK_PAUSE: return KeyCode::Pause;
+        case VK_LWIN: return KeyCode::LeftSuper;
+        case VK_RWIN: return KeyCode::RightSuper;
+        case VK_APPS: return KeyCode::Menu;
+        case VK_OEM_1: return KeyCode::Semicolon;
+        case VK_OEM_PLUS: return KeyCode::Equal;
+        case VK_OEM_COMMA: return KeyCode::Comma;
+        case VK_OEM_MINUS: return KeyCode::Minus;
+        case VK_OEM_PERIOD: return KeyCode::Period;
+        case VK_OEM_2: return KeyCode::Slash;
+        case VK_OEM_3: return KeyCode::Backtick;
+        case VK_OEM_4: return KeyCode::LeftBracket;
+        case VK_OEM_5: return KeyCode::Backslash;
+        case VK_OEM_6: return KeyCode::RightBracket;
+        case VK_OEM_7: return KeyCode::Apostrophe;
+        case VK_OEM_102: return KeyCode::IntlBackslash;
+        case VK_NUMPAD0: return KeyCode::Numpad0;
+        case VK_NUMPAD1: return KeyCode::Numpad1;
+        case VK_NUMPAD2: return KeyCode::Numpad2;
+        case VK_NUMPAD3: return KeyCode::Numpad3;
+        case VK_NUMPAD4: return KeyCode::Numpad4;
+        case VK_NUMPAD5: return KeyCode::Numpad5;
+        case VK_NUMPAD6: return KeyCode::Numpad6;
+        case VK_NUMPAD7: return KeyCode::Numpad7;
+        case VK_NUMPAD8: return KeyCode::Numpad8;
+        case VK_NUMPAD9: return KeyCode::Numpad9;
+        case VK_MULTIPLY: return KeyCode::NumpadMultiply;
+        case VK_ADD: return KeyCode::NumpadAdd;
+        case VK_SEPARATOR: return KeyCode::NumpadSeparator;
+        case VK_SUBTRACT: return KeyCode::NumpadSubtract;
+        case VK_DECIMAL: return KeyCode::NumpadDecimal;
+        case VK_DIVIDE: return KeyCode::NumpadDivide;
         default: return KeyCode::Unknown;
     }
 }

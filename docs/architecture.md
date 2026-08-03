@@ -186,7 +186,8 @@ bounded undo/redo snapshots, clipboard operations, and a separate IME preedit
 range. Preedit updates never mutate committed storage; commit is one undoable
 replacement and cancel is lossless. `TextInput` adds pointer selection,
 selection/caret/composition painting, single- or multi-line entry, shortcuts,
-and fallback fonts on top of that state.
+Insert-controlled UTF-8 overwrite mode, and fallback fonts on top of that
+state.
 
 ### Theme cascade and invalidation
 
@@ -324,6 +325,11 @@ start/update/commit/cancel events. Preedit and result strings are converted from
 UTF-16 to UTF-8, including a byte-accurate composition caret. A handled result
 is remembered only across its immediate UTF-16 character delivery and cleared
 at composition end, preventing the committed text from being inserted twice.
+`WM_CHAR` and `WM_UNICHAR` contribute committed Unicode text only. C0/C1
+control codes such as Backspace, Tab, Enter, and Delete are consumed as
+duplicates of their key messages, while editing and navigation remain
+`KeyDown` events. This keeps input-method text separate from physical-key
+semantics and prevents control bytes from entering UTF-8 editor storage.
 
 The return value is a consumption decision. Pointer, wheel, key, and completed
 text/composition messages return the document handler result. A buffered UTF-16 high

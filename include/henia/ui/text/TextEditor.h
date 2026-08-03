@@ -76,6 +76,8 @@ public:
 
     [[nodiscard]] bool insert(std::string_view utf8);
     [[nodiscard]] bool insert(char32_t codepoint);
+    [[nodiscard]] bool overwrite(std::string_view utf8);
+    [[nodiscard]] bool overwrite(char32_t codepoint);
     [[nodiscard]] bool backspace();
     [[nodiscard]] bool deleteForward();
 

@@ -99,6 +99,43 @@ enum class KeyCode : std::uint16_t {
     Shift,
     Control,
     Alt,
+    CapsLock,
+    NumLock,
+    ScrollLock,
+    PrintScreen,
+    Pause,
+    LeftSuper,
+    RightSuper,
+    Menu,
+    Semicolon,
+    Equal,
+    Comma,
+    Minus,
+    Period,
+    Slash,
+    Backtick,
+    LeftBracket,
+    Backslash,
+    RightBracket,
+    Apostrophe,
+    IntlBackslash,
+    Numpad0,
+    Numpad1,
+    Numpad2,
+    Numpad3,
+    Numpad4,
+    Numpad5,
+    Numpad6,
+    Numpad7,
+    Numpad8,
+    Numpad9,
+    NumpadMultiply,
+    NumpadAdd,
+    NumpadSeparator,
+    NumpadSubtract,
+    NumpadDecimal,
+    NumpadDivide,
+    NumpadEnter,
 };
 
 struct InputEvent final {
@@ -108,6 +145,8 @@ struct InputEvent final {
     float scrollX = 0.0F;
     float scrollY = 0.0F;
     KeyCode key = KeyCode::Unknown;
+    // TextInput carries committed Unicode text, not editing/navigation control
+    // characters. Backspace, Tab, Enter, Insert, and similar keys use `key`.
     char32_t text = U'\0';
     // Synchronous UTF-8 payload for committed multi-codepoint input or IME
     // preedit text. The adapter-owned view is valid only during dispatch.

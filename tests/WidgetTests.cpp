@@ -741,6 +741,112 @@ void verifyEditorGradeTextInput(TextPainter& painter, FontHandle font) {
     if (input.text() != "\xE4\xB8\xAD\xE3\x81\x82") {
         fail("TextInput Ctrl+Z did not restore the previous committed text");
     }
+
+    input.setText("A\xE4\xB8\xAD");
+    const int callbacksBeforeBackspace = recorder.calls;
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::Backspace,
+    }));
+    const int callbacksAfterBackspace = recorder.calls;
+    if (input.text() != "A" || callbacksAfterBackspace != callbacksBeforeBackspace + 1) {
+        fail("TextInput Backspace did not remove exactly one UTF-8 codepoint");
+    }
+    constexpr std::array controlCharacters{
+        U'\b', U'\t', U'\r', U'\x1B', U'\x7F', U'\x85'};
+    for (char32_t control : controlCharacters) {
+        if (!document.dispatch({
+                .kind = InputEventKind::TextInput,
+                .text = control,
+            })) {
+            fail("TextInput did not consume a non-text control scalar");
+        }
+    }
+    if (input.text() != "A" || recorder.calls != callbacksAfterBackspace) {
+        fail("A duplicate control character replaced the text deleted by Backspace");
+    }
+
+    input.setText("A\xE4\xB8\xAD" "B");
+    static_cast<void>(input.editor().setCaret(1));
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::Insert,
+    }));
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::TextInput,
+        .text = U'\u6587',
+    }));
+    if (input.text() != "A\xE6\x96\x87" "B") {
+        fail("TextInput Insert mode did not overwrite one UTF-8 codepoint");
+    }
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::Z,
+        .control = true,
+    }));
+    if (input.text() != "A\xE4\xB8\xAD" "B" || input.editor().selection().caret != 1) {
+        fail("TextInput overwrite was not restored by one undo step");
+    }
+
+    static_cast<void>(document.dispatch({.kind = InputEventKind::CompositionStart}));
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::CompositionUpdate,
+        .textUtf8 = "\xE6\x96\x87\xE5\xAD\x97",
+    }));
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::CompositionCommit,
+        .textUtf8 = "\xE6\x96\x87\xE5\xAD\x97",
+    }));
+    if (input.text() != "A\xE6\x96\x87\xE5\xAD\x97") {
+        fail("TextInput overwrite mode did not apply to a Chinese IME commit");
+    }
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::Z,
+        .control = true,
+    }));
+    if (input.text() != "A\xE4\xB8\xAD" "B") {
+        fail("Chinese IME overwrite was not restored by one undo step");
+    }
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::KeyDown,
+        .key = KeyCode::Insert,
+    }));
+
+    static_cast<void>(input.editor().setSelection(1, 4));
+    const int callbacksBeforeFilteredSelection = recorder.calls;
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::TextInput,
+        .textUtf8 = "\b\t\x7F",
+    }));
+    if (input.text() != "A\xE4\xB8\xAD" "B"
+        || recorder.calls != callbacksBeforeFilteredSelection) {
+        fail("Filtered control-only UTF-8 input deleted the active selection");
+    }
+
+    input.setText("");
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::TextInput,
+        .textUtf8 = "a\r\nb\rc\n\t\x7F",
+    }));
+    if (input.text() != "abc") {
+        fail("Single-line TextInput retained control characters from UTF-8 input");
+    }
+
+    input.setStyle(TextInputStyle{
+        .font = font,
+        .controlWidth = 260.0F,
+        .multiline = true,
+    });
+    input.setText("");
+    static_cast<void>(document.compose());
+    static_cast<void>(document.dispatch({
+        .kind = InputEventKind::TextInput,
+        .textUtf8 = "a\r\nb\rc\n\t\x7F",
+    }));
+    if (input.text() != "a\nb\nc\n") {
+        fail("Multiline TextInput did not normalize line endings or filter controls");
+    }
 }
 
 void verifyProductionOverlayWidgets(TextPainter& painter, FontHandle font) {

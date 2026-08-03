@@ -1,10 +1,19 @@
 #include "henia/ui/widget/controls/TextInput.h"
 
+#include "henia/ui/text/Utf8.h"
+
 #include <algorithm>
 #include <array>
 #include <utility>
 
 namespace henia::ui {
+namespace {
+
+[[nodiscard]] constexpr bool isControlCharacter(char32_t value) noexcept {
+    return value < U' ' || (value >= 0x7FU && value <= 0x9FU);
+}
+
+} // namespace
 
 TextInput::TextInput(std::string textValue, TextInputStyle style)
     : Widget(WidgetKind::TextInput), mStyle(std::move(style)), mEditor(std::move(textValue)) {
@@ -83,10 +92,18 @@ bool TextInput::handleInput(const InputEvent& event) {
     switch (event.kind) {
         case InputEventKind::TextInput:
             if (!event.textUtf8.empty()) {
-                changed = mEditor.insert(filtered(event.textUtf8));
-            } else if (event.text != U'\0'
-                && (mStyle.multiline || (event.text != U'\r' && event.text != U'\n'))) {
-                changed = mEditor.insert(event.text);
+                const std::string textValue = filtered(event.textUtf8);
+                if (!textValue.empty()) {
+                    changed = mOverwriteMode
+                        ? mEditor.overwrite(textValue)
+                        : mEditor.insert(textValue);
+                }
+            } else if (mStyle.multiline && event.text == U'\n') {
+                changed = mEditor.insert("\n");
+            } else if (event.text != U'\0' && !isControlCharacter(event.text)) {
+                changed = mOverwriteMode
+                    ? mEditor.overwrite(event.text)
+                    : mEditor.insert(event.text);
             }
             finishEdit(textRevision, changed);
             return true;
@@ -103,10 +120,26 @@ bool TextInput::handleInput(const InputEvent& event) {
             finishEdit(textRevision, changed);
             return true;
         }
-        case InputEventKind::CompositionCommit:
-            changed = mEditor.commitComposition(filtered(event.textUtf8));
+        case InputEventKind::CompositionCommit: {
+            const std::string textValue = filtered(event.textUtf8);
+            const TextComposition composition = mEditor.composition();
+            if (mOverwriteMode
+                && (!composition.active
+                    || composition.replaceBegin == composition.replaceEnd)) {
+                const std::size_t caret = composition.active
+                    ? composition.replaceBegin
+                    : mEditor.selection().caret;
+                changed = mEditor.cancelComposition();
+                static_cast<void>(mEditor.setCaret(caret));
+                if (!textValue.empty()) {
+                    changed = mEditor.overwrite(textValue) || changed;
+                }
+            } else {
+                changed = mEditor.commitComposition(textValue);
+            }
             finishEdit(textRevision, changed);
             return true;
+        }
         case InputEventKind::CompositionCancel:
             changed = mEditor.cancelComposition();
             finishEdit(textRevision, changed);
@@ -150,6 +183,9 @@ bool TextInput::handleInput(const InputEvent& event) {
         case KeyCode::Right: changed = mEditor.moveRight(event.shift); break;
         case KeyCode::Home: changed = mEditor.moveLineStart(event.shift); break;
         case KeyCode::End: changed = mEditor.moveLineEnd(event.shift); break;
+        case KeyCode::Insert:
+            mOverwriteMode = !mOverwriteMode;
+            return true;
         case KeyCode::Enter:
             if (!mStyle.multiline) return false;
             changed = mEditor.insert("\n");
@@ -271,13 +307,30 @@ void TextInput::rebuildFontChain() {
 }
 
 std::string TextInput::filtered(std::string_view textValue) const {
-    std::string result(textValue);
-    if (!mStyle.multiline) {
-        result.erase(
-            std::remove_if(result.begin(), result.end(), [](char value) {
-                return value == '\r' || value == '\n';
-            }),
-            result.end());
+    std::string result;
+    result.reserve(textValue.size());
+    bool previousWasCarriageReturn = false;
+    for (std::size_t offset = 0; offset < textValue.size();) {
+        const Utf8Codepoint decoded = decodeUtf8(textValue, offset);
+        if (decoded.bytes == 0) break;
+        offset += decoded.bytes;
+        const char32_t value = decoded.valid ? decoded.value : U'\uFFFD';
+        if (value == U'\r') {
+            if (mStyle.multiline) result.push_back('\n');
+            previousWasCarriageReturn = true;
+            continue;
+        }
+        if (value == U'\n') {
+            if (mStyle.multiline && !previousWasCarriageReturn) {
+                result.push_back('\n');
+            }
+            previousWasCarriageReturn = false;
+            continue;
+        }
+        previousWasCarriageReturn = false;
+        if (!isControlCharacter(value)) {
+            static_cast<void>(appendUtf8(result, value));
+        }
     }
     return result;
 }

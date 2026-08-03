@@ -1088,6 +1088,15 @@ void testUtf8EditorCompositionClipboardAndHistory() {
             && editor.text() == "A\xE4\xB8\xAD",
         "UTF-8 editor undo/redo history is incorrect");
 
+    editor.setText("A\xE4\xB8\xAD" "B");
+    require(editor.setCaret(1)
+            && editor.overwrite("\xE6\x96\x87\xE5\xAD\x97")
+            && editor.text() == "A\xE6\x96\x87\xE5\xAD\x97"
+            && editor.undo()
+            && editor.text() == "A\xE4\xB8\xAD" "B"
+            && editor.selection() == TextSelection{1, 1},
+        "UTF-8 overwrite did not replace codepoints or preserve one-step undo");
+
     editor.setText("abc");
     require(editor.setSelection(1, 2) && editor.beginComposition()
             && editor.updateComposition("\xE4\xB8\xAD\xE6\x96\x87", 3)

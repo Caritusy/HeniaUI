@@ -81,6 +81,9 @@ int main() {
 
     henia::ui::TextEditorState editor("A");
     static_cast<void>(editor.insert(U'\u4E2D'));
+    const bool editorOverwrite = editor.setCaret(1)
+        && editor.overwrite(U'\u6587')
+        && editor.undo();
     henia::ui::TextInput textInput(std::string(editor.text()));
     henia::ui::Checkbox checkbox("Enabled", true);
     henia::ui::Toggle toggle("Mode", true);
@@ -140,6 +143,7 @@ int main() {
             visibilityView,
             {.mode = henia::gfx::VisibilityMode::CpuFrustum})
         && visibility.boxes().size() == 1
+        && editorOverwrite
         && textInput.text() == "A\xE4\xB8\xAD"
         && checkbox.checked() && toggle.checked() && slider.value() == 0.5
         && combo.itemCount() == 2 && tabs.tabCount() == 2 && list.itemCount() == 2

@@ -71,6 +71,7 @@ private:
     Vec2 mTextOrigin{};
     float mScrollX = 0.0F;
     bool mPointerSelecting = false;
+    bool mOverwriteMode = false;
 };
 
 } // namespace henia::ui

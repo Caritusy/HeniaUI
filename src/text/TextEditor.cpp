@@ -94,6 +94,26 @@ bool TextEditorState::insert(char32_t codepoint) {
     return replaceSelection(encoded);
 }
 
+bool TextEditorState::overwrite(std::string_view utf8) {
+    if (hasSelection()) return replaceSelection(utf8);
+    const std::string replacement = validUtf8(utf8)
+        ? std::string(utf8)
+        : sanitizeUtf8(utf8);
+    std::size_t replacementOffset = 0;
+    std::size_t replaceEnd = mSelection.caret;
+    while (replacementOffset < replacement.size() && replaceEnd < mText.size()) {
+        replacementOffset = nextUtf8Boundary(replacement, replacementOffset);
+        replaceEnd = nextUtf8Boundary(mText, replaceEnd);
+    }
+    return replaceRange(mSelection.caret, replaceEnd, replacement, true);
+}
+
+bool TextEditorState::overwrite(char32_t codepoint) {
+    std::string encoded;
+    if (!appendUtf8(encoded, codepoint)) return false;
+    return overwrite(encoded);
+}
+
 bool TextEditorState::backspace() {
     if (hasSelection()) return replaceSelection({});
     const std::size_t begin = previousUtf8Boundary(mText, mSelection.caret);
