@@ -24,6 +24,9 @@ struct D3D12GfxConfiguration final {
         henia::backend::d3d12::InstanceStorageStrategy::Automatic;
     std::size_t gpuLocalInstanceThresholdBytes =
         henia::backend::d3d12::kDefaultGpuLocalInstanceThresholdBytes;
+    // Optional host-owned cache. It is borrowed only for initialize() and must
+    // have been created by the same device.
+    ID3D12PipelineLibrary* pipelineLibrary = nullptr;
 };
 
 struct D3D12GfxStatistics final {
@@ -64,6 +67,10 @@ struct D3D12GfxStatistics final {
     std::uint64_t submissionSlotBusyRejections = 0;
     std::uint64_t deviceRemovalRejections = 0;
     std::uint64_t lifecycleRejections = 0;
+    std::uint64_t pipelineCacheHits = 0;
+    std::uint64_t pipelineCacheMisses = 0;
+    std::uint64_t pipelineCacheStores = 0;
+    std::uint64_t pipelineCacheStoreFailures = 0;
     bool adapterArchitectureKnown = false;
     bool adapterUma = true;
     RenderProfile profile{};

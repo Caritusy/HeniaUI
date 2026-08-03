@@ -18,6 +18,9 @@
 #include <henia/ui/widget/controls/Toggle.h>
 #include <henia/ui/widget/controls/Tooltip.h>
 #include <henia/ui/widget/controls/TreeView.h>
+#if defined(_WIN32)
+#include <henia/backend/d3d12/D3D12ShaderPackage.h>
+#endif
 
 #include <cstdlib>
 #include <array>
@@ -111,6 +114,12 @@ int main() {
     const henia::gfx::ViewParameters visibilityView{.viewport = {8.0F, 8.0F}};
     henia::gfx::Mat4 projection{};
     henia::ui::ScissorRect scissor{};
+#if defined(_WIN32)
+    const auto uiShaders = henia::backend::d3d12::shaderPackageInfo(
+        henia::backend::d3d12::ShaderPackage::Ui);
+    const auto gfxShaders = henia::backend::d3d12::shaderPackageInfo(
+        henia::backend::d3d12::ShaderPackage::Gfx);
+#endif
     return packet.instances().size() == 6 && packet.statistics().effectInstances == 2
         && boxes.boxes().size() == 1
         && visibility.reserve(1) && visibility.update(
@@ -130,6 +139,11 @@ int main() {
         && henia::gfx::finite(projection)
         && henia::ui::makeScissorRect({{0.25F, 0.25F}, {7.25F, 7.25F}}, 8, 8, scissor)
         && scissor.left == 0 && scissor.right == 8
+#if defined(_WIN32)
+        && uiShaders.version.size() == 64 && gfxShaders.version.size() == 64
+        && uiShaders.pixelVariantBytes != 0 && gfxShaders.pixelVariantBytes == 0
+        && !uiShaders.runtimeCompilationEnabled && !gfxShaders.runtimeCompilationEnabled
+#endif
         ? EXIT_SUCCESS
         : EXIT_FAILURE;
 }

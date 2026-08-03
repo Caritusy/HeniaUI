@@ -10,6 +10,11 @@ option(HENIAUI_BUILD_SANDBOX "Build the batching sandbox" ${PROJECT_IS_TOP_LEVEL
 option(HENIAUI_BUILD_BENCHMARKS "Build reproducible HeniaUI benchmarks" ${HENIAUI_BUILD_TESTS})
 option(HENIAUI_ENABLE_ADDRESS_SANITIZER "Build with AddressSanitizer" OFF)
 option(HENIAUI_ENABLE_UNDEFINED_SANITIZER "Build with UndefinedBehaviorSanitizer" OFF)
+option(
+    HENIAUI_D3D12_RUNTIME_SHADER_COMPILATION
+    "Allow Debug D3D12 builds to recompile embedded HLSL at runtime"
+    OFF
+)
 
 set(HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY "")
 if(HENIAUI_ENABLE_ADDRESS_SANITIZER)
@@ -161,6 +166,81 @@ set_target_properties(HeniaUIGfx PROPERTIES
 )
 
 if(WIN32)
+    add_executable(HeniaUIShaderCompiler tools/compile_hlsl.cpp)
+    target_compile_features(HeniaUIShaderCompiler PRIVATE cxx_std_23)
+    target_link_libraries(HeniaUIShaderCompiler PRIVATE d3dcompiler)
+    target_compile_definitions(HeniaUIShaderCompiler PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    if(MSVC)
+        target_compile_options(HeniaUIShaderCompiler PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    set_target_properties(HeniaUIShaderCompiler PROPERTIES FOLDER "HeniaUI/Build")
+
+    set(HENIAUI_D3D12_GENERATED_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/d3d12")
+    set(HENIAUI_D3D12_UI_SHADER_HEADER
+        "${HENIAUI_D3D12_GENERATED_DIRECTORY}/UiShaders.generated.h")
+    set(HENIAUI_D3D12_GFX_SHADER_HEADER
+        "${HENIAUI_D3D12_GENERATED_DIRECTORY}/GfxShaders.generated.h")
+
+    add_custom_command(
+        OUTPUT "${HENIAUI_D3D12_UI_SHADER_HEADER}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${HENIAUI_D3D12_GENERATED_DIRECTORY}"
+        COMMAND HeniaUIShaderCompiler
+            --source "${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/ui.hlsl"
+            --entry vertexMain --target vs_5_0
+            --output "${HENIAUI_D3D12_GENERATED_DIRECTORY}/ui-vs.cso"
+        COMMAND HeniaUIShaderCompiler
+            --source "${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/ui.hlsl"
+            --entry pixelMain --target ps_5_0
+            --output "${HENIAUI_D3D12_GENERATED_DIRECTORY}/ui-ps.cso"
+        COMMAND HeniaUIShaderCompiler
+            --source "${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/ui.hlsl"
+            --entry pixelMain --target ps_5_0
+            --define HENIA_TEXTURE_FREE=1
+            --output "${HENIAUI_D3D12_GENERATED_DIRECTORY}/ui-texture-free-ps.cso"
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/ui.hlsl
+            -DVERTEX=${HENIAUI_D3D12_GENERATED_DIRECTORY}/ui-vs.cso
+            -DPIXEL=${HENIAUI_D3D12_GENERATED_DIRECTORY}/ui-ps.cso
+            -DPIXEL_VARIANT=${HENIAUI_D3D12_GENERATED_DIRECTORY}/ui-texture-free-ps.cso
+            -DOUTPUT=${HENIAUI_D3D12_UI_SHADER_HEADER}
+            -DNAMESPACE=henia::backend::d3d12::generated::ui
+            -DPACKAGE_KEY=ui-v1-vs_5_0-ps_5_0-texture-free
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateEmbeddedShader.cmake"
+        DEPENDS
+            HeniaUIShaderCompiler
+            shaders/d3d12/ui.hlsl
+            cmake/GenerateEmbeddedShader.cmake
+        COMMENT "Compiling and embedding HeniaUI D3D12 UI shaders"
+        VERBATIM
+    )
+
+    add_custom_command(
+        OUTPUT "${HENIAUI_D3D12_GFX_SHADER_HEADER}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${HENIAUI_D3D12_GENERATED_DIRECTORY}"
+        COMMAND HeniaUIShaderCompiler
+            --source "${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/gfx.hlsl"
+            --entry vertexMain --target vs_5_1
+            --output "${HENIAUI_D3D12_GENERATED_DIRECTORY}/gfx-vs.cso"
+        COMMAND HeniaUIShaderCompiler
+            --source "${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/gfx.hlsl"
+            --entry pixelMain --target ps_5_1
+            --output "${HENIAUI_D3D12_GENERATED_DIRECTORY}/gfx-ps.cso"
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/gfx.hlsl
+            -DVERTEX=${HENIAUI_D3D12_GENERATED_DIRECTORY}/gfx-vs.cso
+            -DPIXEL=${HENIAUI_D3D12_GENERATED_DIRECTORY}/gfx-ps.cso
+            -DOUTPUT=${HENIAUI_D3D12_GFX_SHADER_HEADER}
+            -DNAMESPACE=henia::backend::d3d12::generated::gfx
+            -DPACKAGE_KEY=gfx-v1-vs_5_1-ps_5_1
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateEmbeddedShader.cmake"
+        DEPENDS
+            HeniaUIShaderCompiler
+            shaders/d3d12/gfx.hlsl
+            cmake/GenerateEmbeddedShader.cmake
+        COMMENT "Compiling and embedding HeniaUI D3D12 gfx shaders"
+        VERBATIM
+    )
+
     add_library(HeniaUIWin32 STATIC
         src/platform/win32/Win32Clipboard.cpp
         src/platform/win32/Win32FontLoader.cpp
@@ -209,6 +289,9 @@ if(WIN32)
     add_library(HeniaUID3D12 STATIC
         src/backend/d3d12/D3D12Renderer.cpp
         src/backend/d3d12/D3D12RenderDevice.cpp
+        src/backend/d3d12/D3D12ShaderPackage.cpp
+        "${HENIAUI_D3D12_UI_SHADER_HEADER}"
+        "${HENIAUI_D3D12_GFX_SHADER_HEADER}"
     )
     add_library(HeniaUI::D3D12 ALIAS HeniaUID3D12)
     target_compile_features(HeniaUID3D12 PUBLIC cxx_std_23)
@@ -217,12 +300,21 @@ if(WIN32)
         PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+        PRIVATE
+            "${HENIAUI_D3D12_GENERATED_DIRECTORY}"
     )
     target_link_libraries(
         HeniaUID3D12
         PUBLIC HeniaUI::Core HeniaUI::Gfx
-        PRIVATE d3d12 d3dcompiler dxgi
+        PRIVATE d3d12 dxgi
     )
+    if(HENIAUI_D3D12_RUNTIME_SHADER_COMPILATION)
+        target_compile_definitions(
+            HeniaUID3D12 PRIVATE
+            $<$<CONFIG:Debug>:HENIAUI_D3D12_RUNTIME_SHADER_COMPILATION>
+        )
+        target_link_libraries(HeniaUID3D12 PRIVATE $<$<CONFIG:Debug>:d3dcompiler>)
+    endif()
     target_compile_definitions(HeniaUID3D12 PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
     if(MSVC)
         target_compile_options(HeniaUID3D12 PRIVATE /W4 /permissive- /utf-8 /GR-)
@@ -479,6 +571,64 @@ if(HENIAUI_BUILD_TESTS)
         endif()
         set_target_properties(HeniaUID3D12GfxTests PROPERTIES FOLDER "HeniaUI/Tests")
         add_test(NAME HeniaUI.D3D12.Gfx COMMAND HeniaUID3D12GfxTests)
+
+        add_executable(
+            HeniaUID3D12ShaderPackageLinkTests
+            tests/D3D12ShaderPackageLinkTests.cpp
+        )
+        target_link_libraries(
+            HeniaUID3D12ShaderPackageLinkTests PRIVATE HeniaUI::D3D12
+        )
+        target_compile_features(HeniaUID3D12ShaderPackageLinkTests PRIVATE cxx_std_23)
+        target_compile_definitions(
+            HeniaUID3D12ShaderPackageLinkTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
+        )
+        if(MSVC)
+            target_compile_options(
+                HeniaUID3D12ShaderPackageLinkTests PRIVATE /W4 /permissive- /utf-8 /GR-
+            )
+        endif()
+        set_target_properties(
+            HeniaUID3D12ShaderPackageLinkTests PROPERTIES FOLDER "HeniaUI/Tests"
+        )
+        if(HENIAUI_D3D12_RUNTIME_SHADER_COMPILATION)
+            foreach(
+                shader_test
+                HeniaUID3D12Tests
+                HeniaUID3D12GfxTests
+                HeniaUID3D12ShaderPackageLinkTests
+            )
+                target_compile_definitions(
+                    ${shader_test} PRIVATE
+                    $<$<CONFIG:Debug>:HENIAUI_EXPECT_RUNTIME_SHADER_COMPILATION>
+                )
+            endforeach()
+        endif()
+        add_test(
+            NAME HeniaUI.D3D12.ShaderPackageLink
+            COMMAND HeniaUID3D12ShaderPackageLinkTests
+        )
+
+        add_test(
+            NAME HeniaUI.D3D12.ShaderReproducibility.UI
+            COMMAND ${CMAKE_COMMAND}
+                -DCOMPILER=$<TARGET_FILE:HeniaUIShaderCompiler>
+                -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/ui.hlsl
+                -DOUTPUT_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/shader-repro/ui-$<CONFIG>
+                -DENTRY=vertexMain
+                -DTARGET=vs_5_0
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyShaderReproducibility.cmake
+        )
+        add_test(
+            NAME HeniaUI.D3D12.ShaderReproducibility.Gfx
+            COMMAND ${CMAKE_COMMAND}
+                -DCOMPILER=$<TARGET_FILE:HeniaUIShaderCompiler>
+                -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/gfx.hlsl
+                -DOUTPUT_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/shader-repro/gfx-$<CONFIG>
+                -DENTRY=vertexMain
+                -DTARGET=vs_5_1
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyShaderReproducibility.cmake
+        )
 
         add_executable(HeniaUIOpenGlOutputTests tests/OpenGlOutputTests.cpp)
         target_link_libraries(

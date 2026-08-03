@@ -1,5 +1,6 @@
 #include "henia/gfx/ShapeBatch3D.h"
 #include "henia/gfx/backend/d3d12/D3D12RenderDevice.h"
+#include "henia/backend/d3d12/D3D12ShaderPackage.h"
 
 #include "D3D12Validation.h"
 #include "D3D12HostDraw.h"
@@ -27,6 +28,12 @@ static_assert(!std::is_move_constructible_v<henia::gfx::D3D12RenderDevice>);
 static_assert(!std::is_move_assignable_v<henia::gfx::D3D12RenderDevice>);
 
 using Microsoft::WRL::ComPtr;
+
+#if defined(HENIAUI_EXPECT_RUNTIME_SHADER_COMPILATION)
+constexpr bool kExpectedRuntimeShaderCompilation = true;
+#else
+constexpr bool kExpectedRuntimeShaderCompilation = false;
+#endif
 
 [[noreturn]] void fail(const char* message) {
     std::cerr << message << '\n';
@@ -81,6 +88,23 @@ int main() {
         || FAILED(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)))
         || FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) {
         fail("Unable to create the D3D12 WARP gfx device");
+    }
+    const henia::backend::d3d12::ShaderPackageInfo shaderPackage =
+        henia::backend::d3d12::shaderPackageInfo(
+            henia::backend::d3d12::ShaderPackage::Gfx);
+    if (shaderPackage.version.size() != 64
+        || shaderPackage.vertexBytes == 0
+        || shaderPackage.pixelBytes == 0
+        || shaderPackage.pixelVariantBytes != 0
+        || shaderPackage.runtimeCompilationEnabled != kExpectedRuntimeShaderCompilation) {
+        fail("D3D12 gfx embedded shader package metadata is invalid");
+    }
+    ComPtr<ID3D12Device1> device1;
+    ComPtr<ID3D12PipelineLibrary> pipelineLibrary;
+    if (FAILED(device.As(&device1))
+        || FAILED(device1->CreatePipelineLibrary(
+            nullptr, 0, IID_PPV_ARGS(&pipelineLibrary)))) {
+        fail("Unable to create the D3D12 gfx pipeline library");
     }
     D3D12_COMMAND_QUEUE_DESC queueDescription{};
     queueDescription.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -177,12 +201,18 @@ int main() {
             .submissionCapacity = 2,
             .renderTargetFormat = DXGI_FORMAT_R8G8B8A8_UNORM,
             .instanceStorage = henia::backend::d3d12::InstanceStorageStrategy::GpuLocal,
+            .pipelineLibrary = pipelineLibrary.Get(),
     };
     if (!renderer.initialize(*device.Get(), rendererConfiguration)) {
         std::cerr << renderer.lastError() << '\n';
         return EXIT_FAILURE;
     }
     D3D12RenderDevice peerRenderer;
+    if (renderer.statistics().pipelineCacheMisses != 1
+        || renderer.statistics().pipelineCacheStores != 1
+        || renderer.statistics().pipelineCacheHits != 0) {
+        fail("D3D12 gfx pipeline was not populated into the host cache");
+    }
     D3D12GfxConfiguration changedConfiguration = rendererConfiguration;
     changedConfiguration.submissionCapacity = 1;
     if (!peerRenderer.initialize(*device.Get(), rendererConfiguration)
@@ -190,7 +220,9 @@ int main() {
         || peerRenderer.initialize(*device.Get(), changedConfiguration)
         || peerRenderer.lastError()
             != "D3D12 gfx renderer is already initialized with a different configuration"
-        || !peerRenderer.initialized()) {
+        || !peerRenderer.initialized()
+        || peerRenderer.statistics().pipelineCacheHits != 1
+        || peerRenderer.statistics().pipelineCacheMisses != 0) {
         fail("D3D12 gfx lifecycle/configuration validation failed");
     }
     peerRenderer.shutdown();

@@ -199,6 +199,9 @@ target_link_libraries(MyApplication PRIVATE
 - RTTI is not required by the library.
 - OpenGL consumes an already-current context and restores the pipeline state it changes.
 - D3D12 records into a host-owned command list and never waits from the frame path.
+- D3D12 Release builds embed build-validated shader bytecode and can reuse
+  host-owned pipeline libraries without loading the runtime HLSL compiler; see
+  [D3D12 command-list integration](docs/d3d12-integration.md#shader-packages-and-pipeline-libraries).
 - D3D12 instance staging/default memory is split into fence-owned submission
   slots; automatic storage keeps UMA/small packets on upload memory and moves
   larger discrete-GPU packets to GPU-local memory.

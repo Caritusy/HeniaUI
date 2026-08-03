@@ -1,5 +1,6 @@
 #include "henia/ui/Frame.h"
 #include "henia/ui/backend/d3d12/D3D12Renderer.h"
+#include "henia/backend/d3d12/D3D12ShaderPackage.h"
 #include "henia/ui/resource/TextureStore.h"
 
 #include "../src/backend/FixedError.h"
@@ -27,6 +28,12 @@ static_assert(!std::is_move_constructible_v<henia::ui::D3D12Renderer>);
 static_assert(!std::is_move_assignable_v<henia::ui::D3D12Renderer>);
 
 using Microsoft::WRL::ComPtr;
+
+#if defined(HENIAUI_EXPECT_RUNTIME_SHADER_COMPILATION)
+constexpr bool kExpectedRuntimeShaderCompilation = true;
+#else
+constexpr bool kExpectedRuntimeShaderCompilation = false;
+#endif
 
 [[nodiscard]] D3D12_HEAP_PROPERTIES heapProperties(D3D12_HEAP_TYPE type) noexcept {
     D3D12_HEAP_PROPERTIES properties{};
@@ -97,6 +104,23 @@ int main() {
             IID_PPV_ARGS(&device)))) {
         fail("Unable to create the D3D12 WARP device");
     }
+    const henia::backend::d3d12::ShaderPackageInfo shaderPackage =
+        henia::backend::d3d12::shaderPackageInfo(
+            henia::backend::d3d12::ShaderPackage::Ui);
+    if (shaderPackage.version.size() != 64
+        || shaderPackage.vertexBytes == 0
+        || shaderPackage.pixelBytes == 0
+        || shaderPackage.pixelVariantBytes == 0
+        || shaderPackage.runtimeCompilationEnabled != kExpectedRuntimeShaderCompilation) {
+        fail("D3D12 UI embedded shader package metadata is invalid");
+    }
+    ComPtr<ID3D12Device1> device1;
+    ComPtr<ID3D12PipelineLibrary> pipelineLibrary;
+    if (FAILED(device.As(&device1))
+        || FAILED(device1->CreatePipelineLibrary(
+            nullptr, 0, IID_PPV_ARGS(&pipelineLibrary)))) {
+        fail("Unable to create the D3D12 UI pipeline library");
+    }
 
     D3D12_COMMAND_QUEUE_DESC queueDescription{};
     queueDescription.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -147,6 +171,7 @@ int main() {
         .textureCapacity = 2,
         .textureUploadBatchCapacity = 3,
         .instanceStorage = henia::backend::d3d12::InstanceStorageStrategy::GpuLocal,
+        .pipelineLibrary = pipelineLibrary.Get(),
     };
     if (!renderer.initialize(
             *device.Get(),
@@ -157,6 +182,11 @@ int main() {
         return EXIT_FAILURE;
     }
     D3D12Renderer peerRenderer;
+    if (renderer.statistics().pipelineCacheMisses != 4
+        || renderer.statistics().pipelineCacheStores != 4
+        || renderer.statistics().pipelineCacheHits != 0) {
+        fail("D3D12 UI pipelines were not populated into the host cache");
+    }
     D3D12RendererConfiguration changedConfiguration = rendererConfiguration;
     changedConfiguration.batchCapacity = 7;
     if (!peerRenderer.initialize(
@@ -167,7 +197,9 @@ int main() {
             *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, changedConfiguration)
         || peerRenderer.lastError()
             != "D3D12 renderer is already initialized with a different configuration"
-        || !peerRenderer.initialized()) {
+        || !peerRenderer.initialized()
+        || peerRenderer.statistics().pipelineCacheHits != 4
+        || peerRenderer.statistics().pipelineCacheMisses != 0) {
         fail("D3D12 renderer lifecycle/configuration validation failed");
     }
     peerRenderer.shutdown();

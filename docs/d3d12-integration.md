@@ -32,6 +32,36 @@ Initialization verifies that the configured device supports the RT/DS formats
 and sample counts. D3D12 exposes no query for the command list's current OM
 formats, so the final attachment match remains an explicit host obligation.
 
+## Shader packages and pipeline libraries
+
+The D3D12 target compiles `shaders/d3d12/ui.hlsl` and
+`shaders/d3d12/gfx.hlsl` during the CMake build, then embeds the validated DXBC
+in `HeniaUID3D12`. Release initialization consumes only that bytecode and does
+not link or load `d3dcompiler`. A shader syntax error therefore fails the build
+with the original source path and compiler diagnostic instead of surfacing in
+the host process.
+
+`backend::d3d12::shaderPackageInfo()` exposes the deterministic package hash,
+byte counts, and whether developer runtime compilation is active. The hash
+covers the HLSL source, compiler profile/defines, and every embedded blob.
+Repeated build-time compilation is checked for byte-for-byte reproducibility.
+Source distributions include the HLSL; installed packages need only the static
+library because all required runtime artifacts are embedded.
+
+For local shader iteration, configure
+`HENIAUI_D3D12_RUNTIME_SHADER_COMPILATION=ON`. Only the Debug configuration then
+recompiles the embedded source during renderer initialization and links
+`d3dcompiler`; Release remains on the precompiled path.
+
+Both renderer configurations accept an optional host-owned
+`ID3D12PipelineLibrary`. The library is borrowed only for `initialize()` and
+must belong to the same device. Cache names include the shader package hash,
+renderer family, RT/DS formats, sample count, blend variant, and depth variant,
+so incompatible PSOs cannot alias. Cache hits, misses, stores, and failed stores
+are reported in renderer statistics. HeniaUI does not serialize the library;
+the host may call `GetSerializedSize()`/`Serialize()` and persist the bytes using
+its own adapter/driver invalidation policy.
+
 ## Instance-storage strategy
 
 Both D3D12 configurations expose `instanceStorage` and

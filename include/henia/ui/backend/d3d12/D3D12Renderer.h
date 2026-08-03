@@ -29,6 +29,9 @@ struct D3D12RendererConfiguration final {
     // Must match the transfer function of renderTargetFormat. For example,
     // Srgb requires DXGI_FORMAT_R8G8B8A8_UNORM_SRGB rather than its UNORM peer.
     RenderTargetColorSpace targetColorSpace = RenderTargetColorSpace::Linear;
+    // Optional host-owned cache. It is borrowed only for initialize() and must
+    // have been created by the same device.
+    ID3D12PipelineLibrary* pipelineLibrary = nullptr;
 };
 
 struct D3D12RenderStatistics final {
@@ -68,6 +71,10 @@ struct D3D12RenderStatistics final {
     std::uint64_t submissionSlotBusyRejections = 0;
     std::uint64_t deviceRemovalRejections = 0;
     std::uint64_t lifecycleRejections = 0;
+    std::uint64_t pipelineCacheHits = 0;
+    std::uint64_t pipelineCacheMisses = 0;
+    std::uint64_t pipelineCacheStores = 0;
+    std::uint64_t pipelineCacheStoreFailures = 0;
     bool adapterArchitectureKnown = false;
     bool adapterUma = true;
     RenderProfile profile{};

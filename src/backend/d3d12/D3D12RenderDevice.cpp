@@ -4,14 +4,18 @@
 
 #include "../FixedError.h"
 #include "../ProfileTimeline.h"
+#include "GfxShaders.generated.h"
 
+#if defined(HENIAUI_D3D12_RUNTIME_SHADER_COMPILATION)
 #include <d3dcompiler.h>
+#endif
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <type_traits>
@@ -27,174 +31,6 @@ static_assert(std::is_standard_layout_v<BoxInstance>);
 static_assert(sizeof(BoxInstance) == 64);
 
 constexpr std::size_t kDepthPipelineCount = 15;
-
-constexpr const char* kShaderSource = R"hlsl(
-cbuffer FrameConstants : register(b0) {
-    float4x4 viewProjection;
-    float2 viewportSize;
-    float timeSeconds;
-    uint frameFlags;
-};
-
-struct VertexInput {
-    float4 minimumAndWidth : INSTANCE_MINIMUM_WIDTH;
-    float4 maximumAndHue : INSTANCE_MAXIMUM_HUE;
-    float4 color : INSTANCE_COLOR;
-    uint effects : INSTANCE_EFFECTS;
-    uint vertexId : SV_VertexID;
-};
-
-struct PixelInput {
-    float4 position : SV_Position;
-    nointerpolation float4 color : COLOR;
-    noperspective float edgeAcross : EDGE_ACROSS;
-    noperspective float edgeAlong : EDGE_ALONG;
-    nointerpolation float segmentLength : SEGMENT_LENGTH;
-    nointerpolation float halfWidth : HALF_WIDTH;
-    nointerpolation float hueOffset : HUE_OFFSET;
-    nointerpolation uint effects : EFFECTS;
-    nointerpolation float validEdge : VALID_EDGE;
-};
-
-static const int2 edges[12] = {
-    int2(0, 1), int2(2, 3), int2(0, 2), int2(1, 3),
-    int2(4, 5), int2(6, 7), int2(4, 6), int2(5, 7),
-    int2(0, 4), int2(1, 5), int2(2, 6), int2(3, 7)
-};
-static const float2 quad[6] = {
-    float2(0.0, -1.0), float2(1.0, -1.0), float2(1.0, 1.0),
-    float2(0.0, -1.0), float2(1.0, 1.0), float2(0.0, 1.0)
-};
-
-float3 corner(int code) {
-    return float3(float(code & 1), float((code >> 1) & 1), float((code >> 2) & 1));
-}
-
-float planeDistance(float4 clipPoint, int planeIndex, bool zeroToOne) {
-    if (planeIndex == 0) return clipPoint.w + clipPoint.x;
-    if (planeIndex == 1) return clipPoint.w - clipPoint.x;
-    if (planeIndex == 2) return clipPoint.w + clipPoint.y;
-    if (planeIndex == 3) return clipPoint.w - clipPoint.y;
-    if (planeIndex == 4) return zeroToOne ? clipPoint.z : clipPoint.w + clipPoint.z;
-    if (planeIndex == 5) return clipPoint.w - clipPoint.z;
-    return clipPoint.w - 0.0001;
-}
-
-bool clipAgainstPlane(
-    inout float4 startClip,
-    inout float4 finishClip,
-    int plane,
-    bool zeroToOne) {
-    float startDistance = planeDistance(startClip, plane, zeroToOne);
-    float finishDistance = planeDistance(finishClip, plane, zeroToOne);
-    if (!isfinite(startDistance) || !isfinite(finishDistance)) return false;
-    bool startInside = startDistance >= 0.0;
-    bool finishInside = finishDistance >= 0.0;
-    if (!startInside && !finishInside) return false;
-    if (startInside && finishInside) return true;
-
-    float denominator = startDistance - finishDistance;
-    if (abs(denominator) <= 1e-20 || !isfinite(denominator)) return false;
-    float amount = clamp(startDistance / denominator, 0.0, 1.0);
-    if (!isfinite(amount)) return false;
-    float4 clipped = lerp(startClip, finishClip, amount);
-    if (!all(isfinite(clipped))) return false;
-    if (startInside) {
-        finishClip = clipped;
-    } else {
-        startClip = clipped;
-    }
-    return true;
-}
-
-bool clipSegment(inout float4 startClip, inout float4 finishClip, bool zeroToOne) {
-    if (!all(isfinite(startClip)) || !all(isfinite(finishClip))
-        || !clipAgainstPlane(startClip, finishClip, 6, zeroToOne)) {
-        return false;
-    }
-    [unroll]
-    for (int plane = 0; plane < 6; ++plane) {
-        if (!clipAgainstPlane(startClip, finishClip, plane, zeroToOne)) {
-            return false;
-        }
-    }
-    return all(isfinite(startClip)) && all(isfinite(finishClip))
-        && startClip.w >= 0.0001 && finishClip.w >= 0.0001;
-}
-
-PixelInput vertexMain(VertexInput input) {
-    PixelInput output;
-    int edgeIndex = input.vertexId / 6;
-    float2 vertex = quad[input.vertexId % 6];
-    float3 start = lerp(input.minimumAndWidth.xyz, input.maximumAndHue.xyz, corner(edges[edgeIndex].x));
-    float3 finish = lerp(input.minimumAndWidth.xyz, input.maximumAndHue.xyz, corner(edges[edgeIndex].y));
-    float4 startClip = mul(viewProjection, float4(start, 1.0));
-    float4 finishClip = mul(viewProjection, float4(finish, 1.0));
-    bool zeroToOne = (frameFlags & 1u) == 0u;
-    output.validEdge = clipSegment(startClip, finishClip, zeroToOne) ? 1.0 : 0.0;
-
-    output.halfWidth = max(input.minimumAndWidth.w, 0.5) * 0.5;
-    float fringe = 1.25;
-    float expandedWidth = output.halfWidth + fringe;
-    output.color = input.color;
-    output.edgeAcross = 0.0;
-    output.edgeAlong = 0.0;
-    output.segmentLength = 0.0;
-    output.hueOffset = input.maximumAndHue.w;
-    output.effects = input.effects;
-    if (output.validEdge < 0.5) {
-        output.position = float4(2.0, 2.0, 2.0, 1.0);
-        return output;
-    }
-
-    float2 startNdc = startClip.xy / startClip.w;
-    float2 finishNdc = finishClip.xy / finishClip.w;
-    float2 directionPixels = (finishNdc - startNdc) * viewportSize * 0.5;
-    output.segmentLength = length(directionPixels);
-    float2 direction = output.segmentLength > 0.0001
-        ? directionPixels / output.segmentLength
-        : float2(1.0, 0.0);
-    float2 normalPixels = float2(-direction.y, direction.x);
-    bool finishVertex = vertex.x > 0.5;
-    output.edgeAlong = finishVertex ? output.segmentLength + fringe : -fringe;
-    output.edgeAcross = vertex.y * expandedWidth;
-    float capOffset = finishVertex ? fringe : -fringe;
-    float2 offsetPixels = direction * capOffset
-        + normalPixels * expandedWidth * vertex.y;
-    float2 offsetNdc = offsetPixels * 2.0 / viewportSize;
-    float4 endpoint = finishVertex ? finishClip : startClip;
-    endpoint.xy += offsetNdc * endpoint.w;
-    if (!zeroToOne) {
-        endpoint.z = endpoint.z * 0.5 + endpoint.w * 0.5;
-    }
-    output.position = endpoint;
-    return output;
-}
-
-float3 hue(float value) {
-    float3 shifted = abs(frac(value + float3(0.0, 0.6666667, 0.3333333)) * 6.0 - 3.0);
-    return saturate(shifted - 1.0);
-}
-
-float4 pixelMain(PixelInput input) : SV_Target {
-    clip(input.validEdge - 0.5);
-    float2 centered = float2(
-        input.edgeAlong - input.segmentLength * 0.5,
-        input.edgeAcross);
-    float2 outside = abs(centered) - float2(input.segmentLength * 0.5, input.halfWidth);
-    float distanceToEdge = length(max(outside, 0.0))
-        + min(max(outside.x, outside.y), 0.0);
-    float antiAlias = max(fwidth(distanceToEdge), 0.75);
-    float coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
-    float4 color = input.color;
-    if ((input.effects & 1u) != 0u) {
-        color.rgb *= hue(frac(timeSeconds * 0.08 + input.hueOffset));
-    }
-    color.a *= coverage;
-    clip(color.a - 0.001);
-    return float4(color.rgb * color.a, color.a);
-}
-)hlsl";
 
 struct FrameConstants final {
     std::array<float, 16> viewProjection{};
@@ -255,6 +91,7 @@ struct AdapterArchitecture final {
         || strategy == Strategy::GpuLocal;
 }
 
+#if defined(HENIAUI_D3D12_RUNTIME_SHADER_COMPILATION)
 [[nodiscard]] bool compileShader(
     const char* entry,
     const char* target,
@@ -262,8 +99,8 @@ struct AdapterArchitecture final {
     henia::detail::FixedError& error) noexcept {
     ComPtr<ID3DBlob> errors;
     const HRESULT result = D3DCompile(
-        kShaderSource,
-        std::strlen(kShaderSource),
+        henia::backend::d3d12::generated::gfx::kSource,
+        sizeof(henia::backend::d3d12::generated::gfx::kSource) - 1U,
         "HeniaUI.Gfx",
         nullptr,
         nullptr,
@@ -281,6 +118,7 @@ struct AdapterArchitecture final {
     }
     return false;
 }
+#endif
 
 [[nodiscard]] D3D12_COMPARISON_FUNC compareFunction(CompareOp operation) noexcept {
     switch (operation) {
@@ -341,6 +179,34 @@ struct AdapterArchitecture final {
         std::chrono::steady_clock::now() - started).count());
 }
 
+struct PipelineName final {
+    std::array<wchar_t, 192> value{};
+};
+
+[[nodiscard]] PipelineName pipelineName(
+    std::size_t variant,
+    const D3D12GfxConfiguration& configuration) noexcept {
+    std::array<char, 192> ascii{};
+    const std::string_view version = henia::backend::d3d12::generated::gfx::kVersion;
+    const int written = std::snprintf(
+        ascii.data(),
+        ascii.size(),
+        "HeniaUI.Gfx.%.*s.v%zu.rtv%u.dsv%u.s%u",
+        static_cast<int>(version.size()),
+        version.data(),
+        variant,
+        static_cast<unsigned>(configuration.renderTargetFormat),
+        static_cast<unsigned>(configuration.depthStencilFormat),
+        configuration.sampleCount);
+    PipelineName result;
+    if (written <= 0 || static_cast<std::size_t>(written) >= ascii.size()) return result;
+    for (int index = 0; index <= written; ++index) {
+        result.value[static_cast<std::size_t>(index)] =
+            static_cast<unsigned char>(ascii[static_cast<std::size_t>(index)]);
+    }
+    return result;
+}
+
 } // namespace
 
 struct D3D12RenderDevice::Implementation final {
@@ -375,8 +241,9 @@ struct D3D12RenderDevice::Implementation final {
     [[nodiscard]] bool initialize(ID3D12Device& device, D3D12GfxConfiguration value);
     [[nodiscard]] bool createPipeline(
         ID3D12Device& device,
-        ID3DBlob& vertexShader,
-        ID3DBlob& pixelShader,
+        ID3D12PipelineLibrary* pipelineLibrary,
+        D3D12_SHADER_BYTECODE vertexShader,
+        D3D12_SHADER_BYTECODE pixelShader,
         DepthState depth) noexcept;
     [[nodiscard]] bool record(
         const InstanceBatch& batch,
@@ -479,6 +346,14 @@ bool D3D12RenderDevice::Implementation::initialize(
     }
     ownerDevice = &device;
     configuration = value;
+    configuration.pipelineLibrary = nullptr;
+    if (value.pipelineLibrary != nullptr
+        && !validateDeviceChild(
+            *value.pipelineLibrary,
+            "D3D12 gfx pipeline library belongs to a different device")) {
+        shutdown();
+        return false;
+    }
     const AdapterArchitecture architecture = queryAdapterArchitecture(device);
     adapterArchitectureKnown = architecture.known;
     adapterUma = architecture.uma;
@@ -493,12 +368,25 @@ bool D3D12RenderDevice::Implementation::initialize(
         error.assign(visibilityList.lastError().data(), visibilityList.lastError().size());
         return false;
     }
-    ComPtr<ID3DBlob> vertexShader;
-    ComPtr<ID3DBlob> pixelShader;
-    if (!compileShader("vertexMain", "vs_5_1", vertexShader, error)
-        || !compileShader("pixelMain", "ps_5_1", pixelShader, error)) {
+#if defined(HENIAUI_D3D12_RUNTIME_SHADER_COMPILATION)
+    ComPtr<ID3DBlob> vertexShaderBlob;
+    ComPtr<ID3DBlob> pixelShaderBlob;
+    if (!compileShader("vertexMain", "vs_5_1", vertexShaderBlob, error)
+        || !compileShader("pixelMain", "ps_5_1", pixelShaderBlob, error)) {
         return false;
     }
+    const D3D12_SHADER_BYTECODE vertexShader{
+        vertexShaderBlob->GetBufferPointer(), vertexShaderBlob->GetBufferSize()};
+    const D3D12_SHADER_BYTECODE pixelShader{
+        pixelShaderBlob->GetBufferPointer(), pixelShaderBlob->GetBufferSize()};
+#else
+    const D3D12_SHADER_BYTECODE vertexShader{
+        henia::backend::d3d12::generated::gfx::kVertexShader,
+        sizeof(henia::backend::d3d12::generated::gfx::kVertexShader)};
+    const D3D12_SHADER_BYTECODE pixelShader{
+        henia::backend::d3d12::generated::gfx::kPixelShader,
+        sizeof(henia::backend::d3d12::generated::gfx::kPixelShader)};
+#endif
     D3D12_ROOT_PARAMETER parameter{};
     parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameter.Constants.ShaderRegister = 0;
@@ -533,11 +421,12 @@ bool D3D12RenderDevice::Implementation::initialize(
         error = "D3D12 failed to create the gfx indirect draw signature";
         return false;
     }
-    if (!createPipeline(device, *vertexShader.Get(), *pixelShader.Get(), {})) return false;
+    statistics = {};
+    if (!createPipeline(device, value.pipelineLibrary, vertexShader, pixelShader, {})) return false;
     if (configuration.depthStencilFormat != DXGI_FORMAT_UNKNOWN) {
         for (std::uint8_t operation = 0; operation <= static_cast<std::uint8_t>(CompareOp::Always); ++operation) {
             for (bool write : {false, true}) {
-                if (!createPipeline(device, *vertexShader.Get(), *pixelShader.Get(), {
+                if (!createPipeline(device, value.pipelineLibrary, vertexShader, pixelShader, {
                         .enabled = true,
                         .writeEnabled = write,
                         .compare = static_cast<CompareOp>(operation),
@@ -605,7 +494,6 @@ bool D3D12RenderDevice::Implementation::initialize(
             return false;
         }
     }
-    statistics = {};
     profileTimeline.reset();
     statistics.adapterArchitectureKnown = adapterArchitectureKnown;
     statistics.adapterUma = adapterUma;
@@ -619,7 +507,11 @@ bool D3D12RenderDevice::Implementation::initialize(
 }
 
 bool D3D12RenderDevice::Implementation::createPipeline(
-    ID3D12Device& device, ID3DBlob& vertexShader, ID3DBlob& pixelShader, DepthState depth) noexcept {
+    ID3D12Device& device,
+    ID3D12PipelineLibrary* pipelineLibrary,
+    D3D12_SHADER_BYTECODE vertexShader,
+    D3D12_SHADER_BYTECODE pixelShader,
+    DepthState depth) noexcept {
     constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 4> inputs{{
         {"INSTANCE_MINIMUM_WIDTH", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
         {"INSTANCE_MAXIMUM_HUE", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
@@ -628,8 +520,8 @@ bool D3D12RenderDevice::Implementation::createPipeline(
     }};
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
     description.pRootSignature = rootSignature.Get();
-    description.VS = {vertexShader.GetBufferPointer(), vertexShader.GetBufferSize()};
-    description.PS = {pixelShader.GetBufferPointer(), pixelShader.GetBufferSize()};
+    description.VS = vertexShader;
+    description.PS = pixelShader;
     description.BlendState = blendDescription();
     description.SampleMask = UINT_MAX;
     description.RasterizerState = rasterizerDescription();
@@ -640,9 +532,28 @@ bool D3D12RenderDevice::Implementation::createPipeline(
     description.RTVFormats[0] = configuration.renderTargetFormat;
     description.DSVFormat = depth.enabled ? configuration.depthStencilFormat : DXGI_FORMAT_UNKNOWN;
     description.SampleDesc.Count = configuration.sampleCount;
-    if (FAILED(device.CreateGraphicsPipelineState(&description, IID_PPV_ARGS(&pipelines[pipelineIndex(depth)])))) {
+    ComPtr<ID3D12PipelineState>& output = pipelines[pipelineIndex(depth)];
+    const PipelineName name = pipelineName(pipelineIndex(depth), configuration);
+    if (pipelineLibrary != nullptr) {
+        if (SUCCEEDED(pipelineLibrary->LoadGraphicsPipeline(
+                name.value.data(),
+                &description,
+                IID_PPV_ARGS(&output)))) {
+            ++statistics.pipelineCacheHits;
+            return true;
+        }
+        ++statistics.pipelineCacheMisses;
+    }
+    if (FAILED(device.CreateGraphicsPipelineState(&description, IID_PPV_ARGS(&output)))) {
         error = "D3D12 failed to create a gfx box pipeline";
         return false;
+    }
+    if (pipelineLibrary != nullptr) {
+        if (SUCCEEDED(pipelineLibrary->StorePipeline(name.value.data(), output.Get()))) {
+            ++statistics.pipelineCacheStores;
+        } else {
+            ++statistics.pipelineCacheStoreFailures;
+        }
     }
     return true;
 }
