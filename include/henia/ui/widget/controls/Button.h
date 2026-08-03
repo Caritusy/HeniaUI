@@ -9,16 +9,17 @@
 namespace henia::ui {
 
 struct ButtonStyle final {
-    FontHandle font{};
-    float fontSize = 14.0F;
-    Color textColor{0.90F, 0.95F, 0.98F, 1.0F};
-    Color background{0.046F, 0.064F, 0.092F, 1.0F};
-    Color hover{0.060F, 0.092F, 0.125F, 1.0F};
-    Color pressed{0.075F, 0.125F, 0.165F, 1.0F};
-    Color border{0.12F, 0.20F, 0.28F, 1.0F};
-    float borderWidth = 1.0F;
-    float radius = 8.0F;
-    Insets padding{14.0F, 9.0F, 14.0F, 9.0F};
+    ThemeProperty<FontHandle> font;
+    ThemeProperty<float> fontSize;
+    ThemeProperty<Color> textColor;
+    ThemeProperty<Color> background;
+    ThemeProperty<Color> hover;
+    ThemeProperty<Color> pressed;
+    ThemeProperty<Color> border;
+    ThemeProperty<float> borderWidth;
+    ThemeProperty<float> radius;
+    ThemeProperty<Insets> padding;
+    ThemeProperty<float> controlHeight;
 };
 
 class Button final : public Widget {
@@ -28,6 +29,7 @@ public:
     void setText(std::string text);
     [[nodiscard]] std::string_view text() const noexcept;
     void setStyle(ButtonStyle style) noexcept;
+    [[nodiscard]] const ButtonStyle& style() const noexcept;
     void setOnClick(Callback<> callback) noexcept;
     [[nodiscard]] bool acceptsPointerInput() const noexcept override;
     [[nodiscard]] bool acceptsKeyboardFocus() const noexcept override;

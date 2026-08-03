@@ -94,9 +94,17 @@ void UiDocument::setViewport(Vec2 value) noexcept {
 Vec2 UiDocument::viewport() const noexcept { return mViewport; }
 
 void UiDocument::setTheme(Theme themeValue) noexcept {
+    if (mTheme == themeValue) {
+        return;
+    }
+    const bool layoutChanged = !mTheme.layoutEquivalent(themeValue);
     mTheme = themeValue;
     if (mRoot != nullptr) {
-        mRoot->markPaintDirtyRecursive();
+        if (layoutChanged) {
+            mRoot->markLayoutDirtyRecursive();
+        } else {
+            mRoot->markPaintDirtyRecursive();
+        }
     }
 }
 

@@ -209,6 +209,11 @@ target_link_libraries(MyApplication PRIVATE
 leaf rebuilds only its affected branch; unrelated sibling `onPaint()` output and
 compiled segment data are reused in depth-first draw order. Rebuilt/reused
 subtree and segment totals are observable through `UiDocumentStatistics`.
+`Panel`, `Label`, `Button`, and `NumericInput` resolve unset style
+properties from the owning document `Theme`. Assigning a style property creates
+a stable widget-local override; calling `reset()` on it restores inheritance.
+Color-only theme changes rebuild paint segments without layout, while inherited
+font and control metrics invalidate measurement recursively.
 `Panel`, `Label`, `Button`, `NumericInput`, `TextInput`, `Checkbox`, `Toggle`,
 `Slider`, `ComboBox`, `TabBar`, `ScrollContainer`, `ListView`, `Tooltip`,
 `PopupLayer`, `ColorPicker`, `KeyBindingEditor`, and `TreeView` use direct

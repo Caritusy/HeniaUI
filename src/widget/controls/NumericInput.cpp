@@ -6,11 +6,80 @@
 #include <utility>
 
 namespace henia::ui {
+namespace {
+
+struct ResolvedNumericInputStyle final {
+    FontHandle font{};
+    float fontSize = 14.0F;
+    Color textColor{};
+    Color mutedText{};
+    Color background{};
+    Color hover{};
+    Color pressed{};
+    Color border{};
+    Color focus{};
+    float borderWidth = 1.0F;
+    float radius = 8.0F;
+    float controlWidth = 176.0F;
+    float controlHeight = 36.0F;
+    float stepButtonWidth = 40.0F;
+    Insets padding{};
+};
+
+[[nodiscard]] ResolvedNumericInputStyle resolve(
+    const NumericInputStyle& style,
+    const Theme& theme) noexcept {
+    const float scale = std::max(theme.scale, 0.0F);
+    return {
+        .font = style.font.value_or(theme.font),
+        .fontSize = style.fontSize.value_or(theme.fontSize * scale),
+        .textColor = style.textColor.value_or(theme.textPrimary),
+        .mutedText = style.mutedText.value_or(theme.textMuted),
+        .background = style.background.value_or(theme.surface),
+        .hover = style.hover.value_or(theme.surfaceRaised),
+        .pressed = style.pressed.value_or(theme.surfaceHover),
+        .border = style.border.value_or(theme.border),
+        .focus = style.focus.value_or(theme.accent),
+        .borderWidth = style.borderWidth.value_or(theme.borderWidth * scale),
+        .radius = style.radius.value_or(theme.cornerRadius * scale),
+        .controlWidth = style.controlWidth.value_or(theme.controlWidth * scale),
+        .controlHeight = style.controlHeight.value_or(theme.controlHeight * scale),
+        .stepButtonWidth = style.stepButtonWidth.value_or(theme.stepButtonWidth * scale),
+        .padding = style.padding.value_or(Insets{
+            theme.controlPaddingHorizontal * scale,
+            theme.controlPaddingVertical * scale,
+            theme.controlPaddingHorizontal * scale,
+            theme.controlPaddingVertical * scale,
+        }),
+    };
+}
+
+} // namespace
 
 NumericInput::NumericInput(double initialValue, NumericInputStyle style)
     : Widget(WidgetKind::NumericInput), mStyle(style), mValue(initialValue) {
     mValue = std::clamp(mValue, mMinimum, mMaximum);
 }
+
+void NumericInput::setStyle(NumericInputStyle styleValue) noexcept {
+    if (mStyle == styleValue) {
+        return;
+    }
+    const bool layoutChanged = mStyle.font != styleValue.font
+        || mStyle.fontSize != styleValue.fontSize
+        || mStyle.controlWidth != styleValue.controlWidth
+        || mStyle.controlHeight != styleValue.controlHeight
+        || mStyle.stepButtonWidth != styleValue.stepButtonWidth
+        || mStyle.padding != styleValue.padding;
+    mStyle = std::move(styleValue);
+    if (layoutChanged) {
+        markLayoutDirty();
+    } else {
+        markPaintDirty();
+    }
+}
+
+const NumericInputStyle& NumericInput::style() const noexcept { return mStyle; }
 
 void NumericInput::setValue(double valueValue) noexcept {
     const double next = std::clamp(valueValue, mMinimum, mMaximum);
@@ -140,48 +209,50 @@ bool NumericInput::handleInput(const InputEvent& event) {
 }
 
 Vec2 NumericInput::onMeasure(TextPainter&, Constraints) {
-    return {mStyle.controlWidth, mStyle.controlHeight};
+    const ResolvedNumericInputStyle style = resolve(mStyle, inheritedTheme());
+    return {style.controlWidth, style.controlHeight};
 }
 
-void NumericInput::onPaint(Canvas& canvas, TextPainter& textPainter, const Theme&) {
+void NumericInput::onPaint(Canvas& canvas, TextPainter& textPainter, const Theme& theme) {
+    const ResolvedNumericInputStyle style = resolve(mStyle, theme);
     const Rect bounds = frame();
-    canvas.fillRect(bounds, mStyle.background, mStyle.radius);
-    canvas.strokeRect(bounds, focused() ? mStyle.focus : mStyle.border, mStyle.radius, mStyle.borderWidth);
+    canvas.fillRect(bounds, style.background, style.radius);
+    canvas.strokeRect(bounds, focused() ? style.focus : style.border, style.radius, style.borderWidth);
 
-    const float buttonWidth = std::min(mStyle.stepButtonWidth, bounds.width() * 0.4F);
+    const float buttonWidth = std::min(style.stepButtonWidth, bounds.width() * 0.4F);
     const Rect decrement{bounds.min, {bounds.min.x + buttonWidth, bounds.max.y}};
     const Rect increment{{bounds.max.x - buttonWidth, bounds.min.y}, bounds.max};
     const Region activeRegion = pressed() ? mPressedRegion : mHoverRegion;
     if ((hovered() || pressed()) && activeRegion != Region::Value) {
         const Rect target = activeRegion == Region::Increment ? increment : decrement;
-        canvas.fillRect(target, pressed() ? mStyle.pressed : mStyle.hover, mStyle.radius);
+        canvas.fillRect(target, pressed() ? style.pressed : style.hover, style.radius);
     }
     canvas.line(
         {decrement.max.x, bounds.min.y + 6.0F},
         {decrement.max.x, bounds.max.y - 6.0F},
-        mStyle.border,
+        style.border,
         1.0F);
     canvas.line(
         {increment.min.x, bounds.min.y + 6.0F},
         {increment.min.x, bounds.max.y - 6.0F},
-        mStyle.border,
+        style.border,
         1.0F);
 
     const std::string valueText = mEditing ? mEditingText : formatValue();
-    const TextMetrics valueMetrics = textPainter.measure(mStyle.font, mStyle.fontSize, valueText);
+    const TextMetrics valueMetrics = textPainter.measure(style.font, style.fontSize, valueText);
     const float valueMinX = decrement.max.x;
     const float valueWidth = std::max(increment.min.x - valueMinX, 0.0F);
     const float textY = bounds.min.y + std::max((bounds.height() - valueMetrics.height) * 0.5F, 0.0F);
-    textPainter.draw(canvas, mStyle.font, mStyle.fontSize,
+    textPainter.draw(canvas, style.font, style.fontSize,
         {valueMinX + std::max((valueWidth - valueMetrics.width) * 0.5F, 0.0F), textY},
-        mStyle.textColor, valueText);
+        style.textColor, valueText);
 
     const auto drawMinus = [&](const Rect& region) {
         const Vec2 center{
             (region.min.x + region.max.x) * 0.5F,
             (region.min.y + region.max.y) * 0.5F,
         };
-        canvas.line({center.x - 5.0F, center.y}, {center.x + 5.0F, center.y}, mStyle.mutedText, 1.5F);
+        canvas.line({center.x - 5.0F, center.y}, {center.x + 5.0F, center.y}, style.mutedText, 1.5F);
     };
     drawMinus(decrement);
     drawMinus(increment);
@@ -192,13 +263,14 @@ void NumericInput::onPaint(Canvas& canvas, TextPainter& textPainter, const Theme
     canvas.line(
         {incrementCenter.x, incrementCenter.y - 5.0F},
         {incrementCenter.x, incrementCenter.y + 5.0F},
-        mStyle.mutedText,
+        style.mutedText,
         1.5F);
 }
 
 NumericInput::Region NumericInput::regionAt(Vec2 point) const noexcept {
     const Rect bounds = frame();
-    const float buttonWidth = std::min(mStyle.stepButtonWidth, bounds.width() * 0.4F);
+    const ResolvedNumericInputStyle style = resolve(mStyle, inheritedTheme());
+    const float buttonWidth = std::min(style.stepButtonWidth, bounds.width() * 0.4F);
     if (point.x < bounds.min.x + buttonWidth) {
         return Region::Decrement;
     }

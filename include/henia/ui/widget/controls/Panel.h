@@ -10,12 +10,14 @@ enum class LayoutDirection : std::uint8_t {
 };
 
 struct PanelStyle final {
-    Color background{0.0F, 0.0F, 0.0F, 0.0F};
-    Color border{0.0F, 0.0F, 0.0F, 0.0F};
-    float borderWidth = 0.0F;
-    float radius = 0.0F;
-    Insets padding{};
-    float gap = 0.0F;
+    // Unset properties inherit the document Theme; set values are stable
+    // widget-local overrides.
+    ThemeProperty<Color> background;
+    ThemeProperty<Color> border;
+    ThemeProperty<float> borderWidth;
+    ThemeProperty<float> radius;
+    ThemeProperty<Insets> padding;
+    ThemeProperty<float> gap;
     LayoutDirection direction = LayoutDirection::Column;
     bool stretchCrossAxis = true;
 };

@@ -8,9 +8,9 @@
 namespace henia::ui {
 
 struct LabelStyle final {
-    FontHandle font{};
-    float size = 14.0F;
-    Color color{0.90F, 0.95F, 0.98F, 1.0F};
+    ThemeProperty<FontHandle> font;
+    ThemeProperty<float> size;
+    ThemeProperty<Color> color;
 };
 
 class Label final : public Widget {

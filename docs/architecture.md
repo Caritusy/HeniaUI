@@ -171,6 +171,25 @@ replacement and cancel is lossless. `TextInput` adds pointer selection,
 selection/caret/composition painting, single- or multi-line entry, shortcuts,
 and fallback fonts on top of that state.
 
+### Theme cascade and invalidation
+
+The document theme owns semantic colors, inherited typography, control metrics,
+container spacing, and a styling-density scale. `Panel`, `Label`, `Button`,
+and `NumericInput` derive their class defaults from those tokens. Their public
+style structures contain `ThemeProperty<T>` values: an empty property inherits
+the current document token, while a populated property is a stable local
+override. Clearing a property restores inheritance without reconstructing the
+widget tree.
+
+`UiDocument::setTheme()` compares the incoming layout token set separately from
+paint-only tokens. Color, border, and radius changes recursively invalidate
+retained paint segments without discarding measurements. Font, size, control
+dimensions, inherited padding/spacing, or density changes recursively
+invalidate measurement and layout caches. Attached controls resolve the theme
+during both measurement and paint; detached controls use the default theme.
+The density value scales style metrics only and does not replace the explicit
+host input/framebuffer coordinate-transform contract.
+
 ### Widget measurement and panel allocation
 
 Each widget caches its measured size by the normalized pair of minimum/maximum

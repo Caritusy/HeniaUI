@@ -4,6 +4,7 @@
 #include "henia/ui/widget/UiDocument.h"
 #include "henia/ui/widget/controls/Button.h"
 #include "henia/ui/widget/controls/Label.h"
+#include "henia/ui/widget/controls/NumericInput.h"
 #include "henia/ui/widget/controls/Panel.h"
 
 #include <array>
@@ -102,6 +103,13 @@ private:
 
 [[nodiscard]] Vec2 center(Rect rect) noexcept {
     return {(rect.min.x + rect.max.x) * 0.5F, (rect.min.y + rect.max.y) * 0.5F};
+}
+
+[[nodiscard]] bool containsColor(const RenderPacket& packet, Color color) noexcept {
+    return std::any_of(
+        packet.instances().begin(),
+        packet.instances().end(),
+        [color](const DrawInstance& instance) { return instance.color == color; });
 }
 
 void verifyPartialPaint(TextPainter& painter) {
@@ -289,6 +297,154 @@ void verifyStableEmptySnapshots(TextPainter& painter) {
         "nonpositive viewport did not retain its empty snapshot");
 }
 
+void verifyThemeCascade(TextPainter& painter, FontHandle font) {
+    Theme theme{};
+    theme.font = font;
+    theme.panelBackground = {0.04F, 0.06F, 0.09F, 1.0F};
+    theme.panelGap = 4.0F;
+
+    UiDocument document(painter, theme);
+    document.reserve(512, 64);
+    document.setViewport({320.0F, 240.0F});
+    auto root = std::make_unique<Panel>();
+    Panel* panel = root.get();
+    Label& label = root->emplaceChild<Label>("Theme label");
+    Button& button = root->emplaceChild<Button>("Theme button");
+    NumericInput& numeric = root->emplaceChild<NumericInput>(42.0);
+    document.setRoot(std::move(root));
+
+    const RenderPacket initial = document.compose();
+    require(containsColor(initial, theme.panelBackground)
+            && containsColor(initial, theme.textPrimary)
+            && containsColor(initial, theme.surfaceRaised)
+            && containsColor(initial, theme.surface),
+        "default built-in styles did not inherit document theme colors");
+    require(numeric.frame().height() == theme.controlHeight,
+        "numeric input did not inherit the theme control height");
+    const float initialLabelHeight = label.frame().height();
+    const UiDocumentStatistics initialStatistics = document.statistics();
+    const std::uint64_t panelRevision = panel->paintRevision();
+    const std::uint64_t labelRevision = label.paintRevision();
+    const std::uint64_t buttonRevision = button.paintRevision();
+    const std::uint64_t numericRevision = numeric.paintRevision();
+
+    Theme recolored = theme;
+    recolored.panelBackground = {0.20F, 0.04F, 0.08F, 1.0F};
+    recolored.textPrimary = {1.0F, 0.82F, 0.30F, 1.0F};
+    recolored.surfaceRaised = {0.08F, 0.28F, 0.18F, 1.0F};
+    recolored.surface = {0.04F, 0.12F, 0.24F, 1.0F};
+    document.setTheme(recolored);
+    const RenderPacket colorPacket = document.compose();
+    const UiDocumentStatistics colorStatistics = document.statistics();
+    require(colorStatistics.layoutPasses == initialStatistics.layoutPasses
+            && colorStatistics.paintPasses == initialStatistics.paintPasses + 1
+            && panel->paintRevision() == panelRevision + 1
+            && label.paintRevision() == labelRevision + 1
+            && button.paintRevision() == buttonRevision + 1
+            && numeric.paintRevision() == numericRevision + 1,
+        "color-only theme change did not stay paint-only");
+    require(containsColor(colorPacket, recolored.panelBackground)
+            && containsColor(colorPacket, recolored.textPrimary)
+            && containsColor(colorPacket, recolored.surfaceRaised)
+            && containsColor(colorPacket, recolored.surface),
+        "color-only theme change did not repaint built-in controls");
+
+    Theme resized = recolored;
+    resized.fontSize = 20.0F;
+    resized.controlHeight = 52.0F;
+    resized.panelGap = 9.0F;
+    document.setTheme(resized);
+    static_cast<void>(document.compose());
+    const UiDocumentStatistics resizedStatistics = document.statistics();
+    require(resizedStatistics.layoutPasses == colorStatistics.layoutPasses + 1
+            && numeric.frame().height() == resized.controlHeight
+            && label.frame().height() > initialLabelHeight,
+        "layout-affecting theme metrics did not invalidate inherited measurement");
+
+    const Color panelOverride{0.30F, 0.05F, 0.35F, 1.0F};
+    const Color labelOverride{0.25F, 0.95F, 0.65F, 1.0F};
+    const Color buttonOverride{0.75F, 0.18F, 0.10F, 1.0F};
+    const Color numericOverride{0.06F, 0.40F, 0.48F, 1.0F};
+    UiDocument overrideDocument(painter, theme);
+    overrideDocument.reserve(512, 64);
+    overrideDocument.setViewport({320.0F, 260.0F});
+    auto overrideRoot = std::make_unique<Panel>(PanelStyle{
+        .background = panelOverride,
+        .padding = Insets{5.0F, 5.0F, 5.0F, 5.0F},
+        .gap = 7.0F,
+    });
+    Label& overrideLabel = overrideRoot->emplaceChild<Label>(
+        "Override label",
+        LabelStyle{.font = font, .size = 17.0F, .color = labelOverride});
+    Button& overrideButton = overrideRoot->emplaceChild<Button>(
+        "Override button",
+        ButtonStyle{
+            .font = font,
+            .fontSize = 16.0F,
+            .textColor = labelOverride,
+            .background = buttonOverride,
+            .padding = Insets{11.0F, 8.0F, 11.0F, 8.0F},
+            .controlHeight = 44.0F,
+        });
+    NumericInput& overrideNumeric = overrideRoot->emplaceChild<NumericInput>(
+        7.0,
+        NumericInputStyle{
+            .font = font,
+            .fontSize = 16.0F,
+            .textColor = labelOverride,
+            .mutedText = labelOverride,
+            .background = numericOverride,
+            .controlWidth = 190.0F,
+            .controlHeight = 48.0F,
+            .stepButtonWidth = 42.0F,
+            .padding = Insets{10.0F, 8.0F, 10.0F, 8.0F},
+        });
+    Panel* overridePanel = overrideRoot.get();
+    overrideDocument.setRoot(std::move(overrideRoot));
+    const RenderPacket overridden = overrideDocument.compose();
+    const Rect labelFrame = overrideLabel.frame();
+    const Rect buttonFrame = overrideButton.frame();
+    const Rect numericFrame = overrideNumeric.frame();
+    require(containsColor(overridden, panelOverride)
+            && containsColor(overridden, labelOverride)
+            && containsColor(overridden, buttonOverride)
+            && containsColor(overridden, numericOverride),
+        "widget-local style overrides were not applied");
+
+    Theme changed = theme;
+    changed.panelBackground = {0.85F, 0.85F, 0.85F, 1.0F};
+    changed.textPrimary = {0.05F, 0.05F, 0.05F, 1.0F};
+    changed.surfaceRaised = {0.90F, 0.90F, 0.90F, 1.0F};
+    changed.surface = {0.72F, 0.72F, 0.72F, 1.0F};
+    changed.fontSize = 28.0F;
+    changed.controlWidth = 240.0F;
+    changed.controlHeight = 64.0F;
+    changed.stepButtonWidth = 54.0F;
+    changed.controlPaddingHorizontal = 20.0F;
+    changed.controlPaddingVertical = 14.0F;
+    changed.panelPadding = 18.0F;
+    changed.panelGap = 15.0F;
+    changed.scale = 1.5F;
+    overrideDocument.setTheme(changed);
+    const RenderPacket stableOverrides = overrideDocument.compose();
+    require(overrideLabel.frame() == labelFrame
+            && overrideButton.frame() == buttonFrame
+            && overrideNumeric.frame() == numericFrame
+            && containsColor(stableOverrides, panelOverride)
+            && containsColor(stableOverrides, labelOverride)
+            && containsColor(stableOverrides, buttonOverride)
+            && containsColor(stableOverrides, numericOverride),
+        "widget-local overrides changed when the document theme changed");
+
+    ButtonStyle inheritedButtonStyle = overrideButton.style();
+    inheritedButtonStyle.background.reset();
+    overrideButton.setStyle(inheritedButtonStyle);
+    const RenderPacket resetOverride = overrideDocument.compose();
+    require(containsColor(resetOverride, changed.surfaceRaised)
+            && overridePanel->paintRevision() != 0,
+        "clearing a widget override did not restore theme inheritance");
+}
+
 } // namespace
 
 int main() {
@@ -304,6 +460,7 @@ int main() {
     verifyHoverAndPaintOnlyStyles(painter, font);
     verifyReparentedSegmentIdentity(painter);
     verifyStableEmptySnapshots(painter);
+    verifyThemeCascade(painter, font);
 
     std::cout << "HeniaUI retained subtree tests passed\n";
     return EXIT_SUCCESS;

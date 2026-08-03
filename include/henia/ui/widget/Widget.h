@@ -135,6 +135,9 @@ protected:
     [[nodiscard]] virtual bool clipsChildren() const noexcept;
     [[nodiscard]] virtual Rect childrenClipRect() const noexcept;
     [[nodiscard]] bool contains(Vec2 point) const noexcept;
+    // Attached widgets inherit the owning document theme. Detached widgets use
+    // the default theme, preserving direct measure/paint utility.
+    [[nodiscard]] const Theme& inheritedTheme() const noexcept;
     // Container implementations may replace an owned presentation pool.
     // Any document interaction inside the removed subtrees is cleared first.
     void clearChildren();
@@ -156,6 +159,7 @@ private:
     void setPressed(bool pressed) noexcept;
     void setFocused(bool focused) noexcept;
     void markPaintTopologyDirty() noexcept;
+    void markLayoutDirtyRecursive() noexcept;
     void markPaintDirtyRecursive() noexcept;
     void clearPaintDirtyRecursive() noexcept;
 

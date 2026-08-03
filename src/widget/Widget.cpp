@@ -321,6 +321,11 @@ bool Widget::contains(Vec2 point) const noexcept {
         && point.x < mFrame.max.x && point.y < mFrame.max.y;
 }
 
+const Theme& Widget::inheritedTheme() const noexcept {
+    static const Theme defaultTheme{};
+    return mDocument != nullptr ? mDocument->theme() : defaultTheme;
+}
+
 std::unique_ptr<Widget> Widget::detachChild(std::uint64_t identityValue) noexcept {
     const auto iterator = std::find_if(
         mChildren.begin(),
@@ -372,6 +377,16 @@ void Widget::markPaintTopologyDirty() noexcept {
     for (Widget* current = this; current != nullptr; current = current->mParent) {
         current->mSubtreePaintTopologyDirty = true;
         current->mSubtreePaintDirty = true;
+    }
+}
+
+void Widget::markLayoutDirtyRecursive() noexcept {
+    mLayoutDirty = true;
+    mMeasurementDirty = true;
+    mPaintDirty = true;
+    mSubtreePaintDirty = true;
+    for (const std::unique_ptr<Widget>& child : mChildren) {
+        child->markLayoutDirtyRecursive();
     }
 }
 

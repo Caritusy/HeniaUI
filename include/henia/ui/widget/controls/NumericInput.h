@@ -9,27 +9,33 @@
 namespace henia::ui {
 
 struct NumericInputStyle final {
-    FontHandle font{};
-    float fontSize = 14.0F;
-    Color textColor{0.90F, 0.95F, 0.98F, 1.0F};
-    Color mutedText{0.48F, 0.59F, 0.67F, 1.0F};
-    Color background{0.032F, 0.047F, 0.071F, 1.0F};
-    Color hover{0.046F, 0.064F, 0.092F, 1.0F};
-    Color pressed{0.060F, 0.092F, 0.125F, 1.0F};
-    Color border{0.12F, 0.20F, 0.28F, 1.0F};
-    Color focus{0.10F, 0.72F, 0.91F, 1.0F};
-    float borderWidth = 1.0F;
-    float radius = 8.0F;
-    float controlWidth = 176.0F;
-    float controlHeight = 38.0F;
-    float stepButtonWidth = 40.0F;
-    Insets padding{12.0F, 9.0F, 12.0F, 9.0F};
+    ThemeProperty<FontHandle> font;
+    ThemeProperty<float> fontSize;
+    ThemeProperty<Color> textColor;
+    ThemeProperty<Color> mutedText;
+    ThemeProperty<Color> background;
+    ThemeProperty<Color> hover;
+    ThemeProperty<Color> pressed;
+    ThemeProperty<Color> border;
+    ThemeProperty<Color> focus;
+    ThemeProperty<float> borderWidth;
+    ThemeProperty<float> radius;
+    ThemeProperty<float> controlWidth;
+    ThemeProperty<float> controlHeight;
+    ThemeProperty<float> stepButtonWidth;
+    ThemeProperty<Insets> padding;
+
+    friend constexpr bool operator==(
+        const NumericInputStyle&,
+        const NumericInputStyle&) noexcept = default;
 };
 
 class NumericInput final : public Widget {
 public:
     explicit NumericInput(double value = 0.0, NumericInputStyle style = {});
 
+    void setStyle(NumericInputStyle style) noexcept;
+    [[nodiscard]] const NumericInputStyle& style() const noexcept;
     void setValue(double value) noexcept;
     [[nodiscard]] double value() const noexcept;
     void setRange(double minimum, double maximum) noexcept;
