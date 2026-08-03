@@ -2,7 +2,7 @@
 
 #include "henia/backend/d3d12/D3D12InstanceStorage.h"
 #include "henia/backend/d3d12/D3D12SubmissionReuse.h"
-#include "henia/gfx/InstanceBatch.h"
+#include "henia/gfx/VisibilityList.h"
 
 #include <d3d12.h>
 #include <dxgiformat.h>
@@ -45,6 +45,16 @@ struct D3D12GfxStatistics final {
     std::uint64_t gpuLocalFrames = 0;
     std::uint64_t directUploadFrames = 0;
     std::uint64_t viewUpdates = 0;
+    std::uint64_t directVisibilityFrames = 0;
+    std::uint64_t cpuCulledFrames = 0;
+    std::uint64_t indirectDrawCalls = 0;
+    std::uint64_t indirectArgumentUpdates = 0;
+    std::uint64_t visibilitySourceInstances = 0;
+    std::uint64_t visibilityRejectedInstances = 0;
+    std::uint64_t visibilityChunkTests = 0;
+    std::uint64_t visibilityChunkRejectedInstances = 0;
+    std::uint64_t visibilityResultReuses = 0;
+    std::uint64_t visibilityCullingNanoseconds = 0;
     std::uint64_t depthFallbacks = 0;
     std::uint64_t rejectedFrames = 0;
     std::uint64_t invalidInputFrames = 0;
@@ -86,6 +96,13 @@ public:
         const ViewParameters& view,
         ID3D12GraphicsCommandList& commandList,
         std::uint32_t submissionSlot,
+        henia::backend::d3d12::SubmissionReuse submissionReuse = {}) noexcept;
+    [[nodiscard]] bool record(
+        const InstanceBatch& batch,
+        const ViewParameters& view,
+        ID3D12GraphicsCommandList& commandList,
+        std::uint32_t submissionSlot,
+        VisibilityOptions visibility,
         henia::backend::d3d12::SubmissionReuse submissionReuse = {}) noexcept;
     // Associates a resolved host timestamp with a retained successful sample.
     // Unknown, duplicate, expired, and previous-lifetime IDs return false.

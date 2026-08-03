@@ -99,8 +99,9 @@ upload queues, and optional submission-reuse fences are checked against that
 device by COM identity. Device removal is rejected with a recreate diagnostic;
 HeniaUI does not attempt to rebuild host-owned swap-chain state automatically.
 
-Each submission slot owns a persistently mapped upload buffer and, for UI,
-texture generations referenced by that slot's descriptor tables. Before reusing
+Each submission slot owns a persistently mapped upload buffer and, for gfx, a
+mapped indirect-draw argument buffer. UI slots additionally retain texture
+generations referenced by their descriptor tables. Before reusing
 a slot, the host must know that every previously submitted command list using it
 has completed. The optional `SubmissionReuse` argument makes that proof
 checkable at the point immediately before HeniaUI writes or releases slot-owned
@@ -122,8 +123,9 @@ The fence is borrowed only for the call. A null fence with value zero explicitly
 declares that the slot is new or that the host proved completion by another
 mechanism. Supplying only one of the two fields is invalid. A non-null fence must
 belong to the initialization device, must not report device removal, and must
-have reached the requested value. This check protects instance uploads and UI
-texture-generation retention; the host still owns fence signaling and waiting.
+have reached the requested value. This check protects instance uploads, gfx
+indirect arguments, and UI texture-generation retention; the host still owns
+fence signaling and waiting.
 
 UI texture synchronization uses one direct queue identity for the renderer's
 lifetime. Upload buffers, staged textures, command allocators, and command lists

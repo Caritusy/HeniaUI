@@ -491,6 +491,7 @@ struct OpenGlRenderDevice::Implementation final {
     std::size_t capacity = 0;
     std::vector<UploadSlot> uploadSlots;
     henia::detail::OpenGlUploadRing uploadRing;
+    VisibilityList visibilityList;
     henia::detail::ProfileTimeline profileTimeline;
     OpenGlGfxStatistics statistics{};
     henia::detail::FixedError error;
@@ -503,7 +504,8 @@ struct OpenGlRenderDevice::Implementation final {
     [[nodiscard]] bool render(
         const InstanceBatch& batch,
         const ViewParameters& view,
-        bool depthAttachmentAvailable) noexcept;
+        bool depthAttachmentAvailable,
+        VisibilityOptions visibility) noexcept;
     [[nodiscard]] bool shutdown() noexcept;
     void abandon() noexcept;
     [[nodiscard]] henia::detail::UploadFenceStatus pollUploadSlot(std::size_t index) noexcept;
@@ -546,6 +548,10 @@ bool OpenGlRenderDevice::Implementation::initialize(
     profileTimeline.reset();
     uploadSlots.resize(requestedUploadSlots);
     uploadRing.reset(requestedUploadSlots);
+    if (!visibilityList.reserve(requestedCapacity)) {
+        error.assign(visibilityList.lastError().data(), visibilityList.lastError().size());
+        return false;
+    }
     if (!loadFunctions(gl)) {
         error = "OpenGL 3.3 gfx entry points are unavailable";
         return false;
@@ -670,9 +676,10 @@ bool OpenGlRenderDevice::Implementation::initialize(
 bool OpenGlRenderDevice::Implementation::render(
     const InstanceBatch& batch,
     const ViewParameters& view,
-    bool depthAttachmentAvailable) noexcept {
+    bool depthAttachmentAvailable,
+    VisibilityOptions visibility) noexcept {
     const std::uint64_t frameAttemptId = ++statistics.frameAttempts;
-    const BoxInstanceView boxes = batch.boxes();
+    const BoxInstanceView sourceBoxes = batch.boxes();
     if (!ready) {
         ++statistics.rejectedFrames;
         error = "OpenGL gfx renderer is not initialized";
@@ -694,41 +701,70 @@ bool OpenGlRenderDevice::Implementation::render(
         error.assign(issue.data(), issue.size());
         return false;
     }
-    if (boxes.size() > capacity
-        || boxes.size() > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
+    if (const std::string_view issue = validate(visibility); !issue.empty()) {
+        ++statistics.rejectedFrames;
+        ++statistics.invalidInputFrames;
+        error.assign(issue.data(), issue.size());
+        return false;
+    }
+    if (sourceBoxes.size() > capacity
+        || sourceBoxes.size() > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())) {
         ++statistics.rejectedFrames;
         ++statistics.capacityRejectedFrames;
         error = "OpenGL gfx instance count exceeds boxCapacity";
         return false;
     }
-    for (std::size_t pageIndex = 0; pageIndex < batch.boxPageCount(); ++pageIndex) {
-        for (const BoxInstance& box : batch.boxPage(pageIndex)) {
-            if (const std::string_view issue = validate(box); !issue.empty()) {
-                ++statistics.rejectedFrames;
-                ++statistics.invalidInputFrames;
-                error.assign(issue.data(), issue.size());
-                return false;
+    const bool cpuCulling = usesCpuVisibility(visibility, sourceBoxes.size());
+    if (!cpuCulling) {
+        for (std::size_t pageIndex = 0; pageIndex < batch.boxPageCount(); ++pageIndex) {
+            for (const BoxInstance& box : batch.boxPage(pageIndex)) {
+                if (const std::string_view issue = validate(box); !issue.empty()) {
+                    ++statistics.rejectedFrames;
+                    ++statistics.invalidInputFrames;
+                    error.assign(issue.data(), issue.size());
+                    return false;
+                }
             }
         }
     }
+
+    std::span<const BoxInstance> culledBoxes;
+    VisibilityStatistics visibilityStatistics{};
+    if (cpuCulling) {
+        if (!visibilityList.update(batch, view, visibility)) {
+            ++statistics.rejectedFrames;
+            ++statistics.invalidInputFrames;
+            const std::string_view issue = visibilityList.lastError();
+            error.assign(issue.data(), issue.size());
+            return false;
+        }
+        culledBoxes = visibilityList.boxes();
+        visibilityStatistics = visibilityList.statistics();
+    }
+    const std::size_t submittedCount = cpuCulling ? culledBoxes.size() : sourceBoxes.size();
+    const std::uint64_t producerIdentity = cpuCulling
+        ? visibilityList.identity() : batch.identity();
+    const std::uint64_t producerRevision = cpuCulling
+        ? visibilityList.revision() : batch.revision();
 
     const std::span<const DirtyRange> dirtyRanges = batch.dirtyRanges();
     bool dirtyRangesValid = !dirtyRanges.empty();
     std::size_t previousEnd = 0;
     for (const DirtyRange range : dirtyRanges) {
         const bool valid = range.count > 0 && range.offset >= previousEnd
-            && range.offset <= boxes.size() && range.count <= boxes.size() - range.offset;
+            && range.offset <= sourceBoxes.size()
+            && range.count <= sourceBoxes.size() - range.offset;
         if (!valid) {
             dirtyRangesValid = false;
             break;
         }
         previousEnd = range.offset + range.count;
     }
-    const bool partialRequested = batch.revision() > 1
+    const bool partialRequested = !cpuCulling && batch.revision() > 1
         && !batch.requiresFullUpload() && dirtyRangesValid;
     const henia::detail::UploadSelection upload = uploadRing.select(
-        batch.identity(),
-        batch.revision(),
+        producerIdentity,
+        producerRevision,
         partialRequested,
         [this](std::size_t index) noexcept { return pollUploadSlot(index); });
     if (upload.kind == henia::detail::UploadSelectionKind::Exhausted) {
@@ -774,6 +810,10 @@ bool OpenGlRenderDevice::Implementation::render(
             std::size_t sourceOffset = range.offset;
             std::size_t destinationOffset = 0;
             std::size_t remaining = range.count;
+            if (cpuCulling) {
+                std::memcpy(destination, culledBoxes.data() + range.offset, countBytes);
+                remaining = 0;
+            }
             while (remaining > 0) {
                 const std::span<const BoxInstance> page = batch.boxPage(
                     sourceOffset / InstanceBatch::kBoxesPerPage);
@@ -800,8 +840,8 @@ bool OpenGlRenderDevice::Implementation::render(
                 uploadFailure = uploadRange(range);
                 if (uploadFailure != 0) break;
             }
-        } else if (!boxes.empty()) {
-            uploadFailure = uploadRange({0, boxes.size()});
+        } else if (submittedCount != 0) {
+            uploadFailure = uploadRange({0, submittedCount});
         }
         if (uploadFailure != 0) {
             uploadRing.invalidate(upload.slot);
@@ -819,7 +859,7 @@ bool OpenGlRenderDevice::Implementation::render(
             }
             return false;
         }
-        uploadRing.markUploaded(upload.slot, batch.identity(), batch.revision());
+        uploadRing.markUploaded(upload.slot, producerIdentity, producerRevision);
         partialUpload = partial;
         cpuUploadNanoseconds = elapsedNanoseconds(uploadStarted);
     }
@@ -833,7 +873,7 @@ bool OpenGlRenderDevice::Implementation::render(
         return false;
     }
     if (upload.requiresUpload()) {
-        if (boxes.empty()) {
+        if (submittedCount == 0) {
             ++statistics.zeroWorkInstanceRevisions;
         } else if (partialUpload) {
             ++statistics.partialInstanceUploads;
@@ -902,13 +942,13 @@ bool OpenGlRenderDevice::Implementation::render(
         if (restored) error = "OpenGL gfx pipeline state failed";
         return false;
     }
-    if (!boxes.empty()) {
-        gl.drawArraysInstanced(GL_TRIANGLES, 0, 72, static_cast<GLsizei>(boxes.size()));
+    if (submittedCount != 0) {
+        gl.drawArraysInstanced(GL_TRIANGLES, 0, 72, static_cast<GLsizei>(submittedCount));
         ++statistics.drawCalls;
-        statistics.submittedInstances += boxes.size();
+        statistics.submittedInstances += submittedCount;
     }
     const GLenum drawError = consumeOperationErrors();
-    const bool fenced = boxes.empty() || fenceUploadSlot(upload.slot);
+    const bool fenced = submittedCount == 0 || fenceUploadSlot(upload.slot);
     if (drawError != GL_NO_ERROR) {
         const bool restored = restoreState(state);
         ++statistics.rejectedFrames;
@@ -926,17 +966,30 @@ bool OpenGlRenderDevice::Implementation::render(
         return false;
     }
     ++statistics.successfulFrames;
+    if (cpuCulling) {
+        ++statistics.cpuCulledFrames;
+        statistics.visibilitySourceInstances += visibilityStatistics.sourceInstances;
+        statistics.visibilityRejectedInstances += visibilityStatistics.frustumRejectedInstances
+            + visibilityStatistics.applicationMaskRejectedInstances
+            + visibilityStatistics.projectedSizeRejectedInstances;
+        statistics.visibilityChunkTests += visibilityStatistics.chunkTests;
+        statistics.visibilityChunkRejectedInstances += visibilityStatistics.chunkRejectedInstances;
+        statistics.visibilityResultReuses += visibilityStatistics.resultReused ? 1U : 0U;
+        statistics.visibilityCullingNanoseconds += visibilityStatistics.cullingNanoseconds;
+    } else {
+        ++statistics.directVisibilityFrames;
+    }
     const InstanceUploadKind uploadKind = !upload.requiresUpload()
         ? InstanceUploadKind::None
-        : boxes.empty()
+        : submittedCount == 0
             ? InstanceUploadKind::ZeroWorkRevision
             : partialUpload
                 ? InstanceUploadKind::DirtyRanges
                 : InstanceUploadKind::Full;
     static_cast<void>(profileTimeline.complete({
         .frameAttemptId = frameAttemptId,
-        .producerIdentity = batch.identity(),
-        .producerRevision = batch.revision(),
+        .producerIdentity = producerIdentity,
+        .producerRevision = producerRevision,
         .producerBuildNanoseconds = batch.cpuBuildNanoseconds(),
         .cpuUploadNanoseconds = cpuUploadNanoseconds,
         .cpuDrawSubmitNanoseconds = cpuDrawSubmitNanoseconds,
@@ -1190,8 +1243,9 @@ bool OpenGlRenderDevice::initialize(
 bool OpenGlRenderDevice::render(
     const InstanceBatch& batch,
     const ViewParameters& view,
-    bool depthAttachmentAvailable) noexcept {
-    return mImplementation->render(batch, view, depthAttachmentAvailable);
+    bool depthAttachmentAvailable,
+    VisibilityOptions visibility) noexcept {
+    return mImplementation->render(batch, view, depthAttachmentAvailable, visibility);
 }
 bool OpenGlRenderDevice::reportGpuTime(
     std::uint64_t sampleId,

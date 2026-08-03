@@ -2,6 +2,7 @@
 #include <henia/gfx/Math.h>
 #include <henia/gfx/ShapeBatch3D.h>
 #include <henia/gfx/Validation.h>
+#include <henia/gfx/VisibilityList.h>
 #include <henia/ui/Frame.h>
 #include <henia/ui/text/TextEditor.h>
 #include <henia/ui/Validation.h>
@@ -106,10 +107,17 @@ int main() {
     henia::gfx::ShapeBatch3D shapes;
     static_cast<void>(shapes.addBox({}));
     const henia::gfx::InstanceBatch boxes = shapes.snapshot();
+    henia::gfx::VisibilityList visibility;
+    const henia::gfx::ViewParameters visibilityView{.viewport = {8.0F, 8.0F}};
     henia::gfx::Mat4 projection{};
     henia::ui::ScissorRect scissor{};
     return packet.instances().size() == 6 && packet.statistics().effectInstances == 2
         && boxes.boxes().size() == 1
+        && visibility.reserve(1) && visibility.update(
+            boxes,
+            visibilityView,
+            {.mode = henia::gfx::VisibilityMode::CpuFrustum})
+        && visibility.boxes().size() == 1
         && textInput.text() == "A\xE4\xB8\xAD"
         && checkbox.checked() && toggle.checked() && slider.value() == 0.5
         && combo.itemCount() == 2 && tabs.tabCount() == 2 && list.itemCount() == 2

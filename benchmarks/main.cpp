@@ -1,4 +1,6 @@
 #include "henia/gfx/ShapeBatch3D.h"
+#include "henia/gfx/Validation.h"
+#include "henia/gfx/VisibilityList.h"
 #include "henia/ui/Frame.h"
 #include "henia/ui/text/FontStore.h"
 #include "henia/ui/text/TextLayout.h"
@@ -1127,6 +1129,80 @@ template <typename Operation>
     return result;
 }
 
+[[nodiscard]] ScenarioResult benchmarkVisibility(
+    const Options& options,
+    std::size_t boxCount,
+    bool cpuCulling) {
+    using namespace henia::gfx;
+    std::vector<BoxInstance> boxes(boxCount);
+    const std::size_t visibleCount = boxCount / 4U;
+    for (std::size_t index = 0; index < boxes.size(); ++index) {
+        const float localX = static_cast<float>(index % 16U) * 0.08F;
+        const float localY = static_cast<float>((index / 16U) % 16U) * 0.08F;
+        const bool visible = index < visibleCount;
+        const float x = visible ? -0.64F + localX : 3.0F + localX;
+        const float y = -0.64F + localY;
+        boxes[index] = {
+            .minimum = {x, y, 0.25F},
+            .lineWidth = 2.0F,
+            .maximum = {x + 0.04F, y + 0.04F, 0.35F},
+            .hueOffset = static_cast<float>(index % 1024U) / 1024.0F,
+            .color = {0.2F, 0.7F, 0.9F, 0.8F},
+            .effects = BoxEffect::HueCycle,
+        };
+    }
+    ShapeBatch3D builder;
+    builder.reserve(boxes.size());
+    static_cast<void>(builder.replaceBoxes(boxes));
+    const InstanceBatch batch = builder.snapshot();
+    VisibilityList visibility;
+    if (!visibility.reserve(boxCount)) {
+        throw std::runtime_error("Unable to reserve the visibility benchmark workspace");
+    }
+    const std::string name = std::string(cpuCulling ? "visibility_cpu_" : "visibility_direct_")
+        + std::to_string(boxCount) + "_75pct_offscreen";
+    ScenarioResult result = measureScenario(
+        name,
+        options,
+        [&](std::size_t iteration) {
+            ViewParameters view{
+                .viewport = {1920.0F, 1080.0F},
+            };
+            view.viewProjection.values[12] = iteration % 2U == 0 ? 0.0F : 0.0001F;
+            std::uint64_t checksum = iteration;
+            if (cpuCulling) {
+                if (!visibility.update(
+                        batch,
+                        view,
+                        {.mode = VisibilityMode::CpuFrustum})) {
+                    throw std::runtime_error("Visibility benchmark update failed");
+                }
+                checksum ^= visibility.revision() ^ visibility.boxes().size();
+            } else {
+                for (std::size_t pageIndex = 0; pageIndex < batch.boxPageCount(); ++pageIndex) {
+                    for (const BoxInstance& box : batch.boxPage(pageIndex)) {
+                        checksum ^= static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(
+                            box.minimum.x));
+                        checksum ^= validate(box).size();
+                    }
+                }
+            }
+            return IterationPhases{
+                .paintBuildNanoseconds = cpuCulling
+                    ? visibility.statistics().cullingNanoseconds : 0,
+                .checksum = checksum,
+            };
+        });
+    result.drawCalls = 1;
+    result.submittedInstances = cpuCulling ? visibility.boxes().size() : boxCount;
+    result.uploadBytes = result.submittedInstances * sizeof(BoxInstance);
+    result.coldUploadBytes = result.uploadBytes;
+    result.cpuResidentBytes = boxes.capacity() * sizeof(BoxInstance) + batch.storageBytes()
+        + (cpuCulling ? visibility.storageBytes() : 0U);
+    result.gpuBufferBytes = boxCount * sizeof(BoxInstance);
+    return result;
+}
+
 [[nodiscard]] ScenarioResult benchmarkPaged3DStable(const Options& options) {
     using namespace henia::gfx;
     const std::vector<BoxInstance> boxes = createBoxes(kPagedBoxCount);
@@ -1283,6 +1359,14 @@ template <typename Operation>
     const ScenarioResult* recycledList = findScenario(results, "recycled_widget_list_50000");
     const ScenarioResult* full3d = findScenario(results, "large_3d_full_build");
     const ScenarioResult* dirty3d = findScenario(results, "large_3d_dirty_update");
+    const ScenarioResult* visibilityDirectSmall = findScenario(
+        results, "visibility_direct_2048_75pct_offscreen");
+    const ScenarioResult* visibilityCpuSmall = findScenario(
+        results, "visibility_cpu_2048_75pct_offscreen");
+    const ScenarioResult* visibilityDirectLarge = findScenario(
+        results, "visibility_direct_32768_75pct_offscreen");
+    const ScenarioResult* visibilityCpuLarge = findScenario(
+        results, "visibility_cpu_32768_75pct_offscreen");
     const ScenarioResult* pagedStable = findScenario(results, "paged_3d_stable_snapshot_100k");
     const ScenarioResult* pagedOne = findScenario(results, "paged_3d_one_edit_100k");
     const ScenarioResult* pagedClustered = findScenario(results, "paged_3d_clustered_edits_100k");
@@ -1291,7 +1375,10 @@ template <typename Operation>
         && primitives != nullptr && analytic != nullptr && effects != nullptr
         && retained != nullptr && fullDynamic != nullptr && dynamic != nullptr && text != nullptr
         && virtualList != nullptr && recycledList != nullptr
-        && full3d != nullptr && dirty3d != nullptr && pagedStable != nullptr
+        && full3d != nullptr && dirty3d != nullptr
+        && visibilityDirectSmall != nullptr && visibilityCpuSmall != nullptr
+        && visibilityDirectLarge != nullptr && visibilityCpuLarge != nullptr
+        && pagedStable != nullptr
         && pagedOne != nullptr && pagedClustered != nullptr && pagedSparse != nullptr;
     if (!valid) {
         std::cerr << "Benchmark verification: a required scenario is missing\n";
@@ -1358,6 +1445,14 @@ template <typename Operation>
         && dirty3d->uploadBytes == sizeof(henia::gfx::BoxInstance)
         && dirty3d->copiedBoxInstances <= henia::gfx::InstanceBatch::kBoxesPerPage
         && dirty3d->gpuBufferBytes == full3d->gpuBufferBytes
+        && visibilityDirectSmall->submittedInstances == 2048
+        && visibilityCpuSmall->submittedInstances == 512
+        && visibilityDirectLarge->submittedInstances == kBoxCount
+        && visibilityCpuLarge->submittedInstances == kBoxCount / 4U
+        && visibilityCpuSmall->allocationsMedian == 0
+        && visibilityCpuLarge->allocationsMedian == 0
+        && visibilityCpuSmall->uploadBytes == visibilityDirectSmall->uploadBytes / 4U
+        && visibilityCpuLarge->uploadBytes == visibilityDirectLarge->uploadBytes / 4U
         && pagedStable->submittedInstances == kPagedBoxCount
         && pagedStable->allocationsMedian == 0
         && pagedStable->uploadBytes == 0
@@ -1593,7 +1688,7 @@ int main(int argc, char** argv) {
     }
     try {
         std::vector<ScenarioResult> results;
-        results.reserve(17);
+        results.reserve(21);
         results.push_back(benchmarkTessellation(options));
         results.push_back(benchmarkShaderEllipses(options));
         results.push_back(benchmarkManyPrimitives(options));
@@ -1607,6 +1702,10 @@ int main(int argc, char** argv) {
         results.push_back(benchmarkRecycledWidgetList(options));
         results.push_back(benchmarkLarge3DFull(options));
         results.push_back(benchmarkLarge3DDirty(options));
+        results.push_back(benchmarkVisibility(options, 2048, false));
+        results.push_back(benchmarkVisibility(options, 2048, true));
+        results.push_back(benchmarkVisibility(options, kBoxCount, false));
+        results.push_back(benchmarkVisibility(options, kBoxCount, true));
         results.push_back(benchmarkPaged3DStable(options));
         results.push_back(benchmarkPaged3DOneEdit(options));
         results.push_back(benchmarkPaged3DClusteredEdits(options));

@@ -136,6 +136,7 @@ set_target_properties(HeniaUI PROPERTIES
 
 add_library(HeniaUIGfx STATIC
     src/gfx/ShapeBatch3D.cpp
+    src/gfx/VisibilityList.cpp
 )
 add_library(HeniaUI::Gfx ALIAS HeniaUIGfx)
 target_compile_features(HeniaUIGfx PUBLIC cxx_std_23)

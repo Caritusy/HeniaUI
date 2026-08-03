@@ -1,6 +1,6 @@
 #pragma once
 
-#include "henia/gfx/InstanceBatch.h"
+#include "henia/gfx/VisibilityList.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -22,6 +22,14 @@ struct OpenGlGfxStatistics final {
     std::uint64_t fullUploadFallbacks = 0;
     std::uint64_t uploadFenceFailures = 0;
     std::uint64_t viewUpdates = 0;
+    std::uint64_t directVisibilityFrames = 0;
+    std::uint64_t cpuCulledFrames = 0;
+    std::uint64_t visibilitySourceInstances = 0;
+    std::uint64_t visibilityRejectedInstances = 0;
+    std::uint64_t visibilityChunkTests = 0;
+    std::uint64_t visibilityChunkRejectedInstances = 0;
+    std::uint64_t visibilityResultReuses = 0;
+    std::uint64_t visibilityCullingNanoseconds = 0;
     std::uint64_t depthFallbacks = 0;
     std::uint64_t rejectedFrames = 0;
     std::uint64_t invalidInputFrames = 0;
@@ -60,7 +68,8 @@ public:
     [[nodiscard]] bool render(
         const InstanceBatch& batch,
         const ViewParameters& view,
-        bool depthAttachmentAvailable = false) noexcept;
+        bool depthAttachmentAvailable = false,
+        VisibilityOptions visibility = {}) noexcept;
     // Associates a resolved host timestamp with a retained successful sample.
     // Unknown, duplicate, expired, and previous-lifetime IDs return false.
     [[nodiscard]] bool reportGpuTime(

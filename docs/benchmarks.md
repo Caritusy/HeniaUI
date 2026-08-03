@@ -19,6 +19,8 @@ versioned JSON document suitable for CI comparison.
 | `text_heavy_ui` | 160 telemetry rows / 4,270 cached glyph instances. |
 | `large_3d_full_build` | Cold construction and snapshot of 32,768 3D boxes. |
 | `large_3d_dirty_update` | One changed box while the previous 32,768-box immutable snapshot remains live. |
+| `visibility_direct_2048_75pct_offscreen` / `visibility_cpu_2048_75pct_offscreen` | Direct validation versus reusable CPU visibility for a small batch with spatially clustered 75% rejection. |
+| `visibility_direct_32768_75pct_offscreen` / `visibility_cpu_32768_75pct_offscreen` | The same comparison at the automatic-policy starting count. |
 | `paged_3d_stable_snapshot_100k` | Stable publication of a 100,000-box paged snapshot. |
 | `paged_3d_one_edit_100k` | One edit in 100,000 boxes while the prior snapshot remains live. |
 | `paged_3d_clustered_edits_100k` | 32 adjacent edits contained by one 256-instance page. |
@@ -27,6 +29,9 @@ versioned JSON document suitable for CI comparison.
 `large_3d_full_build` remains the full-replacement control. The paged scenarios
 separate stable, single, clustered, and sparse publication costs and keep the
 previous immutable revision live during every changed iteration.
+The visibility pairs alternate camera matrices after prewarming, reuse immutable
+page bounds, and report the compact count/upload model. Their CPU-cull rows must
+allocate zero bytes during measured updates.
 
 ## Metrics
 
@@ -114,6 +119,16 @@ interior fragment bound, and a one-box 3D update advertises one instance rather
 than a full GPU upload. The 100k paged cases additionally require zero stable
 allocations, at most one copied page for single/clustered edits, four copied
 pages for four sparse edits, and exact 64 B / 2,048 B / 256 B upload ranges.
+The visibility cases additionally require zero culling allocations and exactly
+75% fewer submitted/uploaded instances than their paired direct cases.
+
+On the 2026-08-03 Release run (`25` measured iterations, `5` warmups), the
+2,048-box direct/cull medians were 57.9/87.8 us and the 32,768-box medians were
+944.8/1,506.7 us. Culling reduced the modeled uploads from 128 to 32 KiB and
+from 2,048 to 512 KiB respectively. This is a CPU-cost and deterministic-work
+break-even input, not a claim about universal frame time: hosts combine it with
+their own GPU timestamps and rejected fraction. See
+[3D visibility and indirect submission](3d-visibility.md).
 
 To compare two runs captured on the same machine:
 

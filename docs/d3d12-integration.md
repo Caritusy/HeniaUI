@@ -54,11 +54,20 @@ revision is copied as one contiguous range. `SubmissionReuse` validation occurs
 before staging writes or transitions, so the host fence contract prevents both
 resources from being overwritten while in flight.
 
+With `VisibilityMode::CpuFrustum` (or an activated `Automatic` policy), the
+submission slot's mapped indirect-argument resource is updated only after the
+same reuse check and `ExecuteIndirect` consumes the compact instance count.
+That argument resource is part of the slot lifetime. Direct mode continues to
+record `DrawInstanced`; CPU visibility and the OpenGL fallback are described in
+[3D visibility and indirect submission](3d-visibility.md).
+
 Statistics distinguish CPU staging writes (`uploadedInstanceBytes`), copy
 commands/bytes (`instanceCopyOperations`/`copiedInstanceBytes`), vertex data
 read from upload memory (`uploadHeapReadBytes`), allocated default-heap capacity
 (`gpuLocalResidentBytes`), and frames selected for each strategy. Architecture
 availability and the UMA decision are also reported.
+Gfx visibility statistics separately report direct/culling frames, rejected
+instances, chunk work, result reuse, argument updates, and indirect draws.
 
 ## State overwritten by `record()`
 

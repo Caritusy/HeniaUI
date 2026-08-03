@@ -78,6 +78,8 @@ enum class BoxEffect : std::uint32_t {
 }
 
 struct BoxInstance final {
+    static constexpr std::uint32_t kVisibilityMaskMarker = 0x48564953U;
+
     Vec3 minimum{};
     float lineWidth = 1.5F;
     Vec3 maximum{1.0F, 1.0F, 1.0F};
@@ -85,6 +87,20 @@ struct BoxInstance final {
     LinearColor color{};
     BoxEffect effects = BoxEffect::None;
     std::array<std::uint32_t, 3> reserved{};
+
+    // Stored in the existing reserved tail so the public/GPU layout remains
+    // 64 bytes. Old producers whose reserved words are zero remain visible.
+    constexpr void setVisibilityMask(std::uint32_t mask) noexcept {
+        reserved[0] = mask;
+        reserved[1] = kVisibilityMaskMarker;
+    }
+    constexpr void clearVisibilityMask() noexcept {
+        reserved[0] = 0;
+        reserved[1] = 0;
+    }
+    [[nodiscard]] constexpr std::uint32_t visibilityMask() const noexcept {
+        return reserved[1] == kVisibilityMaskMarker ? reserved[0] : ~std::uint32_t{0};
+    }
     [[nodiscard]] constexpr bool operator==(const BoxInstance&) const noexcept = default;
 };
 

@@ -560,6 +560,94 @@ int main() {
         fail("D3D12 gfx sparse update copied the bounding interval instead of two boxes");
     }
 
+    ShapeBatch3D visibilityBuilder;
+    std::vector<BoxInstance> visibilityBoxes(boxes.size(), {
+        .minimum = {4.0F, 4.0F, 0.25F},
+        .lineWidth = 4.0F,
+        .maximum = {4.5F, 4.5F, 0.75F},
+        .color = {1.0F, 0.0F, 0.0F, 1.0F},
+    });
+    visibilityBoxes[0] = {
+        .minimum = {-0.5F, -0.5F, 0.25F},
+        .lineWidth = 4.0F,
+        .maximum = {0.5F, 0.5F, 0.75F},
+        .hueOffset = 0.75F,
+        .color = {0.2F, 0.8F, 0.4F, 0.9F},
+        .effects = BoxEffect::HueCycle,
+    };
+    if (!visibilityBuilder.replaceBoxes(visibilityBoxes)) {
+        fail("D3D12 gfx visibility fixture was rejected");
+    }
+    const InstanceBatch visibilityBatch = visibilityBuilder.snapshot();
+    ViewParameters visibilityView{
+        .viewport = {static_cast<float>(width), static_cast<float>(height)},
+    };
+    const D3D12GfxStatistics beforeVisibility = renderer.statistics();
+    if (FAILED(allocator->Reset()) || FAILED(commandList->Reset(allocator.Get(), nullptr))) {
+        fail("Unable to reset the D3D12 gfx indirect command list");
+    }
+    commandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);
+    if (!renderer.record(
+            visibilityBatch,
+            visibilityView,
+            *commandList.Get(),
+            0,
+            {.mode = VisibilityMode::CpuFrustum})
+        || FAILED(commandList->Close())) {
+        std::cerr << renderer.lastError() << '\n';
+        fail("D3D12 gfx CPU-culling/indirect recording failed");
+    }
+    queue->ExecuteCommandLists(1, lists);
+    if (!waitForQueue(*device.Get(), *queue.Get())) {
+        fail("D3D12 gfx indirect queue timed out");
+    }
+    D3D12GfxStatistics afterVisibility = renderer.statistics();
+    if (afterVisibility.cpuCulledFrames != beforeVisibility.cpuCulledFrames + 1U
+        || afterVisibility.indirectDrawCalls != beforeVisibility.indirectDrawCalls + 1U
+        || afterVisibility.indirectArgumentUpdates
+            != beforeVisibility.indirectArgumentUpdates + 1U
+        || afterVisibility.visibilitySourceInstances != visibilityBoxes.size()
+        || afterVisibility.visibilityRejectedInstances != visibilityBoxes.size() - 1U
+        || afterVisibility.submittedInstances != beforeVisibility.submittedInstances + 1U
+        || afterVisibility.fullInstanceUploads != beforeVisibility.fullInstanceUploads + 1U
+        || afterVisibility.uploadedInstanceBytes
+            != beforeVisibility.uploadedInstanceBytes + sizeof(BoxInstance)
+        || afterVisibility.instanceCopyOperations
+            != beforeVisibility.instanceCopyOperations + 1U) {
+        fail("D3D12 gfx CPU culling did not compact the indirect submission");
+    }
+
+    visibilityView.timeSeconds = 10.0F;
+    if (FAILED(allocator->Reset()) || FAILED(commandList->Reset(allocator.Get(), nullptr))) {
+        fail("Unable to reset the D3D12 gfx cached-indirect command list");
+    }
+    commandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);
+    if (!renderer.record(
+            visibilityBatch,
+            visibilityView,
+            *commandList.Get(),
+            0,
+            {.mode = VisibilityMode::CpuFrustum})
+        || FAILED(commandList->Close())) {
+        fail("D3D12 gfx cached CPU visibility recording failed");
+    }
+    queue->ExecuteCommandLists(1, lists);
+    if (!waitForQueue(*device.Get(), *queue.Get())) {
+        fail("D3D12 gfx cached indirect queue timed out");
+    }
+    const D3D12GfxStatistics cachedVisibility = renderer.statistics();
+    if (cachedVisibility.indirectDrawCalls != afterVisibility.indirectDrawCalls + 1U
+        || cachedVisibility.indirectArgumentUpdates
+            != afterVisibility.indirectArgumentUpdates + 1U
+        || cachedVisibility.visibilityResultReuses
+            != afterVisibility.visibilityResultReuses + 1U
+        || cachedVisibility.submittedInstances != afterVisibility.submittedInstances + 1U
+        || cachedVisibility.fullInstanceUploads != afterVisibility.fullInstanceUploads
+        || cachedVisibility.uploadedInstanceBytes != afterVisibility.uploadedInstanceBytes
+        || cachedVisibility.instanceCopyOperations != afterVisibility.instanceCopyOperations) {
+        fail("D3D12 gfx time-only frame rebuilt cached visibility or instance data");
+    }
+
     if (!henia::test::verifyD3D12Validation(*device.Get())) {
         fail("D3D12 gfx validation reported an error");
     }

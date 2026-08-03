@@ -203,6 +203,7 @@ target_link_libraries(MyApplication PRIVATE
   slots; automatic storage keeps UMA/small packets on upload memory and moves
   larger discrete-GPU packets to GPU-local memory.
 - 3D box edges are shader-expanded triangle quads with fixed pixel width; no backend depends on line-width support.
+- Optional 3D visibility keeps the direct path as default, reuses immutable page bounds, and reports compact/indirect work explicitly.
 - Instance content, view/time constants, CPU upload, CPU submit, and optional host-reported GPU timing are tracked separately.
 - Missing host depth attachments produce an explicit depth fallback counter rather than pretending depth testing occurred.
 
@@ -326,9 +327,21 @@ henia::gfx::ViewParameters view{
 };
 renderDevice.render(snapshot, view); // OpenGL
 // renderDevice.record(snapshot, view, commandList, fenceOwnedSlot); // D3D12
+
+henia::gfx::VisibilityOptions visibility{
+    .mode = henia::gfx::VisibilityMode::Automatic,
+    .minimumProjectedExtentPixels = 1.0F,
+};
+renderDevice.render(snapshot, view, hasDepthAttachment, visibility); // optional OpenGL culling
+// renderDevice.record(snapshot, view, commandList, fenceOwnedSlot, visibility); // D3D12 indirect
 ```
 
 One box instance stores bounds, linear color, pixel line width, hue offset, and generic shader effects. A static unit-box edge topology is expanded in the vertex shader. Instance revisions and independent dirty ranges let a backend skip stable uploads or patch only changed spans. Published box storage is page-based: keeping an old snapshot alive and changing one box copies one 256-instance page rather than the complete batch.
+
+The optional [3D visibility path](docs/3d-visibility.md) reuses those pages as
+coarse bounds, preserves stable source indices/effect data, supports application
+visibility masks and projected-size filtering, compacts OpenGL instances, and
+uses `ExecuteIndirect` on D3D12. Direct submission remains the default.
 
 Box edges are homogeneously clipped before the perspective divide, including
 camera crossings and all six frustum planes. Set `ViewParameters::clipDepthRange`

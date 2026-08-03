@@ -347,7 +347,9 @@ struct D3D12RenderDevice::Implementation final {
     struct Submission final {
         ComPtr<ID3D12Resource> uploadInstances;
         ComPtr<ID3D12Resource> gpuLocalInstances;
+        ComPtr<ID3D12Resource> indirectArguments;
         std::byte* mapped = nullptr;
+        D3D12_DRAW_ARGUMENTS* mappedIndirectArguments = nullptr;
         std::uint64_t directUploadedIdentity = 0;
         std::uint64_t directUploadedRevision = 0;
         std::uint64_t gpuLocalUploadedIdentity = 0;
@@ -356,11 +358,13 @@ struct D3D12RenderDevice::Implementation final {
 
     ComPtr<ID3D12Device> ownerDevice;
     ComPtr<ID3D12RootSignature> rootSignature;
+    ComPtr<ID3D12CommandSignature> drawCommandSignature;
     std::array<ComPtr<ID3D12PipelineState>, kDepthPipelineCount> pipelines;
     std::vector<Submission> submissions;
     D3D12GfxConfiguration configuration{};
     D3D12GfxStatistics statistics{};
     henia::detail::ProfileTimeline profileTimeline;
+    VisibilityList visibilityList;
     henia::detail::FixedError error;
     std::uint32_t instanceBufferBytes = 0;
     bool adapterArchitectureKnown = false;
@@ -379,7 +383,8 @@ struct D3D12RenderDevice::Implementation final {
         const ViewParameters& view,
         ID3D12GraphicsCommandList& commandList,
         std::uint32_t submissionSlot,
-        henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept;
+        henia::backend::d3d12::SubmissionReuse submissionReuse,
+        VisibilityOptions visibility) noexcept;
     [[nodiscard]] bool validateCommandList(ID3D12GraphicsCommandList& commandList) noexcept;
     [[nodiscard]] bool validateDeviceChild(
         ID3D12DeviceChild& child,
@@ -484,6 +489,10 @@ bool D3D12RenderDevice::Implementation::initialize(
             && instanceBytes >= value.gpuLocalInstanceThresholdBytes);
     instanceBufferBytes = static_cast<std::uint32_t>(instanceBytes);
     submissions.resize(configuration.submissionCapacity);
+    if (!visibilityList.reserve(configuration.boxCapacity)) {
+        error.assign(visibilityList.lastError().data(), visibilityList.lastError().size());
+        return false;
+    }
     ComPtr<ID3DBlob> vertexShader;
     ComPtr<ID3DBlob> pixelShader;
     if (!compileShader("vertexMain", "vs_5_1", vertexShader, error)
@@ -509,6 +518,21 @@ bool D3D12RenderDevice::Implementation::initialize(
         error = "D3D12 failed to create the gfx root signature";
         return false;
     }
+    const D3D12_INDIRECT_ARGUMENT_DESC drawArgument{
+        .Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW,
+    };
+    const D3D12_COMMAND_SIGNATURE_DESC commandSignatureDescription{
+        .ByteStride = sizeof(D3D12_DRAW_ARGUMENTS),
+        .NumArgumentDescs = 1,
+        .pArgumentDescs = &drawArgument,
+    };
+    if (FAILED(device.CreateCommandSignature(
+            &commandSignatureDescription,
+            nullptr,
+            IID_PPV_ARGS(&drawCommandSignature)))) {
+        error = "D3D12 failed to create the gfx indirect draw signature";
+        return false;
+    }
     if (!createPipeline(device, *vertexShader.Get(), *pixelShader.Get(), {})) return false;
     if (configuration.depthStencilFormat != DXGI_FORMAT_UNKNOWN) {
         for (std::uint8_t operation = 0; operation <= static_cast<std::uint8_t>(CompareOp::Always); ++operation) {
@@ -526,6 +550,7 @@ bool D3D12RenderDevice::Implementation::initialize(
     const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
     const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
     const D3D12_RESOURCE_DESC buffer = bufferDescription(bufferBytes);
+    const D3D12_RESOURCE_DESC indirectBuffer = bufferDescription(sizeof(D3D12_DRAW_ARGUMENTS));
     for (Submission& submission : submissions) {
         if (FAILED(device.CreateCommittedResource(
                 &uploadHeap,
@@ -546,6 +571,27 @@ bool D3D12RenderDevice::Implementation::initialize(
             return false;
         }
         submission.mapped = static_cast<std::byte*>(mapped);
+        if (FAILED(device.CreateCommittedResource(
+                &uploadHeap,
+                D3D12_HEAP_FLAG_NONE,
+                &indirectBuffer,
+                D3D12_RESOURCE_STATE_GENERIC_READ,
+                nullptr,
+                IID_PPV_ARGS(&submission.indirectArguments)))) {
+            error = "D3D12 failed to allocate a gfx indirect-argument buffer";
+            shutdown();
+            return false;
+        }
+        void* mappedIndirectArguments = nullptr;
+        if (FAILED(submission.indirectArguments->Map(
+                0, &noRead, &mappedIndirectArguments))
+            || mappedIndirectArguments == nullptr) {
+            error = "D3D12 failed to map a gfx indirect-argument buffer";
+            shutdown();
+            return false;
+        }
+        submission.mappedIndirectArguments =
+            static_cast<D3D12_DRAW_ARGUMENTS*>(mappedIndirectArguments);
         if (gpuLocalResourcesEnabled
             && FAILED(device.CreateCommittedResource(
                 &defaultHeap,
@@ -606,9 +652,10 @@ bool D3D12RenderDevice::Implementation::record(
     const ViewParameters& view,
     ID3D12GraphicsCommandList& commandList,
     std::uint32_t submissionSlot,
-    henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
+    henia::backend::d3d12::SubmissionReuse submissionReuse,
+    VisibilityOptions visibility) noexcept {
     const std::uint64_t frameAttemptId = ++statistics.frameAttempts;
-    const BoxInstanceView boxes = batch.boxes();
+    const BoxInstanceView sourceBoxes = batch.boxes();
     if (!ready || submissionSlot >= submissions.size()) {
         ++statistics.rejectedFrames;
         error = "D3D12 gfx renderer or submissionSlot is unavailable";
@@ -630,29 +677,56 @@ bool D3D12RenderDevice::Implementation::record(
         error.assign(issue.data(), issue.size());
         return false;
     }
-    if (boxes.size() > configuration.boxCapacity
-        || boxes.size() > static_cast<std::size_t>(std::numeric_limits<UINT>::max())) {
+    if (const std::string_view issue = validate(visibility); !issue.empty()) {
+        ++statistics.rejectedFrames;
+        ++statistics.invalidInputFrames;
+        error.assign(issue.data(), issue.size());
+        return false;
+    }
+    if (sourceBoxes.size() > configuration.boxCapacity
+        || sourceBoxes.size() > static_cast<std::size_t>(std::numeric_limits<UINT>::max())) {
         ++statistics.rejectedFrames;
         ++statistics.capacityRejectedFrames;
         error = "D3D12 gfx instance count exceeds boxCapacity";
         return false;
     }
-    for (std::size_t pageIndex = 0; pageIndex < batch.boxPageCount(); ++pageIndex) {
-        for (const BoxInstance& box : batch.boxPage(pageIndex)) {
-            if (const std::string_view issue = validate(box); !issue.empty()) {
-                ++statistics.rejectedFrames;
-                ++statistics.invalidInputFrames;
-                error.assign(issue.data(), issue.size());
-                return false;
+    const bool cpuCulling = usesCpuVisibility(visibility, sourceBoxes.size());
+    if (!cpuCulling) {
+        for (std::size_t pageIndex = 0; pageIndex < batch.boxPageCount(); ++pageIndex) {
+            for (const BoxInstance& box : batch.boxPage(pageIndex)) {
+                if (const std::string_view issue = validate(box); !issue.empty()) {
+                    ++statistics.rejectedFrames;
+                    ++statistics.invalidInputFrames;
+                    error.assign(issue.data(), issue.size());
+                    return false;
+                }
             }
         }
     }
+    std::span<const BoxInstance> culledBoxes;
+    VisibilityStatistics visibilityStatistics{};
+    if (cpuCulling) {
+        if (!visibilityList.update(batch, view, visibility)) {
+            ++statistics.rejectedFrames;
+            ++statistics.invalidInputFrames;
+            const std::string_view issue = visibilityList.lastError();
+            error.assign(issue.data(), issue.size());
+            return false;
+        }
+        culledBoxes = visibilityList.boxes();
+        visibilityStatistics = visibilityList.statistics();
+    }
+    const std::size_t submittedCount = cpuCulling ? culledBoxes.size() : sourceBoxes.size();
+    const std::uint64_t producerIdentity = cpuCulling
+        ? visibilityList.identity() : batch.identity();
+    const std::uint64_t producerRevision = cpuCulling
+        ? visibilityList.revision() : batch.revision();
     if (!validateSubmissionReuse(submissionReuse)) {
         ++statistics.rejectedFrames;
         return false;
     }
     Submission& submission = submissions[submissionSlot];
-    const std::size_t submittedBytes = boxes.size() * sizeof(BoxInstance);
+    const std::size_t submittedBytes = submittedCount * sizeof(BoxInstance);
     using Strategy = henia::backend::d3d12::InstanceStorageStrategy;
     const bool useGpuLocal = gpuLocalResourcesEnabled
         && (configuration.instanceStorage == Strategy::GpuLocal
@@ -667,21 +741,22 @@ bool D3D12RenderDevice::Implementation::record(
     std::uint64_t profileUploadedBytes = 0;
     std::uint32_t profileUploadRangeCount = 0;
     InstanceUploadKind profileUploadKind = InstanceUploadKind::None;
-    if (uploadedIdentity != batch.identity() || uploadedRevision != batch.revision()) {
+    if (uploadedIdentity != producerIdentity || uploadedRevision != producerRevision) {
         const auto uploadStarted = std::chrono::steady_clock::now();
         const std::span<const DirtyRange> dirtyRanges = batch.dirtyRanges();
         bool dirtyRangesValid = !dirtyRanges.empty();
         std::size_t previousEnd = 0;
         for (const DirtyRange range : dirtyRanges) {
             const bool valid = range.count > 0 && range.offset >= previousEnd
-                && range.offset <= boxes.size() && range.count <= boxes.size() - range.offset;
+                && range.offset <= sourceBoxes.size()
+                && range.count <= sourceBoxes.size() - range.offset;
             if (!valid) {
                 dirtyRangesValid = false;
                 break;
             }
             previousEnd = range.offset + range.count;
         }
-        const bool partial = uploadedIdentity == batch.identity()
+        const bool partial = !cpuCulling && uploadedIdentity == batch.identity()
             && uploadedRevision != std::numeric_limits<std::uint64_t>::max()
             && uploadedRevision + 1 == batch.revision()
             && !batch.requiresFullUpload() && dirtyRangesValid;
@@ -698,8 +773,8 @@ bool D3D12RenderDevice::Implementation::record(
             for (const DirtyRange range : dirtyRanges) {
                 rangesValid = rangesValid && validByteRange(range);
             }
-        } else if (!boxes.empty()) {
-            rangesValid = validByteRange({0, boxes.size()});
+        } else if (submittedCount != 0) {
+            rangesValid = validByteRange({0, submittedCount});
         }
         if (!rangesValid) {
             ++statistics.rejectedFrames;
@@ -716,6 +791,13 @@ bool D3D12RenderDevice::Implementation::record(
             std::size_t sourceOffset = range.offset;
             std::size_t destinationOffset = offsetBytes;
             std::size_t remaining = range.count;
+            if (cpuCulling) {
+                std::memcpy(
+                    submission.mapped + destinationOffset,
+                    culledBoxes.data() + range.offset,
+                    countBytes);
+                remaining = 0;
+            }
             while (remaining > 0) {
                 const std::span<const BoxInstance> page = batch.boxPage(
                     sourceOffset / InstanceBatch::kBoxesPerPage);
@@ -742,7 +824,7 @@ bool D3D12RenderDevice::Implementation::record(
             uploadedBytes += countBytes;
         };
 
-        const bool hasUploadRanges = partial ? !dirtyRanges.empty() : !boxes.empty();
+        const bool hasUploadRanges = partial ? !dirtyRanges.empty() : submittedCount != 0;
         D3D12_RESOURCE_BARRIER transition{};
         if (useGpuLocal && hasUploadRanges) {
             transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -756,8 +838,8 @@ bool D3D12RenderDevice::Implementation::record(
             for (const DirtyRange range : dirtyRanges) {
                 stageRange(range);
             }
-        } else if (!boxes.empty()) {
-            stageRange({0, boxes.size()});
+        } else if (submittedCount != 0) {
+            stageRange({0, submittedCount});
         }
         if (useGpuLocal && hasUploadRanges) {
             std::swap(transition.Transition.StateBefore, transition.Transition.StateAfter);
@@ -765,9 +847,9 @@ bool D3D12RenderDevice::Implementation::record(
             statistics.instanceCopyOperations += copyOperations;
             statistics.copiedInstanceBytes += uploadedBytes;
         }
-        uploadedIdentity = batch.identity();
-        uploadedRevision = batch.revision();
-        if (boxes.empty()) {
+        uploadedIdentity = producerIdentity;
+        uploadedRevision = producerRevision;
+        if (submittedCount == 0) {
             ++statistics.zeroWorkInstanceRevisions;
             profileUploadKind = InstanceUploadKind::ZeroWorkRevision;
         } else if (partial) {
@@ -785,6 +867,16 @@ bool D3D12RenderDevice::Implementation::record(
     }
     if (useGpuLocal) ++statistics.gpuLocalFrames;
     else ++statistics.directUploadFrames;
+
+    if (cpuCulling) {
+        *submission.mappedIndirectArguments = {
+            .VertexCountPerInstance = 72,
+            .InstanceCount = static_cast<UINT>(submittedCount),
+            .StartVertexLocation = 0,
+            .StartInstanceLocation = 0,
+        };
+        ++statistics.indirectArgumentUpdates;
+    }
 
     DepthState depth = batch.depthState();
     if (depth.enabled && configuration.depthStencilFormat == DXGI_FORMAT_UNKNOWN) {
@@ -828,18 +920,42 @@ bool D3D12RenderDevice::Implementation::record(
     };
     commandList.IASetVertexBuffers(0, 1, &bufferView);
     ++statistics.viewUpdates;
-    if (!boxes.empty()) {
-        commandList.DrawInstanced(72, static_cast<UINT>(boxes.size()), 0, 0);
+    if (submittedCount != 0) {
+        if (cpuCulling) {
+            commandList.ExecuteIndirect(
+                drawCommandSignature.Get(),
+                1,
+                submission.indirectArguments.Get(),
+                0,
+                nullptr,
+                0);
+            ++statistics.indirectDrawCalls;
+        } else {
+            commandList.DrawInstanced(72, static_cast<UINT>(submittedCount), 0, 0);
+        }
         ++statistics.drawCalls;
-        statistics.submittedInstances += boxes.size();
+        statistics.submittedInstances += submittedCount;
         if (!useGpuLocal) statistics.uploadHeapReadBytes += submittedBytes;
     }
     const std::uint64_t cpuDrawSubmitNanoseconds = elapsedNanoseconds(submitStarted);
     ++statistics.successfulFrames;
+    if (cpuCulling) {
+        ++statistics.cpuCulledFrames;
+        statistics.visibilitySourceInstances += visibilityStatistics.sourceInstances;
+        statistics.visibilityRejectedInstances += visibilityStatistics.frustumRejectedInstances
+            + visibilityStatistics.applicationMaskRejectedInstances
+            + visibilityStatistics.projectedSizeRejectedInstances;
+        statistics.visibilityChunkTests += visibilityStatistics.chunkTests;
+        statistics.visibilityChunkRejectedInstances += visibilityStatistics.chunkRejectedInstances;
+        statistics.visibilityResultReuses += visibilityStatistics.resultReused ? 1U : 0U;
+        statistics.visibilityCullingNanoseconds += visibilityStatistics.cullingNanoseconds;
+    } else {
+        ++statistics.directVisibilityFrames;
+    }
     static_cast<void>(profileTimeline.complete({
         .frameAttemptId = frameAttemptId,
-        .producerIdentity = batch.identity(),
-        .producerRevision = batch.revision(),
+        .producerIdentity = producerIdentity,
+        .producerRevision = producerRevision,
         .producerBuildNanoseconds = batch.cpuBuildNanoseconds(),
         .cpuUploadNanoseconds = cpuUploadNanoseconds,
         .cpuDrawSubmitNanoseconds = cpuDrawSubmitNanoseconds,
@@ -926,16 +1042,23 @@ void D3D12RenderDevice::Implementation::shutdown() noexcept {
         if (submission.uploadInstances != nullptr && submission.mapped != nullptr) {
             submission.uploadInstances->Unmap(0, nullptr);
         }
+        if (submission.indirectArguments != nullptr
+            && submission.mappedIndirectArguments != nullptr) {
+            submission.indirectArguments->Unmap(0, nullptr);
+        }
         submission.mapped = nullptr;
+        submission.mappedIndirectArguments = nullptr;
         submission.directUploadedIdentity = 0;
         submission.directUploadedRevision = 0;
         submission.gpuLocalUploadedIdentity = 0;
         submission.gpuLocalUploadedRevision = 0;
         submission.gpuLocalInstances.Reset();
+        submission.indirectArguments.Reset();
         submission.uploadInstances.Reset();
     }
     submissions.clear();
     for (ComPtr<ID3D12PipelineState>& pipeline : pipelines) pipeline.Reset();
+    drawCommandSignature.Reset();
     rootSignature.Reset();
     ownerDevice.Reset();
     instanceBufferBytes = 0;
@@ -966,7 +1089,15 @@ bool D3D12RenderDevice::record(
     const InstanceBatch& batch, const ViewParameters& view,
     ID3D12GraphicsCommandList& commandList, std::uint32_t slot,
     henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
-    return mImplementation->record(batch, view, commandList, slot, submissionReuse);
+    return mImplementation->record(batch, view, commandList, slot, submissionReuse, {});
+}
+bool D3D12RenderDevice::record(
+    const InstanceBatch& batch, const ViewParameters& view,
+    ID3D12GraphicsCommandList& commandList, std::uint32_t slot,
+    VisibilityOptions visibility,
+    henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
+    return mImplementation->record(
+        batch, view, commandList, slot, submissionReuse, visibility);
 }
 bool D3D12RenderDevice::reportGpuTime(
     std::uint64_t sampleId,

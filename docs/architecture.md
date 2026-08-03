@@ -371,6 +371,16 @@ The box fast path uses twelve fixed edges. Each edge is represented by two trian
 - hue cycling is driven by a frame constant and per-instance offset;
 - camera and time changes do not upload the instance buffer.
 
+An optional `VisibilityList` derives a compact stream without mutating that
+source contract. It caches one conservative AABB/mask union per immutable page,
+rebuilds only dirty pages, and preserves ascending source indices plus complete
+`BoxInstance` values. Camera changes reuse page bounds; time-only changes reuse
+the entire result. Application masks, six-plane homogeneous frustum rejection,
+and optional projected-size filtering are applied without frame-path allocation.
+Direct mode remains the default and bypasses this workspace. The full policy,
+conservative edge margin, statistics, and measured threshold are documented in
+[3D visibility and indirect submission](3d-visibility.md).
+
 Before the perspective divide, every edge is clipped as a homogeneous segment
 against `w >= 0.0001` and the six canonical clip planes. The near plane is
 selected from `ViewParameters::clipDepthRange`: `z >= 0` for `ZeroToOne`, or
@@ -417,12 +427,22 @@ not map/copy the bounding interval between them. Otherwise the renderer performs
 a full page-by-page upload and increments `fullUploadFallbacks`. Statistics also
 expose uploaded bytes, slot exhaustion, and fence failures.
 
+When CPU visibility is enabled, OpenGL uploads the compact stream as a full
+visibility revision into the same fence-owned ring and keeps the ordinary
+instanced draw. No OpenGL indirect or compute extension is required.
+
 The D3D12 backend permanently maps one staging buffer per fence-owned submission
 slot. Depending on the configured/automatic instance-storage strategy,
 `record()` either binds it directly or copies full pages/exact dirty ranges to
 the slot's GPU-local default buffer. It never waits or allocates. Both 3D
 backends validate and traverse the segmented pages in place rather than
 materializing a contiguous CPU vector.
+
+For a CPU-culled gfx submission, each D3D12 submission slot also owns a mapped
+draw-argument resource protected by the same host fence. The compact instance
+stream follows the configured upload/default-heap strategy and
+`ExecuteIndirect` consumes its visible count. Direct submissions continue to
+use `DrawInstanced` and retain exact immutable dirty-range uploads.
 
 ## Host ownership
 

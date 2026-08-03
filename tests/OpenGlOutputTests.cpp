@@ -1052,6 +1052,78 @@ int main() {
         fail("OpenGL gfx isolation statistics are incorrect");
     }
 
+    ShapeBatch3D directVisibilityShapes;
+    const BoxInstance visibleBox{
+        .minimum = {-0.5F, -0.5F, 0.25F},
+        .lineWidth = 5.0F,
+        .maximum = {0.5F, 0.5F, 0.75F},
+        .hueOffset = 0.25F,
+        .color = {0.2F, 0.8F, 0.4F, 0.85F},
+        .effects = BoxEffect::HueCycle,
+    };
+    static_cast<void>(directVisibilityShapes.addBox(visibleBox));
+    const InstanceBatch directVisibilityBatch = directVisibilityShapes.snapshot();
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(kRasterizerDiscard);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (!gfx.render(directVisibilityBatch, validView)) {
+        fail("OpenGL direct visibility reference render failed");
+    }
+    glFinish();
+    const std::vector<henia::test::Rgba8> directVisibilityPixels = readCurrentPixels();
+
+    ShapeBatch3D culledVisibilityShapes;
+    std::vector<BoxInstance> culledVisibilityBoxes(512, {
+        .minimum = {4.0F, 4.0F, 0.25F},
+        .lineWidth = 5.0F,
+        .maximum = {4.5F, 4.5F, 0.75F},
+        .color = {1.0F, 0.0F, 0.0F, 1.0F},
+    });
+    culledVisibilityBoxes[0] = visibleBox;
+    if (!culledVisibilityShapes.replaceBoxes(culledVisibilityBoxes)) {
+        fail("OpenGL culled visibility fixture was rejected");
+    }
+    const InstanceBatch culledVisibilityBatch = culledVisibilityShapes.snapshot();
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (!gfx.render(
+            culledVisibilityBatch,
+            validView,
+            false,
+            {.mode = VisibilityMode::CpuFrustum})) {
+        std::cerr << gfx.lastError() << '\n';
+        fail("OpenGL CPU-culled render failed");
+    }
+    glFinish();
+    const std::vector<henia::test::Rgba8> culledVisibilityPixels = readCurrentPixels();
+    const OpenGlGfxStatistics culledGfxStatistics = gfx.statistics();
+    const bool sameVisibilityPixels = culledVisibilityPixels.size() == directVisibilityPixels.size()
+        && std::equal(
+            culledVisibilityPixels.begin(),
+            culledVisibilityPixels.end(),
+            directVisibilityPixels.begin(),
+            [](const henia::test::Rgba8& left, const henia::test::Rgba8& right) noexcept {
+                return left.red == right.red && left.green == right.green
+                    && left.blue == right.blue && left.alpha == right.alpha;
+            });
+    if (!sameVisibilityPixels
+        || culledGfxStatistics.cpuCulledFrames != 1
+        || culledGfxStatistics.visibilitySourceInstances != culledVisibilityBoxes.size()
+        || culledGfxStatistics.visibilityRejectedInstances
+            != culledVisibilityBoxes.size() - 1U
+        || culledGfxStatistics.submittedInstances
+            != gfxStatistics.submittedInstances + 2U) {
+        std::cerr << "OpenGL visibility diagnostics: samePixels=" << sameVisibilityPixels
+                  << " cpuFrames=" << culledGfxStatistics.cpuCulledFrames
+                  << " source=" << culledGfxStatistics.visibilitySourceInstances
+                  << " rejected=" << culledGfxStatistics.visibilityRejectedInstances
+                  << " submittedDelta="
+                  << (culledGfxStatistics.submittedInstances - gfxStatistics.submittedInstances)
+                  << '\n';
+        fail("OpenGL CPU visibility changed output or submitted offscreen instances");
+    }
+
     OpenGlRenderDevice clipGfx;
     if (!clipGfx.initialize(1, 1)) {
         fail("OpenGL gfx clip-sweep renderer did not initialize");

@@ -1,6 +1,7 @@
 #include "henia/gfx/ShapeBatch3D.h"
 #include "henia/gfx/Math.h"
 #include "henia/gfx/Validation.h"
+#include "henia/gfx/VisibilityList.h"
 #include "henia/gfx/backend/opengl/OpenGlRenderDevice.h"
 
 #include <array>
@@ -14,6 +15,7 @@ namespace {
 
 static_assert(!std::is_move_constructible_v<henia::gfx::OpenGlRenderDevice>);
 static_assert(!std::is_move_assignable_v<henia::gfx::OpenGlRenderDevice>);
+static_assert(sizeof(henia::gfx::BoxInstance) == 64);
 
 [[noreturn]] void fail(const char* message) {
     std::cerr << message << '\n';
@@ -24,6 +26,19 @@ static_assert(!std::is_move_assignable_v<henia::gfx::OpenGlRenderDevice>);
 
 int main() {
     using namespace henia::gfx;
+
+    BoxInstance compatibilityBox;
+    if (compatibilityBox.visibilityMask() != std::numeric_limits<std::uint32_t>::max()) {
+        fail("Zeroed legacy BoxInstance reserved words were not visibility-compatible");
+    }
+    compatibilityBox.setVisibilityMask(0);
+    if (compatibilityBox.visibilityMask() != 0) {
+        fail("An explicit zero BoxInstance visibility mask was not retained");
+    }
+    compatibilityBox.clearVisibilityMask();
+    if (compatibilityBox.visibilityMask() != std::numeric_limits<std::uint32_t>::max()) {
+        fail("Clearing a BoxInstance visibility mask did not restore compatibility visibility");
+    }
 
     ShapeBatch3D shapes;
     shapes.reserve(1024);
@@ -174,6 +189,120 @@ int main() {
     if (!tryLookAt({0.0F, 0.0F, -2.0F}, {}, {0.0F, 1.0F, 0.0F}, matrix)
         || !finite(matrix)) {
         fail("Valid lookAt parameters were rejected");
+    }
+
+    ShapeBatch3D visibilityShapes;
+    std::array<BoxInstance, 260> visibilityBoxes{};
+    for (BoxInstance& box : visibilityBoxes) {
+        box.minimum = {4.0F, 4.0F, 0.25F};
+        box.maximum = {4.25F, 4.25F, 0.5F};
+    }
+    visibilityBoxes[0] = {
+        .minimum = {-0.5F, -0.5F, 0.25F},
+        .maximum = {-0.25F, -0.25F, 0.5F},
+        .hueOffset = 0.375F,
+        .effects = BoxEffect::HueCycle,
+    };
+    visibilityBoxes[0].setVisibilityMask(1U);
+    visibilityBoxes[257] = {
+        .minimum = {0.25F, 0.25F, 0.25F},
+        .maximum = {0.5F, 0.5F, 0.5F},
+        .color = {0.2F, 0.3F, 0.4F, 0.5F},
+    };
+    visibilityBoxes[257].setVisibilityMask(2U);
+    if (!visibilityShapes.replaceBoxes(visibilityBoxes)) {
+        fail("Visibility fixture boxes were rejected");
+    }
+    InstanceBatch visibilityBatch = visibilityShapes.snapshot();
+    VisibilityList visibility;
+    if (!visibility.reserve(visibilityBoxes.size())
+        || !visibility.update(visibilityBatch, ViewParameters{.viewport = {100.0F, 100.0F}})) {
+        fail("CPU visibility list rejected a valid batch");
+    }
+    const VisibilityStatistics firstVisibility = visibility.statistics();
+    if (visibility.indices().size() != 2 || visibility.indices()[0] != 0
+        || visibility.indices()[1] != 257 || visibility.boxes()[0] != visibilityBoxes[0]
+        || visibility.boxes()[1] != visibilityBoxes[257]
+        || firstVisibility.sourceInstances != visibilityBoxes.size()
+        || firstVisibility.visibleInstances != 2
+        || firstVisibility.frustumRejectedInstances != visibilityBoxes.size() - 2
+        || firstVisibility.rebuiltChunks != 2 || firstVisibility.resultReused
+        || visibility.identity() == 0 || visibility.identity() == visibilityBatch.identity()
+        || visibility.revision() == 0) {
+        fail("CPU visibility compaction lost order, identity, or effect parameters");
+    }
+    const std::uint64_t visibilityRevision = visibility.revision();
+    ViewParameters timeOnlyView{.viewport = {100.0F, 100.0F}, .timeSeconds = 42.0F};
+    if (!visibility.update(visibilityBatch, timeOnlyView)
+        || !visibility.statistics().resultReused
+        || visibility.revision() != visibilityRevision) {
+        fail("Animation time unnecessarily invalidated CPU visibility");
+    }
+    ViewParameters movedVisibilityView = timeOnlyView;
+    movedVisibilityView.viewProjection.values[12] = 0.1F;
+    if (!visibility.update(visibilityBatch, movedVisibilityView)
+        || visibility.statistics().reusedChunks != 2
+        || visibility.statistics().rebuiltChunks != 0
+        || visibility.revision() != visibilityRevision + 1) {
+        fail("Camera movement rebuilt static visibility chunks");
+    }
+    if (!visibility.update(
+            visibilityBatch,
+            movedVisibilityView,
+            {.mode = VisibilityMode::CpuFrustum, .applicationVisibilityMask = 1U})
+        || visibility.indices().size() != 1 || visibility.indices()[0] != 0
+        || visibility.statistics().applicationMaskRejectedInstances != 1
+        || visibility.statistics().reusedChunks != 2) {
+        fail("Application visibility masks lost stable indices or rebuilt static chunks");
+    }
+
+    BoxInstance hidden = visibilityBoxes[257];
+    hidden.minimum = {5.0F, 5.0F, 0.25F};
+    hidden.maximum = {5.25F, 5.25F, 0.5F};
+    if (!visibilityShapes.updateBox(257, hidden)) {
+        fail("Visibility incremental fixture update failed");
+    }
+    visibilityBatch = visibilityShapes.snapshot();
+    if (!visibility.update(visibilityBatch, ViewParameters{.viewport = {100.0F, 100.0F}})
+        || visibility.indices().size() != 1 || visibility.indices()[0] != 0
+        || visibility.statistics().rebuiltChunks != 1
+        || visibility.statistics().reusedChunks != 1) {
+        fail("Visibility chunks did not follow immutable dirty pages");
+    }
+
+    ShapeBatch3D projectedShapes;
+    const std::array projectedBoxes{
+        BoxInstance{
+            .minimum = {-0.005F, -0.005F, 0.25F},
+            .maximum = {0.005F, 0.005F, 0.5F},
+        },
+        BoxInstance{
+            .minimum = {-0.5F, -0.5F, 0.25F},
+            .maximum = {0.5F, 0.5F, 0.5F},
+        },
+    };
+    if (!projectedShapes.replaceBoxes(projectedBoxes)) {
+        fail("Projected-size fixture boxes were rejected");
+    }
+    VisibilityList projectedVisibility;
+    if (!projectedVisibility.reserve(projectedBoxes.size())
+        || !projectedVisibility.update(
+            projectedShapes.snapshot(),
+            ViewParameters{.viewport = {100.0F, 100.0F}},
+            {.mode = VisibilityMode::CpuFrustum, .minimumProjectedExtentPixels = 2.0F})
+        || projectedVisibility.indices().size() != 1
+        || projectedVisibility.indices()[0] != 1
+        || projectedVisibility.statistics().projectedSizeRejectedInstances != 1) {
+        fail("Projected-size visibility filtering is incorrect");
+    }
+    VisibilityList undersizedVisibility;
+    if (undersizedVisibility.reserve(1)
+        && undersizedVisibility.update(projectedShapes.snapshot(), ViewParameters{.viewport = {1.0F, 1.0F}})) {
+        fail("Visibility workspace accepted a source beyond its reserved capacity");
+    }
+    if (!usesCpuVisibility({.mode = VisibilityMode::Automatic, .automaticThreshold = 2}, 2)
+        || usesCpuVisibility({}, 100000)) {
+        fail("Automatic or default direct visibility selection is incorrect");
     }
 
     std::cout << "HeniaUI gfx lifecycle tests passed\n";
