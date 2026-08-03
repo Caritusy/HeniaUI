@@ -792,6 +792,56 @@ int main() {
         fail("OpenGL output exceeded the documented golden-image tolerance");
     }
 
+    Frame transformedFrame;
+    Canvas& transformedCanvas = transformedFrame.begin();
+    {
+        Canvas::ClipScope clip = transformedCanvas.scopedClip(
+            {{12.0F, 12.0F}, {20.0F, 20.0F}});
+        if (!clip.active()) fail("OpenGL transformed clip setup failed");
+        transformedCanvas.fillRect(
+            {{10.0F, 10.0F}, {30.0F, 30.0F}},
+            {1.0F, 0.0F, 1.0F, 1.0F});
+    }
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(kRasterizerDiscard);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (!renderer.render(
+            transformedFrame.finish(),
+            {
+                .framebufferWidth = henia::test::kVisualWidth,
+                .framebufferHeight = henia::test::kVisualHeight,
+                .logicalToFramebuffer = {
+                    .scale = {2.0F, 2.0F},
+                    .translation = {4.0F, 6.0F},
+                },
+            })) {
+        fail("OpenGL rejected a scaled and translated UI viewport");
+    }
+    glFinish();
+    std::array<henia::test::Rgba8, 2> transformProbes{};
+    glReadPixels(
+        35,
+        henia::test::kVisualHeight - 1U - 35U,
+        1,
+        1,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        &transformProbes[0]);
+    glReadPixels(
+        25,
+        henia::test::kVisualHeight - 1U - 35U,
+        1,
+        1,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        &transformProbes[1]);
+    if (transformProbes[0].red < 240 || transformProbes[0].blue < 240
+        || transformProbes[1].red > 8 || transformProbes[1].blue > 8) {
+        fail("OpenGL geometry and scissor did not share the logical-to-framebuffer transform");
+    }
+
     TextureStore contractTextures;
     Frame contractFrame;
     const RenderPacket contractPacket =
@@ -901,8 +951,8 @@ int main() {
         glFinish();
     }
     const OpenGlRenderStatistics statistics = renderer.statistics();
-    if (statistics.successfulFrames != 99 || statistics.frameAttempts != 101
-        || statistics.instanceUploads != 65
+    if (statistics.successfulFrames != 100 || statistics.frameAttempts != 102
+        || statistics.instanceUploads != 67
         || statistics.textureUploads != 4
         || statistics.fullTextureUploads != 3 || statistics.partialTextureUploads != 1
         || statistics.uploadedTextureBytes != 97 || statistics.gpuTextureBytes != 80
@@ -915,6 +965,19 @@ int main() {
         || statistics.profile.cumulative.samples != statistics.successfulFrames
         || statistics.profile.latestSample.identity.sampleId == 0
         || statistics.profile.latestSample.gpuTimingAvailable) {
+        std::cerr << "successful=" << statistics.successfulFrames
+                  << " attempts=" << statistics.frameAttempts
+                  << " uploads=" << statistics.instanceUploads
+                  << " textureUploads=" << statistics.textureUploads
+                  << " fullTextureUploads=" << statistics.fullTextureUploads
+                  << " partialTextureUploads=" << statistics.partialTextureUploads
+                  << " uploadedTextureBytes=" << statistics.uploadedTextureBytes
+                  << " gpuTextureBytes=" << statistics.gpuTextureBytes
+                  << " rejected=" << statistics.rejectedFrames
+                  << " invalid=" << statistics.invalidInputFrames
+                  << " wrongContext=" << statistics.wrongContextCalls
+                  << " profileSamples=" << statistics.profile.cumulative.samples
+                  << '\n';
         fail("OpenGL multi-slot stress statistics are incorrect");
     }
 

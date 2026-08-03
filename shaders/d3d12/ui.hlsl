@@ -1,6 +1,9 @@
 
 cbuffer FrameConstants : register(b0) {
     float2 viewportSize;
+    float2 logicalToFramebufferScale;
+    float2 logicalToFramebufferTranslation;
+    float minimumAntialiasWidth;
 };
 
 #ifndef HENIA_TEXTURE_FREE
@@ -84,7 +87,9 @@ PixelInput vertexMain(VertexInput input) {
     } else {
         pixel = lerp(input.bounds.xy, input.bounds.zw, corner);
     }
-    float2 normalized = pixel / viewportSize;
+    float2 framebufferPixel = pixel * logicalToFramebufferScale
+        + logicalToFramebufferTranslation;
+    float2 normalized = framebufferPixel / viewportSize;
     output.position = float4(normalized.x * 2.0 - 1.0, 1.0 - normalized.y * 2.0, 0.0, 1.0);
     output.pixelPosition = pixel;
     output.textureUv = lerp(input.uv.xy, input.uv.zw, corner);
@@ -270,7 +275,7 @@ float4 pixelMain(PixelInput input) : SV_Target {
             centered,
             primitiveSize * 0.5,
             min(input.shapeMetrics.x, min(primitiveSize.x, primitiveSize.y) * 0.5));
-        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        float antiAlias = max(fwidth(distanceToEdge), minimumAntialiasWidth);
         float outer = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
         if (input.primitiveKind == 1 || input.primitiveKind == 15) {
             float innerDistance = distanceToEdge + max(input.shapeMetrics.y, 0.0);
@@ -303,7 +308,7 @@ float4 pixelMain(PixelInput input) : SV_Target {
                     input.lineNeighbors.zw,
                     halfWidth));
         }
-        float antiAlias = max(fwidth(distanceToLine), 0.75);
+        float antiAlias = max(fwidth(distanceToLine), minimumAntialiasWidth);
         if (hasPrevious) {
             float previousDistance = cappedSegmentDistance(
                 input.pixelPosition,
@@ -340,7 +345,7 @@ float4 pixelMain(PixelInput input) : SV_Target {
         float2 centered = input.pixelPosition
             - (input.linePoints.xy + input.linePoints.zw) * 0.5;
         float distanceToEdge = ellipseDistance(centered, halfSize);
-        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        float antiAlias = max(fwidth(distanceToEdge), minimumAntialiasWidth);
         coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
     } else if (input.primitiveKind == 6) {
         float2 halfSize = (input.linePoints.zw - input.linePoints.xy) * 0.5;
@@ -352,7 +357,7 @@ float4 pixelMain(PixelInput input) : SV_Target {
             input.lineNeighbors.x,
             input.lineNeighbors.y,
             input.shapeMetrics.y);
-        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        float antiAlias = max(fwidth(distanceToEdge), minimumAntialiasWidth);
         coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
     } else if (input.primitiveKind == 7) {
         float2 primitiveSize = input.linePoints.zw - input.linePoints.xy;
@@ -362,7 +367,7 @@ float4 pixelMain(PixelInput input) : SV_Target {
             centered,
             primitiveSize * 0.5,
             min(primitiveSize.x, primitiveSize.y) * 0.5);
-        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        float antiAlias = max(fwidth(distanceToEdge), minimumAntialiasWidth);
         coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
     } else if (input.primitiveKind == 8 || input.primitiveKind == 13) {
         float2 primitiveSize = input.linePoints.zw - input.linePoints.xy;
@@ -373,7 +378,7 @@ float4 pixelMain(PixelInput input) : SV_Target {
             centered,
             halfSize,
             min(input.shapeMetrics.x, min(primitiveSize.x, primitiveSize.y) * 0.5));
-        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        float antiAlias = max(fwidth(distanceToEdge), minimumAntialiasWidth);
         coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
         float2 direction = float2(cos(input.shapeMetrics.y), sin(input.shapeMetrics.y));
         float extent = max(dot(abs(direction), halfSize), 0.0001);
@@ -406,7 +411,7 @@ float4 pixelMain(PixelInput input) : SV_Target {
             centered,
             halfSize,
             input.lineNeighbors);
-        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        float antiAlias = max(fwidth(distanceToEdge), minimumAntialiasWidth);
         float outer = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
         float borderWidth = min(input.shapeMetrics.y, min(halfSize.x, halfSize.y));
         float2 innerHalfSize = max(halfSize - borderWidth, 0.001);

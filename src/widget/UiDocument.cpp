@@ -86,12 +86,40 @@ void UiDocument::setViewport(Vec2 value) noexcept {
         return;
     }
     mViewport = value;
+    mCoordinateSpace.logicalViewport = value;
     if (mRoot != nullptr) {
         mRoot->markLayoutDirty();
     }
 }
 
 Vec2 UiDocument::viewport() const noexcept { return mViewport; }
+
+bool UiDocument::setCoordinateSpace(UiCoordinateSpace space) noexcept {
+    if (!valid(space)) return false;
+    if (mCoordinateSpace == space) return true;
+    const bool viewportChanged = mViewport != space.logicalViewport;
+    const bool dpiChanged = mCoordinateSpace.dpiScale != space.dpiScale;
+    const bool inputChanged = mCoordinateSpace.inputToLogical != space.inputToLogical;
+    const bool renderChanged = mCoordinateSpace.render != space.render;
+    mCoordinateSpace = space;
+    mViewport = space.logicalViewport;
+    ++mStatistics.coordinateSpaceChanges;
+    mStatistics.dpiChanges += dpiChanged ? 1U : 0U;
+    mStatistics.inputTransformChanges += inputChanged ? 1U : 0U;
+    mStatistics.renderTransformChanges += renderChanged ? 1U : 0U;
+    if (mRoot != nullptr) {
+        if (viewportChanged) {
+            mRoot->markLayoutDirty();
+        } else if (dpiChanged || inputChanged || renderChanged) {
+            mRoot->markPaintDirtyRecursive();
+        }
+    }
+    return true;
+}
+
+const UiCoordinateSpace& UiDocument::coordinateSpace() const noexcept {
+    return mCoordinateSpace;
+}
 
 void UiDocument::setTheme(Theme themeValue) noexcept {
     if (mTheme == themeValue) {

@@ -138,6 +138,22 @@ bool Win32InputAdapter::handleMessage(
                 return true;
             }
             return handleUnicodeScalar(static_cast<std::uint64_t>(wParam));
+        case WM_DPICHANGED: {
+            mDpiState.dpiX = LOWORD(wParam);
+            mDpiState.dpiY = HIWORD(wParam);
+            if (mDpiState.dpiX == 0) mDpiState.dpiX = 96;
+            if (mDpiState.dpiY == 0) mDpiState.dpiY = 96;
+            mDpiState.hasSuggestedWindowRect = lParam != 0;
+            if (mDpiState.hasSuggestedWindowRect) {
+                mDpiState.suggestedWindowRect =
+                    *reinterpret_cast<const RECT*>(lParam);
+            } else {
+                mDpiState.suggestedWindowRect = {};
+            }
+            ++mDpiState.revision;
+            mOnDpiChanged(mDpiState);
+            return false;
+        }
         case WM_IME_STARTCOMPOSITION:
             mImeActive = dispatchComposition(InputEventKind::CompositionStart);
             return mImeActive;
@@ -183,9 +199,13 @@ InputEvent Win32InputAdapter::makePointerEvent(
     if (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL) {
         static_cast<void>(ScreenToClient(window, &point));
     }
+    const Vec2 logicalPoint = mDocument->coordinateSpace().inputToLogical.point({
+        static_cast<float>(point.x),
+        static_cast<float>(point.y),
+    });
     InputEvent event{
         .kind = kind,
-        .position = {static_cast<float>(point.x), static_cast<float>(point.y)},
+        .position = logicalPoint,
         .button = pointerButton(message),
     };
     if (message == WM_MOUSEWHEEL) {
@@ -195,6 +215,15 @@ InputEvent Win32InputAdapter::makePointerEvent(
     }
     addModifiers(event);
     return event;
+}
+
+void Win32InputAdapter::setOnDpiChanged(
+    Callback<const Win32DpiChange&> callback) noexcept {
+    mOnDpiChanged = callback;
+}
+
+const Win32DpiChange& Win32InputAdapter::dpiState() const noexcept {
+    return mDpiState;
 }
 
 InputEvent Win32InputAdapter::makeKeyEvent(InputEventKind kind, WPARAM wParam, LPARAM lParam) const noexcept {

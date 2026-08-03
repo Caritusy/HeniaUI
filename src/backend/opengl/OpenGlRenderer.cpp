@@ -116,6 +116,7 @@ using VertexAttribIPointerFn = void(APIENTRYP)(GLuint, GLint, GLenum, GLsizei, c
 using VertexAttribDivisorFn = void(APIENTRYP)(GLuint, GLuint);
 using GetUniformLocationFn = GLint(APIENTRYP)(GLuint, const GlChar*);
 using Uniform2fFn = void(APIENTRYP)(GLint, GLfloat, GLfloat);
+using Uniform1fFn = void(APIENTRYP)(GLint, GLfloat);
 using Uniform1ivFn = void(APIENTRYP)(GLint, GLsizei, const GLint*);
 using ActiveTextureFn = void(APIENTRYP)(GLenum);
 using DrawArraysInstancedFn = void(APIENTRYP)(GLenum, GLint, GLsizei, GLsizei);
@@ -159,6 +160,7 @@ struct GlFunctions final {
     VertexAttribDivisorFn vertexAttribDivisor = nullptr;
     GetUniformLocationFn getUniformLocation = nullptr;
     Uniform2fFn uniform2f = nullptr;
+    Uniform1fFn uniform1f = nullptr;
     Uniform1ivFn uniform1iv = nullptr;
     ActiveTextureFn activeTexture = nullptr;
     DrawArraysInstancedFn drawArraysInstanced = nullptr;
@@ -220,6 +222,7 @@ template <typename Function>
         && load(gl.vertexAttribDivisor, "glVertexAttribDivisor")
         && load(gl.getUniformLocation, "glGetUniformLocation")
         && load(gl.uniform2f, "glUniform2f")
+        && load(gl.uniform1f, "glUniform1f")
         && load(gl.uniform1iv, "glUniform1iv")
         && load(gl.activeTexture, "glActiveTexture")
         && load(gl.drawArraysInstanced, "glDrawArraysInstanced")
@@ -252,6 +255,8 @@ layout(location = 3) in vec2 instanceMetrics;
 layout(location = 4) in uvec4 instanceStyle;
 
 uniform vec2 viewportSize;
+uniform vec2 logicalToFramebufferScale;
+uniform vec2 logicalToFramebufferTranslation;
 
 out vec2 pixelPosition;
 out vec2 textureUv;
@@ -311,7 +316,9 @@ void main() {
     } else {
         pixel = mix(instanceBounds.xy, instanceBounds.zw, corner);
     }
-    vec2 normalized = pixel / viewportSize;
+    vec2 framebufferPixel = pixel * logicalToFramebufferScale
+        + logicalToFramebufferTranslation;
+    vec2 normalized = framebufferPixel / viewportSize;
     gl_Position = vec4(normalized.x * 2.0 - 1.0, 1.0 - normalized.y * 2.0, 0.0, 1.0);
 
     pixelPosition = pixel;
@@ -346,6 +353,7 @@ flat in uint shaderParameter;
 
 uniform sampler2D textures[8];
 uniform int textureAlphaModes[8];
+uniform float minimumAntialiasWidth;
 out vec4 outputColor;
 
 vec4 sampleTexture(uint slot, vec2 uv) {
@@ -495,7 +503,7 @@ void main() {
             centered,
             primitiveSize * 0.5,
             min(shapeMetrics.x, min(primitiveSize.x, primitiveSize.y) * 0.5));
-        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        float antiAlias = max(fwidth(distanceToEdge), minimumAntialiasWidth);
         float outer = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
         if (primitiveKind == 1u || primitiveKind == 15u) {
             float innerDistance = distanceToEdge + max(shapeMetrics.y, 0.0);
@@ -528,7 +536,7 @@ void main() {
                     lineNeighbors.zw,
                     halfWidth));
         }
-        float antiAlias = max(fwidth(distanceToLine), 0.75);
+        float antiAlias = max(fwidth(distanceToLine), minimumAntialiasWidth);
         if (hasPrevious) {
             float previousDistance = cappedSegmentDistance(
                 pixelPosition,
@@ -564,7 +572,7 @@ void main() {
         vec2 halfSize = (linePoints.zw - linePoints.xy) * 0.5;
         vec2 centered = pixelPosition - (linePoints.xy + linePoints.zw) * 0.5;
         float distanceToEdge = ellipseDistance(centered, halfSize);
-        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        float antiAlias = max(fwidth(distanceToEdge), minimumAntialiasWidth);
         coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
     } else if (primitiveKind == 6u) {
         vec2 halfSize = (linePoints.zw - linePoints.xy) * 0.5;
@@ -575,7 +583,7 @@ void main() {
             lineNeighbors.x,
             lineNeighbors.y,
             shapeMetrics.y);
-        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        float antiAlias = max(fwidth(distanceToEdge), minimumAntialiasWidth);
         coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
     } else if (primitiveKind == 7u) {
         vec2 primitiveSize = linePoints.zw - linePoints.xy;
@@ -584,7 +592,7 @@ void main() {
             centered,
             primitiveSize * 0.5,
             min(primitiveSize.x, primitiveSize.y) * 0.5);
-        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        float antiAlias = max(fwidth(distanceToEdge), minimumAntialiasWidth);
         coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
     } else if (primitiveKind == 8u || primitiveKind == 13u) {
         vec2 primitiveSize = linePoints.zw - linePoints.xy;
@@ -594,7 +602,7 @@ void main() {
             centered,
             halfSize,
             min(shapeMetrics.x, min(primitiveSize.x, primitiveSize.y) * 0.5));
-        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        float antiAlias = max(fwidth(distanceToEdge), minimumAntialiasWidth);
         coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
         vec2 direction = vec2(cos(shapeMetrics.y), sin(shapeMetrics.y));
         float extent = max(dot(abs(direction), halfSize), 0.0001);
@@ -623,7 +631,7 @@ void main() {
         vec2 halfSize = primitiveSize * 0.5;
         vec2 centered = pixelPosition - (linePoints.xy + linePoints.zw) * 0.5;
         float distanceToEdge = variableRoundedBoxDistance(centered, halfSize, lineNeighbors);
-        float antiAlias = max(fwidth(distanceToEdge), 0.75);
+        float antiAlias = max(fwidth(distanceToEdge), minimumAntialiasWidth);
         float outer = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
         float borderWidth = min(shapeMetrics.y, min(halfSize.x, halfSize.y));
         vec2 innerHalfSize = max(halfSize - vec2(borderWidth), vec2(0.001));
@@ -740,6 +748,9 @@ struct OpenGlRenderer::Implementation final {
     GLuint program = 0;
     GLuint vertexArray = 0;
     GLint viewportLocation = -1;
+    GLint logicalScaleLocation = -1;
+    GLint logicalTranslationLocation = -1;
+    GLint minimumAntialiasWidthLocation = -1;
     GLint texturesLocation = -1;
     GLint textureAlphaModesLocation = -1;
     GLint maximumTextureSize = 0;
@@ -768,8 +779,7 @@ struct OpenGlRenderer::Implementation final {
         OpenGlExternalTextureOwnership ownership) noexcept;
     [[nodiscard]] bool render(
         const RenderPacket& packet,
-        std::uint32_t width,
-        std::uint32_t height,
+        UiRenderViewport viewport,
         RenderTargetColorSpace targetColorSpace) noexcept;
     [[nodiscard]] bool shutdown() noexcept;
     void abandon() noexcept;
@@ -886,6 +896,10 @@ bool OpenGlRenderer::Implementation::initialize(
     }
 
     viewportLocation = gl.getUniformLocation(program, "viewportSize");
+    logicalScaleLocation = gl.getUniformLocation(program, "logicalToFramebufferScale");
+    logicalTranslationLocation = gl.getUniformLocation(
+        program, "logicalToFramebufferTranslation");
+    minimumAntialiasWidthLocation = gl.getUniformLocation(program, "minimumAntialiasWidth");
     texturesLocation = gl.getUniformLocation(program, "textures");
     textureAlphaModesLocation = gl.getUniformLocation(program, "textureAlphaModes");
     const GLenum uniformError = consumeOperationErrors();
@@ -893,7 +907,10 @@ bool OpenGlRenderer::Implementation::initialize(
         assignGlFailure(error, "OpenGL UI uniform lookup failed", uniformError, "program", program);
         return false;
     }
-    if (viewportLocation < 0 || texturesLocation < 0 || textureAlphaModesLocation < 0) {
+    if (viewportLocation < 0 || logicalScaleLocation < 0
+        || logicalTranslationLocation < 0 || minimumAntialiasWidthLocation < 0
+        || texturesLocation < 0
+        || textureAlphaModesLocation < 0) {
         error = "HeniaUI shader uniforms are unavailable";
         return false;
     }
@@ -1469,9 +1486,10 @@ bool OpenGlRenderer::Implementation::bindExternalTexture(
 
 bool OpenGlRenderer::Implementation::render(
     const RenderPacket& packet,
-    std::uint32_t width,
-    std::uint32_t height,
+    UiRenderViewport viewport,
     RenderTargetColorSpace targetColorSpace) noexcept {
+    const std::uint32_t width = viewport.framebufferWidth;
+    const std::uint32_t height = viewport.framebufferHeight;
     const std::uint64_t frameAttemptId = ++statistics.frameAttempts;
     if (!ready) {
         ++statistics.rejectedFrames;
@@ -1489,8 +1507,13 @@ bool OpenGlRenderer::Implementation::render(
         error = "targetColorSpace is invalid";
         return false;
     }
-    if (width == 0 || height == 0
-        || width > static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())
+    if (!valid(viewport)) {
+        ++statistics.rejectedFrames;
+        ++statistics.invalidInputFrames;
+        error = "UI render viewport transform or framebuffer size is invalid";
+        return false;
+    }
+    if (width > static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())
         || height > static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())) {
         ++statistics.rejectedFrames;
         ++statistics.invalidInputFrames;
@@ -1534,7 +1557,7 @@ bool OpenGlRenderer::Implementation::render(
             ScissorRect scissor{};
             hasVisibleBatches = hasVisibleBatches
                 || (batch.instanceCount != 0
-                    && makeScissorRect(batch.clip.area, width, height, scissor));
+                    && makeScissorRect(batch.clip.area, viewport, scissor));
         } else {
             hasVisibleBatches = hasVisibleBatches || batch.instanceCount != 0;
         }
@@ -1556,7 +1579,7 @@ bool OpenGlRenderer::Implementation::render(
     for (const DrawBatch& batch : packet.batches()) {
         if (batch.clip.enabled) {
             ScissorRect scissor{};
-            if (!makeScissorRect(batch.clip.area, width, height, scissor)) continue;
+            if (!makeScissorRect(batch.clip.area, viewport, scissor)) continue;
         }
         for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
             const TextureHandle handle = batch.textures[slot];
@@ -1641,6 +1664,19 @@ bool OpenGlRenderer::Implementation::render(
     gl.blendEquationSeparate(kFunctionAdd, kFunctionAdd);
     gl.useProgram(program);
     gl.uniform2f(viewportLocation, static_cast<float>(width), static_cast<float>(height));
+    gl.uniform2f(
+        logicalScaleLocation,
+        viewport.logicalToFramebuffer.scale.x,
+        viewport.logicalToFramebuffer.scale.y);
+    gl.uniform2f(
+        logicalTranslationLocation,
+        viewport.logicalToFramebuffer.translation.x,
+        viewport.logicalToFramebuffer.translation.y);
+    gl.uniform1f(
+        minimumAntialiasWidthLocation,
+        0.75F / std::max(
+            viewport.logicalToFramebuffer.scale.x,
+            viewport.logicalToFramebuffer.scale.y));
     constexpr std::array<GLint, DrawBatch::kTextureCapacity> textureUnits{0, 1, 2, 3, 4, 5, 6, 7};
     gl.uniform1iv(texturesLocation, static_cast<GLsizei>(textureUnits.size()), textureUnits.data());
     for (std::uint32_t slot = 0; slot < DrawBatch::kTextureCapacity; ++slot) {
@@ -1721,7 +1757,7 @@ bool OpenGlRenderer::Implementation::render(
         }
         ScissorRect scissor{};
         if (batch.clip.enabled
-            && !makeScissorRect(batch.clip.area, width, height, scissor)) {
+            && !makeScissorRect(batch.clip.area, viewport, scissor)) {
             continue;
         }
         if (batch.blend == BlendMode::Additive) {
@@ -1905,6 +1941,9 @@ bool OpenGlRenderer::Implementation::shutdown() noexcept {
     program = 0;
     vertexArray = 0;
     viewportLocation = -1;
+    logicalScaleLocation = -1;
+    logicalTranslationLocation = -1;
+    minimumAntialiasWidthLocation = -1;
     texturesLocation = -1;
     textureAlphaModesLocation = -1;
     maximumTextureSize = 0;
@@ -1932,6 +1971,9 @@ void OpenGlRenderer::Implementation::abandon() noexcept {
     program = 0;
     vertexArray = 0;
     viewportLocation = -1;
+    logicalScaleLocation = -1;
+    logicalTranslationLocation = -1;
+    minimumAntialiasWidthLocation = -1;
     texturesLocation = -1;
     textureAlphaModesLocation = -1;
     maximumTextureSize = 0;
@@ -2119,7 +2161,20 @@ bool OpenGlRenderer::render(
     std::uint32_t viewportWidth,
     std::uint32_t viewportHeight,
     RenderTargetColorSpace targetColorSpace) noexcept {
-    return mImplementation->render(packet, viewportWidth, viewportHeight, targetColorSpace);
+    return render(
+        packet,
+        {
+            .framebufferWidth = viewportWidth,
+            .framebufferHeight = viewportHeight,
+        },
+        targetColorSpace);
+}
+
+bool OpenGlRenderer::render(
+    const RenderPacket& packet,
+    UiRenderViewport viewport,
+    RenderTargetColorSpace targetColorSpace) noexcept {
+    return mImplementation->render(packet, viewport, targetColorSpace);
 }
 bool OpenGlRenderer::reportGpuTime(
     std::uint64_t sampleId,

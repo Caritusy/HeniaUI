@@ -445,6 +445,49 @@ void verifyThemeCascade(TextPainter& painter, FontHandle font) {
         "clearing a widget override did not restore theme inheritance");
 }
 
+void verifyCoordinateSpaceInvalidation(TextPainter& painter) {
+    UiDocument document(painter);
+    document.reserve(32, 8);
+    document.setViewport({200.0F, 100.0F});
+    auto root = std::make_unique<ProbeWidget>(
+        Vec2{200.0F, 100.0F},
+        Color{0.2F, 0.4F, 0.8F, 1.0F});
+    ProbeWidget* probe = root.get();
+    document.setRoot(std::move(root));
+    static_cast<void>(document.compose());
+
+    const UiDocumentStatistics before = document.statistics();
+    require(document.setCoordinateSpace(makeUiCoordinateSpace(
+            {200.0F, 100.0F},
+            {250.0F, 125.0F},
+            300,
+            150,
+            1.5F)),
+        "document rejected an explicit coordinate space");
+    static_cast<void>(document.compose());
+    const UiDocumentStatistics transformed = document.statistics();
+    require(transformed.coordinateSpaceChanges == before.coordinateSpaceChanges + 1
+            && transformed.dpiChanges == before.dpiChanges + 1
+            && transformed.inputTransformChanges == before.inputTransformChanges + 1
+            && transformed.renderTransformChanges == before.renderTransformChanges + 1
+            && transformed.layoutPasses == before.layoutPasses
+            && transformed.paintPasses == before.paintPasses + 1,
+        "transform-only coordinate change did not stay paint-only");
+
+    const std::uint64_t arrangeBeforeResize = probe->arrangeCalls;
+    require(document.setCoordinateSpace(makeUiCoordinateSpace(
+            {240.0F, 120.0F},
+            {300.0F, 150.0F},
+            360,
+            180,
+            1.5F)),
+        "document rejected a resized logical viewport");
+    static_cast<void>(document.compose());
+    require(document.statistics().layoutPasses == transformed.layoutPasses + 1
+            && probe->arrangeCalls == arrangeBeforeResize + 1,
+        "logical viewport change did not invalidate layout");
+}
+
 } // namespace
 
 int main() {
@@ -461,6 +504,7 @@ int main() {
     verifyReparentedSegmentIdentity(painter);
     verifyStableEmptySnapshots(painter);
     verifyThemeCascade(painter, font);
+    verifyCoordinateSpaceInvalidation(painter);
 
     std::cout << "HeniaUI retained subtree tests passed\n";
     return EXIT_SUCCESS;

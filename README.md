@@ -137,6 +137,10 @@ ctest --preset dev
 The core library itself is platform-neutral and has no external dependencies. The preset is merely the repository's ready-to-use Windows configuration.
 
 Windows builds also produce `HeniaUIVisualSandbox.exe`. It owns a normal Win32/WGL window, builds a Segoe UI alpha atlas through the optional Win32 platform target, and renders the complete interface through `HeniaUI::OpenGL` without ImGui.
+Both Win32 examples opt into Per-Monitor V2 awareness, keep widget/layout units
+logical, map input and framebuffer pixels explicitly, and reuse density-specific
+font atlas variants when moved between monitors. The host/injected-window
+contract is documented in [coordinate spaces, DPI, and framebuffer scaling](docs/coordinate-spaces.md).
 
 `HeniaUIEffectsExample.exe` is the compact, interactive gallery for the
 currently implemented 2D drawing, effects, text, clipping, blending, image,
@@ -199,6 +203,8 @@ target_link_libraries(MyApplication PRIVATE
 - RTTI is not required by the library.
 - OpenGL consumes an already-current context and restores the pipeline state it changes.
 - D3D12 records into a host-owned command list and never waits from the frame path.
+- Input, layout, and framebuffer coordinates are independent explicit spaces;
+  OpenGL and D3D12 consume the same `UiRenderViewport` transform.
 - D3D12 Release builds embed build-validated shader bytecode and can reuse
   host-owned pipeline libraries without loading the runtime HLSL compiler; see
   [D3D12 command-list integration](docs/d3d12-integration.md#shader-packages-and-pipeline-libraries).

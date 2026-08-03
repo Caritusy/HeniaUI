@@ -660,6 +660,55 @@ void testInvalidGeometryAndCheckedArithmetic() {
         "checked narrowing accepted an out-of-range value");
 }
 
+void testCoordinateSpaceTransforms() {
+    constexpr Vec2 logicalViewport{800.0F, 600.0F};
+    constexpr std::array scales{1.0F, 1.25F, 1.5F, 2.0F};
+    for (float scale : scales) {
+        const UiCoordinateSpace space = makeUiCoordinateSpace(
+            logicalViewport,
+            {1000.0F, 750.0F},
+            static_cast<std::uint32_t>(logicalViewport.x * scale),
+            static_cast<std::uint32_t>(logicalViewport.y * scale),
+            scale);
+        require(valid(space), "a standard Windows DPI scale produced an invalid coordinate space");
+        const Vec2 logicalPoint = space.inputToLogical.point({250.0F, 187.5F});
+        const Vec2 framebufferPoint = inputToFramebuffer(space, {250.0F, 187.5F});
+        require(std::abs(logicalPoint.x - 200.0F) < 0.0001F
+                && std::abs(logicalPoint.y - 150.0F) < 0.0001F
+                && std::abs(framebufferPoint.x - 200.0F * scale) < 0.0001F
+                && std::abs(framebufferPoint.y - 150.0F * scale) < 0.0001F,
+            "independent input and framebuffer transforms did not preserve alignment");
+    }
+
+    const UiRenderViewport translatedViewport{
+        .framebufferWidth = 100,
+        .framebufferHeight = 100,
+        .logicalToFramebuffer = {
+            .scale = {1.5F, 1.5F},
+            .translation = {7.25F, 3.5F},
+        },
+    };
+    ScissorRect scissor{};
+    require(makeScissorRect({{10.2F, 20.2F}, {30.4F, 40.1F}}, translatedViewport, scissor)
+            && scissor.left == 22 && scissor.top == 33
+            && scissor.right == 53 && scissor.bottom == 64,
+        "translated non-integer logical clip did not map conservatively to framebuffer pixels");
+
+    const AxisAlignedTransform nonUniform{.scale = {2.0F, 3.0F}};
+    require(std::abs(logicalLineWidthForPhysicalPixels(2.0F, {1.0F, 0.0F}, nonUniform)
+                - 2.0F / 3.0F) < 0.0001F
+            && std::abs(logicalLineWidthForPhysicalPixels(
+                    2.0F, {0.0F, 1.0F}, nonUniform) - 1.0F) < 0.0001F,
+        "physical-pixel line width did not account for a non-uniform transform");
+
+    UiCoordinateSpace invalid = makeUiCoordinateSpace(logicalViewport, {}, 800, 600);
+    require(!valid(invalid), "a zero input extent produced a valid coordinate space");
+    invalid = makeUiCoordinateSpace(logicalViewport, logicalViewport, 800, 600);
+    invalid.render.logicalToFramebuffer.scale.x = std::numeric_limits<float>::quiet_NaN();
+    require(!valid(invalid) && !makeScissorRect({}, invalid.render, scissor),
+        "a non-finite render transform was accepted");
+}
+
 void testPacketSnapshotsRemainImmutable() {
     Frame frame;
     frame.reserve(16, 4, CapacityPolicy::Fixed);
@@ -980,6 +1029,7 @@ void testFallbackShapingAndDynamicGlyphPages() {
             .bearing = {0.0F, 2.0F},
             .advance = 2.0F,
             .pixels = cjkPixels,
+            .logicalSize = {1.0F, 1.0F},
         }),
         "dynamic CJK glyph insertion failed");
     require(cache.renderLayout(*beforeDynamic) == nullptr,
@@ -1018,6 +1068,7 @@ void testFallbackShapingAndDynamicGlyphPages() {
             && dynamicLayout->identity != layoutIdentityBeforeDynamic
             && dynamicLayout->glyphs[0].codepoint == U'\u4E2D'
             && dynamicGlyph != nullptr
+            && dynamicGlyph->size == Vec2{1.0F, 1.0F}
             && fonts.find(latin)->atlasFor(*dynamicGlyph) == dynamic.pages()[0],
         "font revision did not invalidate fallback layout for a new atlas glyph");
 }
@@ -1242,6 +1293,7 @@ int main() {
     testShaderDrivenPrimitivePayloads();
     testFixedCapacityOverflowIsRejected();
     testInvalidGeometryAndCheckedArithmetic();
+    testCoordinateSpaceTransforms();
     testPacketSnapshotsRemainImmutable();
     testFixedSnapshotPoolRejectsExhaustion();
     testPacketSnapshotsSupportConcurrentConsumption();

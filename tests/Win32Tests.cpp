@@ -5,6 +5,7 @@
 #include "henia/ui/widget/controls/Panel.h"
 
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -72,6 +73,29 @@ public:
     bool throwOnPointerUp = false;
 };
 
+class DpiProbe final {
+public:
+    explicit DpiProbe(UiDocument& document) noexcept : mDocument(&document) {}
+
+    void changed(const Win32DpiChange& change) {
+        last = change;
+        ++calls;
+        const Vec2 scale = change.scale();
+        static_cast<void>(mDocument->setCoordinateSpace(makeUiCoordinateSpace(
+            {200.0F, 100.0F},
+            {200.0F * scale.x, 100.0F * scale.y},
+            static_cast<std::uint32_t>(200.0F * scale.x),
+            static_cast<std::uint32_t>(100.0F * scale.y),
+            scale.x)));
+    }
+
+    Win32DpiChange last{};
+    std::uint32_t calls = 0;
+
+private:
+    UiDocument* mDocument = nullptr;
+};
+
 class NativeTestWindow final {
 public:
     NativeTestWindow() {
@@ -134,13 +158,26 @@ void verifyWin32InputAdapter(TextPainter& painter) {
     document.setViewport({200.0F, 100.0F});
     auto root = std::make_unique<Panel>();
     InputProbe& probe = root->emplaceChild<InputProbe>();
-    probe.setLayoutParameters({.width = 200.0F, .height = 100.0F});
+    probe.setLayoutParameters({.width = 100.0F, .height = 100.0F});
     document.setRoot(std::move(root));
     static_cast<void>(document.compose());
 
     Win32InputAdapter adapter(document);
     NativeTestWindow native;
     const HWND window = native.get();
+
+    if (!document.setCoordinateSpace(makeUiCoordinateSpace(
+            {200.0F, 100.0F}, {400.0F, 200.0F}, 300, 150, 1.5F))) {
+        fail("Unable to configure independent Win32 input and framebuffer transforms");
+    }
+    if (!adapter.handleMessage(
+            window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(150, 100))
+        || !probe.pressed()) {
+        fail("Win32 physical pointer coordinates were not converted to logical units");
+    }
+    if (!adapter.handleMessage(window, WM_LBUTTONUP, 0, MAKELPARAM(150, 100))) {
+        fail("Transformed Win32 pointer release was not handled");
+    }
 
     pointerDown(adapter, window, WM_LBUTTONDOWN, MK_LBUTTON);
     if (GetCapture() != window || !probe.pressed() || !probe.focused()) {
@@ -255,6 +292,30 @@ void verifyWin32InputAdapter(TextPainter& painter) {
         fail("Focus loss did not discard a pending UTF-16 high surrogate");
     }
 
+    DpiProbe dpiProbe(document);
+    adapter.setOnDpiChanged(
+        Callback<const Win32DpiChange&>::bind<DpiProbe, &DpiProbe::changed>(dpiProbe));
+    RECT suggested{10, 20, 410, 220};
+    constexpr std::array dpis{120U, 144U, 192U};
+    for (std::uint32_t dpi : dpis) {
+        if (adapter.handleMessage(
+                window,
+                WM_DPICHANGED,
+                MAKEWPARAM(dpi, dpi),
+                reinterpret_cast<LPARAM>(&suggested))) {
+            fail("WM_DPICHANGED was consumed instead of remaining host-owned");
+        }
+    }
+    const Win32DpiChange& dpiState = adapter.dpiState();
+    if (dpiProbe.calls != dpis.size() || dpiState.revision != dpis.size()
+        || dpiState.dpiX != 192 || dpiState.dpiY != 192
+        || !dpiState.hasSuggestedWindowRect
+        || dpiState.suggestedWindowRect.left != suggested.left
+        || document.coordinateSpace().dpiScale != 2.0F
+        || document.coordinateSpace().render.framebufferWidth != 400) {
+        fail("Win32 DPI notifications did not update per-window host state synchronously");
+    }
+
     pointerDown(adapter, window, WM_LBUTTONDOWN, MK_LBUTTON);
     const int destroyFocusLostBefore = probe.focusLostCalls;
     if (adapter.handleMessage(window, WM_DESTROY, 0, 0)
@@ -287,6 +348,33 @@ int main() {
     if (atlas.format != TextureFormat::Alpha8 || atlas.width != 512 || atlas.height != 256
         || atlas.pixels.empty()) {
         std::cerr << "Win32 font atlas texture is invalid\n";
+        return EXIT_FAILURE;
+    }
+
+    Win32FontScaleCache scaleCache(
+        textures,
+        fonts,
+        {
+            .family = L"Segoe UI",
+            .logicalPixelHeight = 18.0F,
+            .atlasWidth = 256,
+            .atlasHeight = 128,
+            .ranges = ranges,
+        });
+    const FontHandle font100 = scaleCache.selectForDpi(96);
+    const FontHandle font125 = scaleCache.selectForDpi(120);
+    const FontHandle font150 = scaleCache.selectForDpi(144);
+    const FontHandle font200 = scaleCache.selectForDpi(192);
+    const FontHandle font125Again = scaleCache.selectForDpi(120);
+    const Win32FontScaleCacheStatistics scaleStatistics = scaleCache.statistics();
+    if (!font100.valid() || !font125.valid() || !font150.valid() || !font200.valid()
+        || font125Again != font125 || scaleStatistics.variants != 4
+        || scaleStatistics.cacheHits != 1 || scaleStatistics.cacheMisses != 4
+        || std::abs(fonts.find(font100)->pixelSize() - 18.0F) > 0.0001F
+        || std::abs(fonts.find(font125)->pixelSize() - 18.0F) > 0.0001F
+        || std::abs(fonts.find(font150)->pixelSize() - 18.0F) > 0.0001F
+        || std::abs(fonts.find(font200)->pixelSize() - 18.0F) > 0.0001F) {
+        std::cerr << "Win32 scaled font variants churned or exposed physical metrics\n";
         return EXIT_FAILURE;
     }
 

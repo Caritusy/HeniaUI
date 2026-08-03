@@ -816,6 +816,46 @@ int main() {
         fail("D3D12 texture bookkeeping overflow was not rejected deterministically");
     }
 
+    D3D12Renderer transformRenderer;
+    ComPtr<ID3D12CommandAllocator> transformAllocator;
+    ComPtr<ID3D12GraphicsCommandList> transformCommandList;
+    if (!transformRenderer.initialize(
+            *device.Get(),
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            {.instanceCapacity = 4, .submissionCapacity = 1, .batchCapacity = 1})
+        || FAILED(device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(&transformAllocator)))
+        || FAILED(device->CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            transformAllocator.Get(),
+            nullptr,
+            IID_PPV_ARGS(&transformCommandList)))) {
+        fail("Unable to create the D3D12 transformed-viewport fixture");
+    }
+    transformCommandList->OMSetRenderTargets(1, &renderTarget, FALSE, nullptr);
+    if (!transformRenderer.record(
+            offscreenPacket,
+            *transformCommandList.Get(),
+            0,
+            {
+                .framebufferWidth = width,
+                .framebufferHeight = height,
+                .logicalToFramebuffer = {.scale = {0.25F, 0.25F}},
+            })
+        || transformRenderer.statistics().drawCalls != 1
+        || transformRenderer.statistics().instanceUploads != 1
+        || FAILED(transformCommandList->Close())) {
+        fail("D3D12 did not transform logical geometry and clips into the framebuffer");
+    }
+    ID3D12CommandList* transformLists[]{transformCommandList.Get()};
+    queue->ExecuteCommandLists(1, transformLists);
+    if (!waitForQueue(*device.Get(), *queue.Get())) {
+        fail("D3D12 transformed-viewport submission timed out");
+    }
+    transformRenderer.shutdown();
+
     if (!henia::test::verifyD3D12Validation(*device.Get())) {
         fail("D3D12 validation reported an error");
     }

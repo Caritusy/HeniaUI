@@ -35,9 +35,12 @@ bool DynamicGlyphAtlas::add(std::span<const RasterizedGlyph> glyphs) {
     std::vector<GlyphMetrics> metrics;
     metrics.reserve(glyphs.size());
     for (const RasterizedGlyph& glyph : glyphs) {
+        const bool hasLogicalSize = glyph.logicalSize.x > 0.0F && glyph.logicalSize.y > 0.0F;
         GlyphMetrics metric{
             .codepoint = glyph.codepoint,
-            .size = {static_cast<float>(glyph.width), static_cast<float>(glyph.height)},
+            .size = hasLogicalSize
+                ? glyph.logicalSize
+                : Vec2{static_cast<float>(glyph.width), static_cast<float>(glyph.height)},
             .bearing = glyph.bearing,
             .advance = glyph.advance,
             .glyphId = glyph.glyphId,
@@ -96,6 +99,8 @@ DynamicGlyphAtlasStatistics DynamicGlyphAtlas::statistics() const noexcept {
 }
 
 bool DynamicGlyphAtlas::valid(const RasterizedGlyph& glyph) const noexcept {
+    const bool defaultLogicalSize = glyph.logicalSize == Vec2{};
+    const bool explicitLogicalSize = glyph.logicalSize.x > 0.0F && glyph.logicalSize.y > 0.0F;
     const bool advanceOnly = glyph.width == 0 && glyph.height == 0
         && glyph.rowPitch == 0 && glyph.pixels.empty();
     std::size_t required = 0;
@@ -115,6 +120,8 @@ bool DynamicGlyphAtlas::valid(const RasterizedGlyph& glyph) const noexcept {
     return glyph.codepoint != U'\0' && glyph.codepoint <= 0x10FFFFU
         && !(glyph.codepoint >= 0xD800U && glyph.codepoint <= 0xDFFFU)
         && (advanceOnly || drawable)
+        && std::isfinite(glyph.logicalSize.x) && std::isfinite(glyph.logicalSize.y)
+        && (defaultLogicalSize || explicitLogicalSize)
         && std::isfinite(glyph.bearing.x) && std::isfinite(glyph.bearing.y)
         && std::isfinite(glyph.advance) && glyph.advance >= 0.0F;
 }

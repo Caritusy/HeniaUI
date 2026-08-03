@@ -333,8 +333,7 @@ struct D3D12Renderer::Implementation final {
         const RenderPacket& packet,
         ID3D12GraphicsCommandList& commandList,
         std::uint32_t submissionSlot,
-        std::uint32_t width,
-        std::uint32_t height,
+        UiRenderViewport viewport,
         henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept;
     [[nodiscard]] bool validateCommandList(ID3D12GraphicsCommandList& commandList) noexcept;
     [[nodiscard]] bool validateDeviceChild(
@@ -493,8 +492,8 @@ bool D3D12Renderer::Implementation::createRootSignature() noexcept {
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters[1].Constants.ShaderRegister = 0;
     parameters[1].Constants.RegisterSpace = 0;
-    parameters[1].Constants.Num32BitValues = 2;
-    parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    parameters[1].Constants.Num32BitValues = 7;
+    parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters[2].Constants.ShaderRegister = 1;
     parameters[2].Constants.RegisterSpace = 0;
@@ -1290,9 +1289,10 @@ bool D3D12Renderer::Implementation::record(
     const RenderPacket& packet,
     ID3D12GraphicsCommandList& commandList,
     std::uint32_t submissionSlot,
-    std::uint32_t width,
-    std::uint32_t height,
+    UiRenderViewport viewport,
     henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
+    const std::uint32_t width = viewport.framebufferWidth;
+    const std::uint32_t height = viewport.framebufferHeight;
     const std::uint64_t frameAttemptId = ++statistics.frameAttempts;
     if (!ready || submissionSlot >= submissions.size()) {
         ++statistics.rejectedFrames;
@@ -1303,8 +1303,13 @@ bool D3D12Renderer::Implementation::record(
         ++statistics.rejectedFrames;
         return false;
     }
-    if (width == 0 || height == 0
-        || width > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max())
+    if (!valid(viewport)) {
+        ++statistics.rejectedFrames;
+        ++statistics.invalidInputFrames;
+        error = "UI render viewport transform or framebuffer size is invalid";
+        return false;
+    }
+    if (width > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max())
         || height > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max())) {
         ++statistics.rejectedFrames;
         ++statistics.invalidInputFrames;
@@ -1347,7 +1352,7 @@ bool D3D12Renderer::Implementation::record(
             }
             ScissorRect scissor{};
             const bool visible = batch.instanceCount != 0
-                && makeScissorRect(batch.clip.area, width, height, scissor);
+                && makeScissorRect(batch.clip.area, viewport, scissor);
             hasVisibleBatches = hasVisibleBatches || visible;
             usesTextures = usesTextures || (visible && batch.textureCount != 0);
         } else {
@@ -1384,7 +1389,7 @@ bool D3D12Renderer::Implementation::record(
     for (const DrawBatch& batch : packet.batches()) {
         if (batch.clip.enabled) {
             ScissorRect scissor{};
-            if (!makeScissorRect(batch.clip.area, width, height, scissor)) continue;
+            if (!makeScissorRect(batch.clip.area, viewport, scissor)) continue;
         }
         for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
             const TextureHandle handle = batch.textures[slot];
@@ -1435,7 +1440,7 @@ bool D3D12Renderer::Implementation::record(
     for (const DrawBatch& batch : packet.batches()) {
         if (batch.clip.enabled) {
             ScissorRect scissor{};
-            if (!makeScissorRect(batch.clip.area, width, height, scissor)) continue;
+            if (!makeScissorRect(batch.clip.area, viewport, scissor)) continue;
         }
         for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
             const std::uint32_t index = batch.textures[slot].value() - 1U;
@@ -1489,16 +1494,28 @@ bool D3D12Renderer::Implementation::record(
     else ++statistics.directUploadFrames;
 
     const auto submitStarted = std::chrono::steady_clock::now();
-    const std::array viewportConstants{static_cast<float>(width), static_cast<float>(height)};
+    const std::array viewportConstants{
+        static_cast<float>(width),
+        static_cast<float>(height),
+        viewport.logicalToFramebuffer.scale.x,
+        viewport.logicalToFramebuffer.scale.y,
+        viewport.logicalToFramebuffer.translation.x,
+        viewport.logicalToFramebuffer.translation.y,
+        0.75F / std::max(
+            viewport.logicalToFramebuffer.scale.x,
+            viewport.logicalToFramebuffer.scale.y),
+    };
     if (usesTextures) {
         ID3D12DescriptorHeap* heaps[]{gpuBatchHeap.Get()};
         commandList.SetDescriptorHeaps(1, heaps);
         commandList.SetGraphicsRootSignature(rootSignature.Get());
-        commandList.SetGraphicsRoot32BitConstants(1, 2, viewportConstants.data(), 0);
+        commandList.SetGraphicsRoot32BitConstants(
+            1, static_cast<UINT>(viewportConstants.size()), viewportConstants.data(), 0);
         ++statistics.descriptorHeapBindings;
     } else {
         commandList.SetGraphicsRootSignature(textureFreeRootSignature.Get());
-        commandList.SetGraphicsRoot32BitConstants(0, 2, viewportConstants.data(), 0);
+        commandList.SetGraphicsRoot32BitConstants(
+            0, static_cast<UINT>(viewportConstants.size()), viewportConstants.data(), 0);
         ++statistics.textureFreeFrames;
     }
     commandList.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1512,7 +1529,7 @@ bool D3D12Renderer::Implementation::record(
         static_cast<UINT>(sizeof(DrawInstance)),
     };
     commandList.IASetVertexBuffers(0, 1, &instanceView);
-    const D3D12_VIEWPORT viewport{
+    const D3D12_VIEWPORT nativeViewport{
         0.0F,
         0.0F,
         static_cast<float>(width),
@@ -1520,7 +1537,7 @@ bool D3D12Renderer::Implementation::record(
         0.0F,
         1.0F,
     };
-    commandList.RSSetViewports(1, &viewport);
+    commandList.RSSetViewports(1, &nativeViewport);
 
     BlendMode activeBlend = static_cast<BlendMode>(0xFF);
     for (std::size_t batchIndex = 0; batchIndex < packet.batches().size(); ++batchIndex) {
@@ -1530,7 +1547,7 @@ bool D3D12Renderer::Implementation::record(
         }
         ScissorRect converted{};
         if (batch.clip.enabled
-            && !makeScissorRect(batch.clip.area, width, height, converted)) {
+            && !makeScissorRect(batch.clip.area, viewport, converted)) {
             continue;
         }
         if (activeBlend != batch.blend) {
@@ -1809,12 +1826,28 @@ bool D3D12Renderer::record(
     std::uint32_t viewportWidth,
     std::uint32_t viewportHeight,
     henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
+    return record(
+        packet,
+        commandList,
+        submissionSlot,
+        {
+            .framebufferWidth = viewportWidth,
+            .framebufferHeight = viewportHeight,
+        },
+        submissionReuse);
+}
+
+bool D3D12Renderer::record(
+    const RenderPacket& packet,
+    ID3D12GraphicsCommandList& commandList,
+    std::uint32_t submissionSlot,
+    UiRenderViewport viewport,
+    henia::backend::d3d12::SubmissionReuse submissionReuse) noexcept {
     return mImplementation->record(
         packet,
         commandList,
         submissionSlot,
-        viewportWidth,
-        viewportHeight,
+        viewport,
         submissionReuse);
 }
 

@@ -51,6 +51,18 @@ LRESULT CALLBACK windowProcedure(
         limits->ptMinTrackSize = {1050, 720};
         return 0;
     }
+    if (message == WM_DPICHANGED && longParameter != 0) {
+        const RECT& suggested = *reinterpret_cast<const RECT*>(longParameter);
+        SetWindowPos(
+            window,
+            nullptr,
+            suggested.left,
+            suggested.top,
+            suggested.right - suggested.left,
+            suggested.bottom - suggested.top,
+            SWP_NOACTIVATE | SWP_NOZORDER);
+        return 0;
+    }
     if (message == WM_ERASEBKGND) return 1;
     if (message == WM_DESTROY) {
         PostQuitMessage(0);
@@ -500,6 +512,8 @@ void drawGallery(
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (commandLineContains(L"--help")) return 0;
+    static_cast<void>(SetProcessDpiAwarenessContext(
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2));
     const bool headless = commandLineContains(L"--headless");
     const bool snapshot = commandLineContains(L"--snapshot");
     NativeWindow native;
@@ -512,13 +526,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     TextureStore textures;
     FontStore fonts;
     constexpr std::array ranges{UnicodeRange{U' ', U'~'}};
-    const FontHandle font = Win32FontLoader::load(textures, fonts, {
+    Win32FontScaleCache fontScaleCache(textures, fonts, {
         .family = L"Segoe UI",
-        .pixelHeight = 36,
+        .logicalPixelHeight = 36.0F,
         .atlasWidth = 1024,
         .atlasHeight = 512,
         .ranges = ranges,
     });
+    std::uint32_t selectedDpi = GetDpiForWindow(native.window);
+    FontHandle font = fontScaleCache.selectForDpi(selectedDpi);
     const TextureHandle imageTexture = createImageTexture(textures);
     const TextureHandle panelTexture = createNinePatchTexture(textures);
     const TextureHandle sdfTexture = createSdfTexture(textures);
@@ -562,6 +578,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             std::max(client.right - client.left, 1L));
         const std::uint32_t height = static_cast<std::uint32_t>(
             std::max(client.bottom - client.top, 1L));
+        const std::uint32_t dpi = std::max(GetDpiForWindow(native.window), 1U);
+        const float dpiScale = static_cast<float>(dpi) / 96.0F;
+        if (dpi != selectedDpi) {
+            font = fontScaleCache.selectForDpi(dpi);
+            if (!font.valid() || !renderer.synchronizeTextures(textures)) {
+                result = showRendererError(
+                    native.window, "Unable to select or upload the DPI-scaled font atlas", 8);
+                break;
+            }
+            selectedDpi = dpi;
+        }
+        const float logicalWidth = static_cast<float>(width) / dpiScale;
+        const float logicalHeight = static_cast<float>(height) / dpiScale;
         const float time = std::chrono::duration<float>(
             std::chrono::steady_clock::now() - started).count();
 
@@ -570,14 +599,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         glClear(GL_COLOR_BUFFER_BIT);
         Canvas& canvas = frame.begin();
         drawGallery(canvas, text, font, imageTexture, panelTexture, sdfTexture,
-            static_cast<float>(width), static_cast<float>(height), time);
+            logicalWidth, logicalHeight, time);
         const RenderPacket packet = frame.finish();
         if (!packet) {
             result = showRendererError(
                 native.window, "Frame packet build rejected the gallery command stream", 4);
             break;
         }
-        if (!renderer.render(packet, width, height)) {
+        if (!renderer.render(
+                packet,
+                {
+                    .framebufferWidth = width,
+                    .framebufferHeight = height,
+                    .logicalToFramebuffer = {.scale = {dpiScale, dpiScale}},
+                })) {
             result = showRendererError(native.window, renderer.lastError(), 4);
             break;
         }
@@ -593,7 +628,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
         const PacketStatistics& statistics = packet.statistics();
         wchar_t title[256]{};
-        swprintf_s(title, L"HeniaUI Effects Gallery | %llu instances | %llu effects | %llu batches | ESC closes",
+        swprintf_s(title, L"HeniaUI Effects Gallery | %u%% DPI | %llu instances | %llu effects | %llu batches | ESC closes",
+            dpi * 100U / 96U,
             static_cast<unsigned long long>(statistics.instances),
             static_cast<unsigned long long>(statistics.effectInstances),
             static_cast<unsigned long long>(statistics.batches));

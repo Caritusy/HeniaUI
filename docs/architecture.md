@@ -87,6 +87,14 @@ batch merely because its primitive kind changes.
 
 ### Analytic 2D geometry
 
+Widget, text, and display-list geometry is expressed in logical UI units.
+`UiCoordinateSpace` defines independent input-to-logical and
+logical-to-framebuffer transforms per document/window; both backends apply the
+latter only at the raster boundary and convert logical clips to physical
+scissors. DPI is explicit resource metadata rather than an implicit layout
+multiplier. The full host and injected-window contract is in
+[Coordinate spaces, DPI, and framebuffer scaling](coordinate-spaces.md).
+
 Analytic shape instances keep logical SDF bounds separate from raster geometry.
 Filled and stroked rectangles expand their GPU geometry by a controlled two-pixel
 fringe, so the outside half of the antialias transition is not clipped while
@@ -105,9 +113,9 @@ one textured instance and a piecewise UV remap. These focused primitives retain
 the existing batch and texture-table model without introducing a general path
 or filter engine.
 
-Lines are expanded by the vertex shader into oriented pixel-space quads. Their
-width therefore stays in framebuffer pixels at every angle and viewport size;
-the host applies any desired logical-coordinate/DPI transform before recording.
+Lines are expanded by the vertex shader into oriented quads. Their width is
+logical by default and therefore follows UI scaling; hosts that need a stable
+physical width use `logicalLineWidthForPhysicalPixels` before recording.
 Open paths expose butt, square, and round caps. Polylines expose bevel and round
 joins. Adjacent segments carry their neighbor endpoints and partition coverage
 by signed distance, while the incoming segment owns the bevel triangle. This

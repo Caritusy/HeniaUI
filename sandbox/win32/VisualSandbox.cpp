@@ -58,6 +58,9 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wordParameter
     if (input != nullptr && input->handleMessage(window, message, wordParameter, longParameter)) {
         return 0;
     }
+    if (message == WM_DPICHANGED && input != nullptr) {
+        return 0;
+    }
     return DefWindowProcW(window, message, wordParameter, longParameter);
 }
 
@@ -379,6 +382,86 @@ struct SandboxControls final {
     return root;
 }
 
+class SandboxDpiHost final {
+public:
+    SandboxDpiHost(
+        HWND window,
+        UiDocument& document,
+        TextureStore& textures,
+        OpenGlRenderer& renderer,
+        Win32FontScaleCache& fonts,
+        SandboxControls& controls,
+        FontHandle initialFont) noexcept
+        : mWindow(window),
+          mDocument(&document),
+          mTextures(&textures),
+          mRenderer(&renderer),
+          mFonts(&fonts),
+          mControls(&controls),
+          mFont(initialFont) {}
+
+    void changed(const Win32DpiChange& change) {
+        if (change.hasSuggestedWindowRect) {
+            const RECT& area = change.suggestedWindowRect;
+            SetWindowPos(
+                mWindow,
+                nullptr,
+                area.left,
+                area.top,
+                area.right - area.left,
+                area.bottom - area.top,
+                SWP_NOACTIVATE | SWP_NOZORDER);
+        }
+        const FontHandle selected = mFonts->selectForDpi(change.dpiY);
+        if (!selected.valid() || !mRenderer->synchronizeTextures(*mTextures)) {
+            mFailed = true;
+            return;
+        }
+        if (selected != mFont) {
+            mFont = selected;
+            mDocument->setRoot(createOverlay(mFont, *mControls));
+        }
+        updateCoordinateSpace(change.dpiX, change.dpiY);
+    }
+
+    void updateCoordinateSpace(std::uint32_t dpiX, std::uint32_t dpiY) {
+        RECT client{};
+        if (!GetClientRect(mWindow, &client)) {
+            mFailed = true;
+            return;
+        }
+        const std::uint32_t width = static_cast<std::uint32_t>(
+            std::max(client.right - client.left, 1L));
+        const std::uint32_t height = static_cast<std::uint32_t>(
+            std::max(client.bottom - client.top, 1L));
+        const Vec2 inputExtent{static_cast<float>(width), static_cast<float>(height)};
+        const Vec2 logicalViewport{
+            inputExtent.x * 96.0F / static_cast<float>(std::max(dpiX, 1U)),
+            inputExtent.y * 96.0F / static_cast<float>(std::max(dpiY, 1U)),
+        };
+        if (!mDocument->setCoordinateSpace(makeUiCoordinateSpace(
+                logicalViewport,
+                inputExtent,
+                width,
+                height,
+                static_cast<float>(std::max(dpiY, 1U)) / 96.0F))) {
+            mFailed = true;
+        }
+    }
+
+    [[nodiscard]] bool failed() const noexcept { return mFailed; }
+
+private:
+    HWND mWindow = nullptr;
+    UiDocument* mDocument = nullptr;
+    TextureStore* mTextures = nullptr;
+    OpenGlRenderer* mRenderer = nullptr;
+    Win32FontScaleCache* mFonts = nullptr;
+    SandboxControls* mControls = nullptr;
+    FontHandle mFont{};
+    bool mFailed = false;
+};
+
 [[nodiscard]] bool isHeadless() noexcept {
     return std::wstring_view(GetCommandLineW()).find(L"--headless") != std::wstring_view::npos;
 }
@@ -452,6 +535,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (wantsHelp()) {
         return 0;
     }
+    static_cast<void>(SetProcessDpiAwarenessContext(
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2));
     const bool headless = isHeadless();
     const bool snapshot = wantsSnapshot();
     const bool uiOnly = wantsUiOnly();
@@ -464,10 +549,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     TextureStore textures;
     FontStore fonts;
     constexpr std::array ranges{UnicodeRange{U' ', U'~'}};
-    const FontHandle font = Win32FontLoader::load(
-        textures,
-        fonts,
-        {.family = L"Segoe UI", .pixelHeight = 32, .atlasWidth = 1024, .atlasHeight = 512, .ranges = ranges});
+    Win32FontScaleCache fontScaleCache(textures, fonts, {
+        .family = L"Segoe UI",
+        .logicalPixelHeight = 32.0F,
+        .atlasWidth = 1024,
+        .atlasHeight = 512,
+        .ranges = ranges,
+    });
+    const std::uint32_t initialDpi = std::max(GetDpiForWindow(native.window), 1U);
+    const FontHandle font = fontScaleCache.selectForDpi(initialDpi);
     if (!font.valid()) {
         MessageBoxW(nullptr, L"Unable to build the Segoe UI atlas.", L"HeniaUI", MB_ICONERROR);
         return 2;
@@ -516,6 +606,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         MessageBoxW(native.window, message.c_str(), L"HeniaUI OpenGL initialization", MB_ICONERROR);
         return 3;
     }
+    SandboxDpiHost dpiHost(
+        native.window,
+        document,
+        textures,
+        renderer,
+        fontScaleCache,
+        controls,
+        font);
+    input.setOnDpiChanged(
+        Callback<const Win32DpiChange&>::bind<SandboxDpiHost, &SandboxDpiHost::changed>(dpiHost));
+    dpiHost.updateCoordinateSpace(initialDpi, initialDpi);
 
     const auto started = std::chrono::steady_clock::now();
     MSG message{};
@@ -533,6 +634,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             DispatchMessageW(&message);
         }
         if (!running) {
+            break;
+        }
+        if (dpiHost.failed()) {
+            result = 8;
             break;
         }
 
@@ -596,8 +701,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             break;
         }
 
-        document.setViewport({static_cast<float>(width), static_cast<float>(height)});
-        if (!renderer.render(document.compose(), width, height)) {
+        dpiHost.updateCoordinateSpace(
+            std::max(GetDpiForWindow(native.window), 1U),
+            std::max(GetDpiForWindow(native.window), 1U));
+        if (!renderer.render(document.compose(), document.coordinateSpace().render)) {
             result = 4;
             break;
         }

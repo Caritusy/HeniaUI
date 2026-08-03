@@ -1,6 +1,7 @@
 #pragma once
 
 #include "henia/RenderProfile.h"
+#include "henia/ui/CoordinateTransform.h"
 #include "henia/ui/RenderPacket.h"
 #include "henia/ui/resource/TextureStore.h"
 
@@ -87,6 +88,10 @@ public:
         const RenderPacket& packet,
         std::uint32_t viewportWidth,
         std::uint32_t viewportHeight,
+        RenderTargetColorSpace targetColorSpace = RenderTargetColorSpace::Linear) noexcept;
+    [[nodiscard]] bool render(
+        const RenderPacket& packet,
+        UiRenderViewport viewport,
         RenderTargetColorSpace targetColorSpace = RenderTargetColorSpace::Linear) noexcept;
     // Associates a resolved host timestamp with a retained successful sample.
     // Unknown, duplicate, expired, and previous-lifetime IDs return false.

@@ -144,6 +144,11 @@ BindHostViewportAndScissor(commandList);
 RecordHostDrawAfter(commandList);
 ```
 
+The width/height overload is an identity-transform shortcut. When layout units
+differ from attachment pixels, pass `UiRenderViewport` instead; geometry and
+logical clip rectangles then share its axis-aligned scale/translation. See
+[Coordinate spaces, DPI, and framebuffer scaling](coordinate-spaces.md).
+
 For the strongest containment, record HeniaUI into a dedicated direct command
 list between host passes. The host still owns its allocator and fence slot, but
 closing the HeniaUI list creates a natural state boundary. HeniaUI does not

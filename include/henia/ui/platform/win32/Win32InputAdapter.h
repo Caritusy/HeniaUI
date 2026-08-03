@@ -1,5 +1,6 @@
 #pragma once
 
+#include "henia/ui/widget/Callback.h"
 #include "henia/ui/widget/UiDocument.h"
 
 #ifndef NOMINMAX
@@ -16,6 +17,21 @@
 
 namespace henia::ui {
 
+struct Win32DpiChange final {
+    std::uint32_t dpiX = 96;
+    std::uint32_t dpiY = 96;
+    RECT suggestedWindowRect{};
+    std::uint64_t revision = 0;
+    bool hasSuggestedWindowRect = false;
+
+    [[nodiscard]] constexpr Vec2 scale() const noexcept {
+        return {
+            static_cast<float>(dpiX) / 96.0F,
+            static_cast<float>(dpiY) / 96.0F,
+        };
+    }
+};
+
 // Translates a host-owned HWND message stream into platform-neutral HeniaUI input.
 // It never subclasses or owns the window and may therefore be used from an
 // existing WndProc hook. One adapter instance tracks one HWND message stream.
@@ -29,6 +45,8 @@ public:
     // commit/cancel events. Focus, cancellation, and destruction notifications
     // are observed and return false so the host can continue normal processing.
     [[nodiscard]] bool handleMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
+    void setOnDpiChanged(Callback<const Win32DpiChange&> callback) noexcept;
+    [[nodiscard]] const Win32DpiChange& dpiState() const noexcept;
 
 private:
     using PressedButtonMask = std::uint8_t;
@@ -61,6 +79,8 @@ private:
     char16_t mHighSurrogate = u'\0';
     std::u16string mCommittedImeUnits;
     std::size_t mCommittedImeOffset = 0;
+    Callback<const Win32DpiChange&> mOnDpiChanged;
+    Win32DpiChange mDpiState{};
     bool mImeActive = false;
     bool mReleasingNativeCapture = false;
 };

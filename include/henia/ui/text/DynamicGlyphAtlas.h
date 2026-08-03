@@ -21,6 +21,9 @@ struct RasterizedGlyph final {
     Vec2 bearing{};
     float advance = 0.0F;
     std::span<const std::byte> pixels{};
+    // Optional logical dimensions when the bitmap is rasterized above 1x.
+    // Zero selects the physical width/height for backward compatibility.
+    Vec2 logicalSize{};
 };
 
 struct DynamicGlyphAtlasOptions final {

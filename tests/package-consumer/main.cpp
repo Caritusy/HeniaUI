@@ -4,6 +4,7 @@
 #include <henia/gfx/Validation.h>
 #include <henia/gfx/VisibilityList.h>
 #include <henia/ui/Frame.h>
+#include <henia/ui/CoordinateTransform.h>
 #include <henia/ui/text/TextEditor.h>
 #include <henia/ui/Validation.h>
 #include <henia/ui/widget/controls/TextInput.h>
@@ -114,6 +115,8 @@ int main() {
     const henia::gfx::ViewParameters visibilityView{.viewport = {8.0F, 8.0F}};
     henia::gfx::Mat4 projection{};
     henia::ui::ScissorRect scissor{};
+    const henia::ui::UiCoordinateSpace coordinateSpace =
+        henia::ui::makeUiCoordinateSpace({8.0F, 8.0F}, {16.0F, 16.0F}, 12, 12, 1.25F);
 #if defined(_WIN32)
     const auto uiShaders = henia::backend::d3d12::shaderPackageInfo(
         henia::backend::d3d12::ShaderPackage::Ui);
@@ -139,6 +142,9 @@ int main() {
         && henia::gfx::finite(projection)
         && henia::ui::makeScissorRect({{0.25F, 0.25F}, {7.25F, 7.25F}}, 8, 8, scissor)
         && scissor.left == 0 && scissor.right == 8
+        && henia::ui::valid(coordinateSpace)
+        && henia::ui::inputToFramebuffer(coordinateSpace, {8.0F, 8.0F})
+            == henia::ui::Vec2{6.0F, 6.0F}
 #if defined(_WIN32)
         && uiShaders.version.size() == 64 && gfxShaders.version.size() == 64
         && uiShaders.pixelVariantBytes != 0 && gfxShaders.pixelVariantBytes == 0

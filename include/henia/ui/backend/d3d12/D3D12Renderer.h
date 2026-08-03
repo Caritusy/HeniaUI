@@ -3,6 +3,7 @@
 #include "henia/RenderProfile.h"
 #include "henia/backend/d3d12/D3D12InstanceStorage.h"
 #include "henia/backend/d3d12/D3D12SubmissionReuse.h"
+#include "henia/ui/CoordinateTransform.h"
 #include "henia/ui/RenderPacket.h"
 #include "henia/ui/resource/TextureStore.h"
 
@@ -136,6 +137,12 @@ public:
         std::uint32_t submissionSlot,
         std::uint32_t viewportWidth,
         std::uint32_t viewportHeight,
+        henia::backend::d3d12::SubmissionReuse submissionReuse = {}) noexcept;
+    [[nodiscard]] bool record(
+        const RenderPacket& packet,
+        ID3D12GraphicsCommandList& commandList,
+        std::uint32_t submissionSlot,
+        UiRenderViewport viewport,
         henia::backend::d3d12::SubmissionReuse submissionReuse = {}) noexcept;
     // Associates a resolved host timestamp with a retained successful sample.
     // Unknown, duplicate, expired, and previous-lifetime IDs return false.

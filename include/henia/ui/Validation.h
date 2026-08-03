@@ -1,5 +1,6 @@
 #pragma once
 
+#include "henia/ui/CoordinateTransform.h"
 #include "henia/ui/DisplayList.h"
 
 #include <algorithm>
@@ -298,6 +299,21 @@ struct ScissorRect final {
         return false;
     }
     return true;
+}
+
+[[nodiscard]] inline bool makeScissorRect(
+    Rect logicalArea,
+    UiRenderViewport viewport,
+    ScissorRect& output) noexcept {
+    if (!valid(viewport)) {
+        output = {};
+        return false;
+    }
+    return makeScissorRect(
+        viewport.logicalToFramebuffer.rectangle(logicalArea),
+        viewport.framebufferWidth,
+        viewport.framebufferHeight,
+        output);
 }
 
 } // namespace henia::ui

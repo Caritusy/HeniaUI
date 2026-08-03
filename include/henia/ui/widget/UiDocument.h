@@ -1,5 +1,6 @@
 #pragma once
 
+#include "henia/ui/CoordinateTransform.h"
 #include "henia/ui/Frame.h"
 #include "henia/ui/widget/Widget.h"
 
@@ -24,6 +25,10 @@ struct UiDocumentStatistics final {
     std::uint64_t rebuiltSegments = 0;
     std::uint64_t reusedSegments = 0;
     std::uint64_t revision = 0;
+    std::uint64_t coordinateSpaceChanges = 0;
+    std::uint64_t dpiChanges = 0;
+    std::uint64_t inputTransformChanges = 0;
+    std::uint64_t renderTransformChanges = 0;
 };
 
 class UiDocument final {
@@ -50,6 +55,8 @@ public:
     [[nodiscard]] Widget* root() const noexcept;
     void setViewport(Vec2 viewport) noexcept;
     [[nodiscard]] Vec2 viewport() const noexcept;
+    [[nodiscard]] bool setCoordinateSpace(UiCoordinateSpace space) noexcept;
+    [[nodiscard]] const UiCoordinateSpace& coordinateSpace() const noexcept;
     void setTheme(Theme theme) noexcept;
     [[nodiscard]] const Theme& theme() const noexcept;
     void setFragmentAreaTracking(bool enabled) noexcept;
@@ -112,6 +119,7 @@ private:
     std::uint64_t mCapturedIdentity = 0;
     std::uint64_t mFocusedIdentity = 0;
     Vec2 mViewport{};
+    UiCoordinateSpace mCoordinateSpace{};
     UiDocumentStatistics mStatistics{};
     bool mDispatching = false;
     bool mApplyingMutations = false;

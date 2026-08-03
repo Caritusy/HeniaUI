@@ -4,6 +4,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <limits>
 #include <string>
@@ -56,9 +57,11 @@ FontHandle Win32FontLoader::load(
     FontStore& fonts,
     const Win32FontRequest& request) {
     if (request.family.empty() || request.pixelHeight == 0 || request.atlasWidth == 0
-        || request.atlasHeight == 0 || request.ranges.empty()) {
+        || request.atlasHeight == 0 || request.ranges.empty()
+        || !std::isfinite(request.metricsScale) || request.metricsScale <= 0.0F) {
         return {};
     }
+    const float inverseMetricsScale = 1.0F / request.metricsScale;
 
     GdiObjects gdi{};
     gdi.context = CreateCompatibleDC(nullptr);
@@ -187,12 +190,15 @@ FontHandle Win32FontLoader::load(
                         static_cast<float>(penY + glyphHeight) / static_cast<float>(request.atlasHeight),
                     },
                 },
-                .size = {static_cast<float>(glyphWidth), static_cast<float>(glyphHeight)},
-                .bearing = {
-                    static_cast<float>(metrics.gmptGlyphOrigin.x),
-                    static_cast<float>(metrics.gmptGlyphOrigin.y),
+                .size = {
+                    static_cast<float>(glyphWidth) * inverseMetricsScale,
+                    static_cast<float>(glyphHeight) * inverseMetricsScale,
                 },
-                .advance = static_cast<float>(metrics.gmCellIncX),
+                .bearing = {
+                    static_cast<float>(metrics.gmptGlyphOrigin.x) * inverseMetricsScale,
+                    static_cast<float>(metrics.gmptGlyphOrigin.y) * inverseMetricsScale,
+                },
+                .advance = static_cast<float>(metrics.gmCellIncX) * inverseMetricsScale,
                 .glyphId = glyphIndex,
             });
 
@@ -232,7 +238,7 @@ FontHandle Win32FontLoader::load(
                 kerning.push_back({
                     static_cast<char32_t>(pair.wFirst),
                     static_cast<char32_t>(pair.wSecond),
-                    static_cast<float>(pair.iKernAmount),
+                    static_cast<float>(pair.iKernAmount) * inverseMetricsScale,
                 });
             }
         }
@@ -240,10 +246,10 @@ FontHandle Win32FontLoader::load(
 
     return fonts.add({
         .atlas = atlasHandle,
-        .pixelSize = static_cast<float>(request.pixelHeight),
-        .ascent = static_cast<float>(textMetrics.tmAscent),
-        .descent = static_cast<float>(textMetrics.tmDescent),
-        .lineGap = static_cast<float>(textMetrics.tmExternalLeading),
+        .pixelSize = static_cast<float>(request.pixelHeight) * inverseMetricsScale,
+        .ascent = static_cast<float>(textMetrics.tmAscent) * inverseMetricsScale,
+        .descent = static_cast<float>(textMetrics.tmDescent) * inverseMetricsScale,
+        .lineGap = static_cast<float>(textMetrics.tmExternalLeading) * inverseMetricsScale,
         .glyphs = std::move(glyphs),
         .kerning = std::move(kerning),
     });
@@ -253,7 +259,11 @@ bool Win32FontLoader::appendGlyphs(
     DynamicGlyphAtlas& atlas,
     const Win32FontRequest& request,
     std::span<const char32_t> codepoints) {
-    if (request.family.empty() || request.pixelHeight == 0 || codepoints.empty()) return false;
+    if (request.family.empty() || request.pixelHeight == 0 || codepoints.empty()
+        || !std::isfinite(request.metricsScale) || request.metricsScale <= 0.0F) {
+        return false;
+    }
+    const float inverseMetricsScale = 1.0F / request.metricsScale;
 
     GdiObjects gdi{};
     gdi.context = CreateCompatibleDC(nullptr);
@@ -339,14 +349,90 @@ bool Win32FontLoader::appendGlyphs(
             .height = height,
             .rowPitch = width,
             .bearing = {
-                static_cast<float>(metrics.gmptGlyphOrigin.x),
-                static_cast<float>(metrics.gmptGlyphOrigin.y),
+                static_cast<float>(metrics.gmptGlyphOrigin.x) * inverseMetricsScale,
+                static_cast<float>(metrics.gmptGlyphOrigin.y) * inverseMetricsScale,
             },
-            .advance = static_cast<float>(metrics.gmCellIncX),
+            .advance = static_cast<float>(metrics.gmCellIncX) * inverseMetricsScale,
             .pixels = pixelStorage.back(),
+            .logicalSize = {
+                static_cast<float>(width) * inverseMetricsScale,
+                static_cast<float>(height) * inverseMetricsScale,
+            },
         });
     }
     return atlas.add(rasterized);
+}
+
+Win32FontScaleCache::Win32FontScaleCache(
+    TextureStore& textures,
+    FontStore& fonts,
+    const Win32ScaledFontRequest& request)
+    : mTextures(&textures),
+      mFonts(&fonts),
+      mFamily(request.family),
+      mLogicalPixelHeight(request.logicalPixelHeight),
+      mAtlasWidth(request.atlasWidth),
+      mAtlasHeight(request.atlasHeight),
+      mRanges(request.ranges.begin(), request.ranges.end()) {}
+
+FontHandle Win32FontScaleCache::select(float dpiScale) {
+    if (!std::isfinite(dpiScale) || dpiScale <= 0.0F
+        || !std::isfinite(mLogicalPixelHeight) || mLogicalPixelHeight <= 0.0F
+        || mFamily.empty() || mAtlasWidth == 0 || mAtlasHeight == 0 || mRanges.empty()) {
+        return {};
+    }
+    const double requestedHeight = static_cast<double>(mLogicalPixelHeight) * dpiScale;
+    if (requestedHeight < 1.0 || requestedHeight > std::numeric_limits<std::uint32_t>::max()) {
+        return {};
+    }
+    const auto pixelHeight = static_cast<std::uint32_t>(std::round(requestedHeight));
+    for (const Variant& variant : mVariants) {
+        if (variant.pixelHeight == pixelHeight && mFonts->find(variant.font) != nullptr) {
+            ++mCacheHits;
+            return variant.font;
+        }
+    }
+
+    ++mCacheMisses;
+    const float metricsScale = static_cast<float>(pixelHeight) / mLogicalPixelHeight;
+    const auto scaledDimension = [metricsScale](std::uint32_t dimension) {
+        const double scaled = std::ceil(static_cast<double>(dimension) * metricsScale);
+        if (scaled < 1.0 || scaled > std::numeric_limits<std::uint32_t>::max()) {
+            return std::uint32_t{0};
+        }
+        return static_cast<std::uint32_t>(scaled);
+    };
+    const std::uint32_t atlasWidth = scaledDimension(mAtlasWidth);
+    const std::uint32_t atlasHeight = scaledDimension(mAtlasHeight);
+    if (atlasWidth == 0 || atlasHeight == 0) return {};
+
+    const FontHandle font = Win32FontLoader::load(
+        *mTextures,
+        *mFonts,
+        {
+            .family = mFamily,
+            .pixelHeight = pixelHeight,
+            .atlasWidth = atlasWidth,
+            .atlasHeight = atlasHeight,
+            .ranges = mRanges,
+            .metricsScale = metricsScale,
+        });
+    if (!font.valid()) return {};
+    mVariants.push_back({pixelHeight, font});
+    return font;
+}
+
+FontHandle Win32FontScaleCache::selectForDpi(std::uint32_t dpi) {
+    if (dpi == 0) return {};
+    return select(static_cast<float>(dpi) / 96.0F);
+}
+
+Win32FontScaleCacheStatistics Win32FontScaleCache::statistics() const noexcept {
+    return {
+        .variants = mVariants.size(),
+        .cacheHits = mCacheHits,
+        .cacheMisses = mCacheMisses,
+    };
 }
 
 } // namespace henia::ui
