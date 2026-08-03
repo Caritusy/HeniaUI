@@ -109,6 +109,7 @@ jobs:
           HeniaUID3D12TextureUploadTransactionTests
           HeniaUID3D12Tests
           HeniaUID3D12GfxTests
+          HeniaUID3D12ShaderPackageLinkTests
       - name: Run debug layer, GPU-based validation, and DRED tests
         env:
           HENIAUI_D3D12_VALIDATION: '1'

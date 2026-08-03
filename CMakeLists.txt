@@ -184,19 +184,31 @@ if(WIN32)
     add_custom_command(
         OUTPUT "${HENIAUI_D3D12_UI_SHADER_HEADER}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${HENIAUI_D3D12_GENERATED_DIRECTORY}"
-        COMMAND HeniaUIShaderCompiler
-            --source "${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/ui.hlsl"
-            --entry vertexMain --target vs_5_0
-            --output "${HENIAUI_D3D12_GENERATED_DIRECTORY}/ui-vs.cso"
-        COMMAND HeniaUIShaderCompiler
-            --source "${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/ui.hlsl"
-            --entry pixelMain --target ps_5_0
-            --output "${HENIAUI_D3D12_GENERATED_DIRECTORY}/ui-ps.cso"
-        COMMAND HeniaUIShaderCompiler
-            --source "${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/ui.hlsl"
-            --entry pixelMain --target ps_5_0
-            --define HENIA_TEXTURE_FREE=1
-            --output "${HENIAUI_D3D12_GENERATED_DIRECTORY}/ui-texture-free-ps.cso"
+        COMMAND ${CMAKE_COMMAND}
+            "-DCOMPILER=$<TARGET_FILE:HeniaUIShaderCompiler>"
+            "-DRUNTIME_DIRECTORY=${HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY}"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/ui.hlsl"
+            -DENTRY=vertexMain
+            -DTARGET=vs_5_0
+            "-DOUTPUT=${HENIAUI_D3D12_GENERATED_DIRECTORY}/ui-vs.cso"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunShaderCompiler.cmake"
+        COMMAND ${CMAKE_COMMAND}
+            "-DCOMPILER=$<TARGET_FILE:HeniaUIShaderCompiler>"
+            "-DRUNTIME_DIRECTORY=${HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY}"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/ui.hlsl"
+            -DENTRY=pixelMain
+            -DTARGET=ps_5_0
+            "-DOUTPUT=${HENIAUI_D3D12_GENERATED_DIRECTORY}/ui-ps.cso"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunShaderCompiler.cmake"
+        COMMAND ${CMAKE_COMMAND}
+            "-DCOMPILER=$<TARGET_FILE:HeniaUIShaderCompiler>"
+            "-DRUNTIME_DIRECTORY=${HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY}"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/ui.hlsl"
+            -DENTRY=pixelMain
+            -DTARGET=ps_5_0
+            -DDEFINE=HENIA_TEXTURE_FREE=1
+            "-DOUTPUT=${HENIAUI_D3D12_GENERATED_DIRECTORY}/ui-texture-free-ps.cso"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunShaderCompiler.cmake"
         COMMAND ${CMAKE_COMMAND}
             -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/ui.hlsl
             -DVERTEX=${HENIAUI_D3D12_GENERATED_DIRECTORY}/ui-vs.cso
@@ -210,6 +222,7 @@ if(WIN32)
             HeniaUIShaderCompiler
             shaders/d3d12/ui.hlsl
             cmake/GenerateEmbeddedShader.cmake
+            cmake/RunShaderCompiler.cmake
         COMMENT "Compiling and embedding HeniaUI D3D12 UI shaders"
         VERBATIM
     )
@@ -217,14 +230,22 @@ if(WIN32)
     add_custom_command(
         OUTPUT "${HENIAUI_D3D12_GFX_SHADER_HEADER}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${HENIAUI_D3D12_GENERATED_DIRECTORY}"
-        COMMAND HeniaUIShaderCompiler
-            --source "${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/gfx.hlsl"
-            --entry vertexMain --target vs_5_1
-            --output "${HENIAUI_D3D12_GENERATED_DIRECTORY}/gfx-vs.cso"
-        COMMAND HeniaUIShaderCompiler
-            --source "${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/gfx.hlsl"
-            --entry pixelMain --target ps_5_1
-            --output "${HENIAUI_D3D12_GENERATED_DIRECTORY}/gfx-ps.cso"
+        COMMAND ${CMAKE_COMMAND}
+            "-DCOMPILER=$<TARGET_FILE:HeniaUIShaderCompiler>"
+            "-DRUNTIME_DIRECTORY=${HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY}"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/gfx.hlsl"
+            -DENTRY=vertexMain
+            -DTARGET=vs_5_1
+            "-DOUTPUT=${HENIAUI_D3D12_GENERATED_DIRECTORY}/gfx-vs.cso"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunShaderCompiler.cmake"
+        COMMAND ${CMAKE_COMMAND}
+            "-DCOMPILER=$<TARGET_FILE:HeniaUIShaderCompiler>"
+            "-DRUNTIME_DIRECTORY=${HENIAUI_ADDRESS_SANITIZER_RUNTIME_DIRECTORY}"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/gfx.hlsl"
+            -DENTRY=pixelMain
+            -DTARGET=ps_5_1
+            "-DOUTPUT=${HENIAUI_D3D12_GENERATED_DIRECTORY}/gfx-ps.cso"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunShaderCompiler.cmake"
         COMMAND ${CMAKE_COMMAND}
             -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/shaders/d3d12/gfx.hlsl
             -DVERTEX=${HENIAUI_D3D12_GENERATED_DIRECTORY}/gfx-vs.cso
@@ -237,6 +258,7 @@ if(WIN32)
             HeniaUIShaderCompiler
             shaders/d3d12/gfx.hlsl
             cmake/GenerateEmbeddedShader.cmake
+            cmake/RunShaderCompiler.cmake
         COMMENT "Compiling and embedding HeniaUI D3D12 gfx shaders"
         VERBATIM
     )
