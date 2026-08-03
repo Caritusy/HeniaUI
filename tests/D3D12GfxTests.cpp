@@ -192,8 +192,21 @@ int main() {
             .submissionCapacity = 1,
             .renderTargetFormat = DXGI_FORMAT_R8G8B8A8_UNORM,
             .sampleCount = 3,
-        })) {
-        fail("D3D12 gfx accepted an unsupported target sample count");
+        })
+        || unsupportedSamples.lastError()
+            != "D3D12 gfx render-target format/sample count is unsupported by the configured device") {
+        fail("D3D12 gfx did not diagnose an unsupported target sample count");
+    }
+    D3D12RenderDevice unsupportedQuality;
+    if (unsupportedQuality.initialize(*device.Get(), {
+            .boxCapacity = 1,
+            .submissionCapacity = 1,
+            .renderTargetFormat = DXGI_FORMAT_R8G8B8A8_UNORM,
+            .sampleQuality = 1,
+        })
+        || unsupportedQuality.lastError()
+            != "D3D12 gfx sampleQuality is outside the render-target supported range") {
+        fail("D3D12 gfx did not diagnose an unsupported sample quality");
     }
     D3D12RenderDevice renderer;
     const D3D12GfxConfiguration rendererConfiguration{
@@ -213,11 +226,16 @@ int main() {
         || renderer.statistics().pipelineCacheHits != 0) {
         fail("D3D12 gfx pipeline was not populated into the host cache");
     }
-    D3D12GfxConfiguration changedConfiguration = rendererConfiguration;
-    changedConfiguration.submissionCapacity = 1;
+    D3D12GfxConfiguration changedSampleCount = rendererConfiguration;
+    changedSampleCount.sampleCount = 2;
+    D3D12GfxConfiguration changedSampleQuality = rendererConfiguration;
+    changedSampleQuality.sampleQuality = 1;
     if (!peerRenderer.initialize(*device.Get(), rendererConfiguration)
         || !peerRenderer.initialize(*device.Get(), rendererConfiguration)
-        || peerRenderer.initialize(*device.Get(), changedConfiguration)
+        || peerRenderer.initialize(*device.Get(), changedSampleCount)
+        || peerRenderer.lastError()
+            != "D3D12 gfx renderer is already initialized with a different configuration"
+        || peerRenderer.initialize(*device.Get(), changedSampleQuality)
         || peerRenderer.lastError()
             != "D3D12 gfx renderer is already initialized with a different configuration"
         || !peerRenderer.initialized()

@@ -152,7 +152,8 @@ struct AdapterArchitecture final {
     return description;
 }
 
-[[nodiscard]] D3D12_RASTERIZER_DESC rasterizerDescription() noexcept {
+[[nodiscard]] D3D12_RASTERIZER_DESC rasterizerDescription(
+    std::uint32_t sampleCount) noexcept {
     D3D12_RASTERIZER_DESC description{};
     description.FillMode = D3D12_FILL_MODE_SOLID;
     description.CullMode = D3D12_CULL_MODE_NONE;
@@ -160,6 +161,7 @@ struct AdapterArchitecture final {
     description.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
     description.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
     description.DepthClipEnable = TRUE;
+    description.MultisampleEnable = sampleCount > 1 ? TRUE : FALSE;
     return description;
 }
 
@@ -191,13 +193,14 @@ struct PipelineName final {
     const int written = std::snprintf(
         ascii.data(),
         ascii.size(),
-        "HeniaUI.Gfx.%.*s.v%zu.rtv%u.dsv%u.s%u",
+        "HeniaUI.Gfx.%.*s.v%zu.rtv%u.dsv%u.s%u.q%u",
         static_cast<int>(version.size()),
         version.data(),
         variant,
         static_cast<unsigned>(configuration.renderTargetFormat),
         static_cast<unsigned>(configuration.depthStencilFormat),
-        configuration.sampleCount);
+        configuration.sampleCount,
+        configuration.sampleQuality);
     PipelineName result;
     if (written <= 0 || static_cast<std::size_t>(written) >= ascii.size()) return result;
     for (int index = 0; index <= written; ++index) {
@@ -278,6 +281,7 @@ bool D3D12RenderDevice::Implementation::initialize(
             || value.renderTargetFormat != configuration.renderTargetFormat
             || value.depthStencilFormat != configuration.depthStencilFormat
             || value.sampleCount != configuration.sampleCount
+            || value.sampleQuality != configuration.sampleQuality
             || value.instanceStorage != configuration.instanceStorage
             || value.gpuLocalInstanceThresholdBytes
                 != configuration.gpuLocalInstanceThresholdBytes) {
@@ -322,6 +326,10 @@ bool D3D12RenderDevice::Implementation::initialize(
         error = "D3D12 gfx render-target format/sample count is unsupported by the configured device";
         return false;
     }
+    if (value.sampleQuality >= renderTargetSamples.NumQualityLevels) {
+        error = "D3D12 gfx sampleQuality is outside the render-target supported range";
+        return false;
+    }
     if (value.depthStencilFormat != DXGI_FORMAT_UNKNOWN) {
         D3D12_FEATURE_DATA_FORMAT_SUPPORT depthSupport{
             .Format = value.depthStencilFormat,
@@ -341,6 +349,10 @@ bool D3D12RenderDevice::Implementation::initialize(
                 sizeof(depthSamples)))
             || depthSamples.NumQualityLevels == 0) {
             error = "D3D12 gfx depth format/sample count is unsupported by the configured device";
+            return false;
+        }
+        if (value.sampleQuality >= depthSamples.NumQualityLevels) {
+            error = "D3D12 gfx sampleQuality is outside the depth-target supported range";
             return false;
         }
     }
@@ -524,7 +536,7 @@ bool D3D12RenderDevice::Implementation::createPipeline(
     description.PS = pixelShader;
     description.BlendState = blendDescription();
     description.SampleMask = UINT_MAX;
-    description.RasterizerState = rasterizerDescription();
+    description.RasterizerState = rasterizerDescription(configuration.sampleCount);
     description.DepthStencilState = depthDescription(depth);
     description.InputLayout = {inputs.data(), static_cast<UINT>(inputs.size())};
     description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -532,6 +544,7 @@ bool D3D12RenderDevice::Implementation::createPipeline(
     description.RTVFormats[0] = configuration.renderTargetFormat;
     description.DSVFormat = depth.enabled ? configuration.depthStencilFormat : DXGI_FORMAT_UNKNOWN;
     description.SampleDesc.Count = configuration.sampleCount;
+    description.SampleDesc.Quality = configuration.sampleQuality;
     ComPtr<ID3D12PipelineState>& output = pipelines[pipelineIndex(depth)];
     const PipelineName name = pipelineName(pipelineIndex(depth), configuration);
     if (pipelineLibrary != nullptr) {

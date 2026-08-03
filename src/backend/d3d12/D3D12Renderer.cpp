@@ -167,7 +167,8 @@ struct AdapterArchitecture final {
     return description;
 }
 
-[[nodiscard]] D3D12_RASTERIZER_DESC rasterizerDescription() noexcept {
+[[nodiscard]] D3D12_RASTERIZER_DESC rasterizerDescription(
+    std::uint32_t sampleCount) noexcept {
     D3D12_RASTERIZER_DESC description{};
     description.FillMode = D3D12_FILL_MODE_SOLID;
     description.CullMode = D3D12_CULL_MODE_NONE;
@@ -176,7 +177,7 @@ struct AdapterArchitecture final {
     description.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
     description.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
     description.DepthClipEnable = TRUE;
-    description.MultisampleEnable = FALSE;
+    description.MultisampleEnable = sampleCount > 1 ? TRUE : FALSE;
     description.AntialiasedLineEnable = FALSE;
     description.ForcedSampleCount = 0;
     description.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
@@ -198,17 +199,21 @@ struct PipelineName final {
 
 [[nodiscard]] PipelineName pipelineName(
     std::uint32_t variant,
-    DXGI_FORMAT renderTargetFormat) noexcept {
+    DXGI_FORMAT renderTargetFormat,
+    std::uint32_t sampleCount,
+    std::uint32_t sampleQuality) noexcept {
     std::array<char, 192> ascii{};
     const std::string_view version = henia::backend::d3d12::generated::ui::kVersion;
     const int written = std::snprintf(
         ascii.data(),
         ascii.size(),
-        "HeniaUI.Ui.%.*s.v%u.rtv%u",
+        "HeniaUI.Ui.%.*s.v%u.rtv%u.s%u.q%u",
         static_cast<int>(version.size()),
         version.data(),
         variant,
-        static_cast<unsigned>(renderTargetFormat));
+        static_cast<unsigned>(renderTargetFormat),
+        sampleCount,
+        sampleQuality);
     PipelineName result;
     if (written <= 0 || static_cast<std::size_t>(written) >= ascii.size()) return result;
     for (int index = 0; index <= written; ++index) {
@@ -370,7 +375,9 @@ bool D3D12Renderer::Implementation::initialize(
             || requested.instanceStorage != configuration.instanceStorage
             || requested.gpuLocalInstanceThresholdBytes
                 != configuration.gpuLocalInstanceThresholdBytes
-            || requested.targetColorSpace != configuration.targetColorSpace) {
+            || requested.targetColorSpace != configuration.targetColorSpace
+            || requested.sampleCount != configuration.sampleCount
+            || requested.sampleQuality != configuration.sampleQuality) {
             ++statistics.lifecycleRejections;
             error = "D3D12 renderer is already initialized with a different configuration";
             return false;
@@ -403,12 +410,13 @@ bool D3D12Renderer::Implementation::initialize(
         || gpuDescriptors > std::numeric_limits<std::uint32_t>::max()
         || !checkedAdd(requested.textureCapacity, 1U, cpuDescriptors)
         || !validInstanceStorageStrategy(requested.instanceStorage)
+        || requested.sampleCount == 0
         || (requested.targetColorSpace != RenderTargetColorSpace::Linear
             && requested.targetColorSpace != RenderTargetColorSpace::Srgb)
         || isSrgbFormat(format)
             != (requested.targetColorSpace == RenderTargetColorSpace::Srgb)
         || format == DXGI_FORMAT_UNKNOWN) {
-        error = "D3D12 renderer configuration has an invalid capacity, format, or target color space";
+        error = "D3D12 renderer configuration has an invalid capacity, format, sample count, or target color space";
         return false;
     }
     D3D12_FEATURE_DATA_FORMAT_SUPPORT formatSupport{.Format = format};
@@ -418,6 +426,23 @@ bool D3D12Renderer::Implementation::initialize(
             sizeof(formatSupport)))
         || (formatSupport.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) == 0) {
         error = "D3D12 renderer format is not render-target compatible on the configured device";
+        return false;
+    }
+    D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS sampleSupport{
+        .Format = format,
+        .SampleCount = requested.sampleCount,
+        .Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE,
+    };
+    if (FAILED(nativeDevice.CheckFeatureSupport(
+            D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
+            &sampleSupport,
+            sizeof(sampleSupport)))
+        || sampleSupport.NumQualityLevels == 0) {
+        error = "D3D12 renderer render-target format/sample count is unsupported by the configured device";
+        return false;
+    }
+    if (requested.sampleQuality >= sampleSupport.NumQualityLevels) {
+        error = "D3D12 renderer sampleQuality is outside the supported range";
         return false;
     }
 
@@ -631,7 +656,7 @@ bool D3D12Renderer::Implementation::createPipelines(
     description.PS = pixelBytecode;
     description.BlendState = blendDescription(false);
     description.SampleMask = UINT_MAX;
-    description.RasterizerState = rasterizerDescription();
+    description.RasterizerState = rasterizerDescription(configuration.sampleCount);
     description.DepthStencilState = depthStencilDescription();
     description.InputLayout = {inputElements.data(), static_cast<UINT>(inputElements.size())};
     description.IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
@@ -639,17 +664,26 @@ bool D3D12Renderer::Implementation::createPipelines(
     description.NumRenderTargets = 1;
     description.RTVFormats[0] = renderTargetFormat;
     description.DSVFormat = DXGI_FORMAT_UNKNOWN;
-    description.SampleDesc.Count = 1;
+    description.SampleDesc.Count = configuration.sampleCount;
+    description.SampleDesc.Quality = configuration.sampleQuality;
     if (!createPipeline(
             pipelineLibrary,
-            pipelineName(0, renderTargetFormat),
+            pipelineName(
+                0,
+                renderTargetFormat,
+                configuration.sampleCount,
+                configuration.sampleQuality),
             description,
             alphaPipeline,
             "D3D12 alpha pipeline creation failed")) return false;
     description.BlendState = blendDescription(true);
     if (!createPipeline(
             pipelineLibrary,
-            pipelineName(1, renderTargetFormat),
+            pipelineName(
+                1,
+                renderTargetFormat,
+                configuration.sampleCount,
+                configuration.sampleQuality),
             description,
             additivePipeline,
             "D3D12 additive pipeline creation failed")) return false;
@@ -658,14 +692,22 @@ bool D3D12Renderer::Implementation::createPipelines(
     description.BlendState = blendDescription(false);
     if (!createPipeline(
             pipelineLibrary,
-            pipelineName(2, renderTargetFormat),
+            pipelineName(
+                2,
+                renderTargetFormat,
+                configuration.sampleCount,
+                configuration.sampleQuality),
             description,
             textureFreeAlphaPipeline,
             "D3D12 texture-free alpha pipeline creation failed")) return false;
     description.BlendState = blendDescription(true);
     if (!createPipeline(
             pipelineLibrary,
-            pipelineName(3, renderTargetFormat),
+            pipelineName(
+                3,
+                renderTargetFormat,
+                configuration.sampleCount,
+                configuration.sampleQuality),
             description,
             textureFreeAdditivePipeline,
             "D3D12 texture-free additive pipeline creation failed")) return false;

@@ -19,7 +19,10 @@ struct D3D12GfxConfiguration final {
     std::uint32_t submissionCapacity = 8;
     DXGI_FORMAT renderTargetFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
     DXGI_FORMAT depthStencilFormat = DXGI_FORMAT_UNKNOWN;
+    // Must exactly match the bound RT/DS sample layout. Quality is a zero-based
+    // index below the device-reported level count for every configured format.
     std::uint32_t sampleCount = 1;
+    std::uint32_t sampleQuality = 0;
     henia::backend::d3d12::InstanceStorageStrategy instanceStorage =
         henia::backend::d3d12::InstanceStorageStrategy::Automatic;
     std::size_t gpuLocalInstanceThresholdBytes =

@@ -10,7 +10,8 @@ are emitted.
 The host owns command allocators, list reset/close, resource transitions,
 `OMSetRenderTargets`, clears, queue execution, and fence completion. Before a UI
 recording call, the host must bind a render target whose format matches the
-format passed to `D3D12Renderer::initialize()` and whose sample count is one.
+format passed to `D3D12Renderer::initialize()` and whose sample count and
+quality match `D3D12RendererConfiguration::sampleCount` and `sampleQuality`.
 `D3D12RendererConfiguration::targetColorSpace` must also match that format:
 linear targets use `*_UNORM`, while sRGB targets use `*_UNORM_SRGB`.
 Initialization rejects a mismatch. Shader output is premultiplied linear light;
@@ -18,19 +19,47 @@ the sRGB RTV performs the output transfer. See
 [Color, alpha, and texture contract](color-and-texture-contract.md).
 
 Before a gfx recording call, the host must bind an RT matching
-`D3D12GfxConfiguration::renderTargetFormat` and `sampleCount`. When a compatible
-DS target is available, it must match `depthStencilFormat` and the same sample
-count. The host still passes availability through its normal depth policy;
-HeniaUI never queries OM bindings or transitions attachments.
+`D3D12GfxConfiguration::renderTargetFormat`, `sampleCount`, and `sampleQuality`.
+When a compatible DS target is available, it must match `depthStencilFormat`
+and the same sample layout. The host still passes availability through its
+normal depth policy; HeniaUI never queries OM bindings or transitions
+attachments.
 
 Pass `backend::d3d12::SubmissionReuse` when the renderer should verify a slot's
 previous fence before touching its mapped upload buffer or retained textures.
 The detailed lifetime and device-reset flow is in
 [Renderer ownership and recreation](resource-lifetime.md).
 
-Initialization verifies that the configured device supports the RT/DS formats
-and sample counts. D3D12 exposes no query for the command list's current OM
-formats, so the final attachment match remains an explicit host obligation.
+Initialization verifies that the configured device supports the RT/DS formats,
+sample counts, and quality indices. A quality value is valid when it is less
+than the `NumQualityLevels` reported for the configured format and count. D3D12
+exposes no query for the command list's current OM formats or sample layout, so
+the final attachment match remains an explicit host obligation.
+
+## Multisampled composition
+
+Both D3D12 renderer families use the terms `sampleCount` and `sampleQuality`.
+The defaults are the single-sample layout `{1, 0}`. Initialization queries
+`D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS`; unsupported counts and out-of-range
+quality indices fail before any PSO or renderer resource is created. Every PSO,
+including the UI alpha/additive and texture-free variants, is created for the
+configured sample layout. That layout is also part of renderer reinitialization
+identity and every pipeline-library cache name.
+
+For pre-resolve composition, initialize the UI renderer with the exact sample
+count and quality of the host MSAA color attachment, bind that attachment, and
+record UI before the host resolve. The UI output then participates in the same
+resolve as the scene. For post-resolve composition, resolve the scene first,
+initialize UI for `{1, 0}`, and bind the single-sample destination before UI
+recording. HeniaUI never inserts attachment transitions or calls
+`ResolveSubresource`; those operations and their ordering remain host-owned.
+
+MSAA PSOs enable multisample rasterization and keep the sample mask fully open.
+Alpha-to-coverage is deliberately disabled: the UI shaders already produce
+premultiplied analytic coverage, and no measured workload currently justifies
+changing that blend contract. A future alpha-to-coverage option would require
+separate visual and performance evidence rather than silently changing the
+default.
 
 ## Shader packages and pipeline libraries
 
@@ -56,11 +85,11 @@ recompiles the embedded source during renderer initialization and links
 Both renderer configurations accept an optional host-owned
 `ID3D12PipelineLibrary`. The library is borrowed only for `initialize()` and
 must belong to the same device. Cache names include the shader package hash,
-renderer family, RT/DS formats, sample count, blend variant, and depth variant,
-so incompatible PSOs cannot alias. Cache hits, misses, stores, and failed stores
-are reported in renderer statistics. HeniaUI does not serialize the library;
-the host may call `GetSerializedSize()`/`Serialize()` and persist the bytes using
-its own adapter/driver invalidation policy.
+renderer family, RT/DS formats, sample count, sample quality, blend variant, and
+depth variant, so incompatible PSOs cannot alias. Cache hits, misses, stores,
+and failed stores are reported in renderer statistics. HeniaUI does not
+serialize the library; the host may call `GetSerializedSize()`/`Serialize()`
+and persist the bytes using its own adapter/driver invalidation policy.
 
 ## Instance-storage strategy
 

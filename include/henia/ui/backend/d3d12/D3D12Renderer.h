@@ -30,6 +30,10 @@ struct D3D12RendererConfiguration final {
     // Must match the transfer function of renderTargetFormat. For example,
     // Srgb requires DXGI_FORMAT_R8G8B8A8_UNORM_SRGB rather than its UNORM peer.
     RenderTargetColorSpace targetColorSpace = RenderTargetColorSpace::Linear;
+    // Must exactly match the bound render target. Quality is a zero-based index
+    // below the device-reported quality-level count for this format/count pair.
+    std::uint32_t sampleCount = 1;
+    std::uint32_t sampleQuality = 0;
     // Optional host-owned cache. It is borrowed only for initialize() and must
     // have been created by the same device.
     ID3D12PipelineLibrary* pipelineLibrary = nullptr;

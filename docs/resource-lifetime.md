@@ -10,8 +10,9 @@ context/device contract.
 
 Calling `initialize()` again is idempotent only for the same owner and the exact
 same configuration. A different context, device, capacity, target format, or
-sample count is rejected while the existing resources remain usable. Perform an
-orderly `shutdown()` before initializing with a changed configuration.
+sample count/quality is rejected while the existing resources remain usable.
+Perform an orderly `shutdown()` before initializing with a changed
+configuration.
 
 ## CPU resource handles and backing
 
@@ -152,10 +153,10 @@ records it.
 - OpenGL renderers do not retain a drawable or framebuffer. A resize on the same
   context needs only the new viewport dimensions on the next render call.
 - D3D12 UI does not retain swap-chain buffers. A resize with the same RT format
-  and sample count needs new host attachments/transitions and new viewport
+  and sample layout needs new host attachments/transitions and new viewport
   dimensions, but no renderer recreation.
-- A D3D12 RT/DS format or sample-count change requires host GPU quiescence,
-  `shutdown()`, and `initialize()` with the new configuration.
+- A D3D12 RT/DS format, sample-count, or sample-quality change requires host GPU
+  quiescence, `shutdown()`, and `initialize()` with the new configuration.
 - On D3D12 device removal, stop all calls, release/reset host work, call
   `shutdown()`, create the replacement device/queue/swap chain, and initialize
   new renderer resources. Packet snapshots and CPU-side texture stores remain

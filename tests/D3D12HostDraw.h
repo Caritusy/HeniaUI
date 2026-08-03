@@ -15,7 +15,8 @@ public:
     [[nodiscard]] bool initialize(
         ID3D12Device& device,
         DXGI_FORMAT renderTargetFormat,
-        std::uint32_t sampleCount = 1) noexcept {
+        std::uint32_t sampleCount = 1,
+        std::uint32_t sampleQuality = 0) noexcept {
         constexpr const char* source = R"hlsl(
 cbuffer Marker : register(b0) {
     float4 bounds;
@@ -106,6 +107,7 @@ float4 pixelMain() : SV_Target { return color; }
         pipeline.NumRenderTargets = 1;
         pipeline.RTVFormats[0] = renderTargetFormat;
         pipeline.SampleDesc.Count = sampleCount;
+        pipeline.SampleDesc.Quality = sampleQuality;
         if (FAILED(device.CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(&mPipeline)))) {
             return false;
         }

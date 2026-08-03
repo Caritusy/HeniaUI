@@ -203,6 +203,8 @@ target_link_libraries(MyApplication PRIVATE
 - RTTI is not required by the library.
 - OpenGL consumes an already-current context and restores the pipeline state it changes.
 - D3D12 records into a host-owned command list and never waits from the frame path.
+- D3D12 renderers validate `{sampleCount, sampleQuality}`, build matching 1x/MSAA
+  PSOs, and isolate each sample layout in host pipeline-library caches.
 - Input, layout, and framebuffer coordinates are independent explicit spaces;
   OpenGL and D3D12 consume the same `UiRenderViewport` transform.
 - D3D12 Release builds embed build-validated shader bytecode and can reuse

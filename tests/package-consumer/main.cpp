@@ -21,6 +21,8 @@
 #include <henia/ui/widget/controls/TreeView.h>
 #if defined(_WIN32)
 #include <henia/backend/d3d12/D3D12ShaderPackage.h>
+#include <henia/gfx/backend/d3d12/D3D12RenderDevice.h>
+#include <henia/ui/backend/d3d12/D3D12Renderer.h>
 #endif
 
 #include <cstdlib>
@@ -122,6 +124,14 @@ int main() {
         henia::backend::d3d12::ShaderPackage::Ui);
     const auto gfxShaders = henia::backend::d3d12::shaderPackageInfo(
         henia::backend::d3d12::ShaderPackage::Gfx);
+    const henia::ui::D3D12RendererConfiguration uiMsaa{
+        .sampleCount = 4,
+        .sampleQuality = 0,
+    };
+    const henia::gfx::D3D12GfxConfiguration gfxMsaa{
+        .sampleCount = 4,
+        .sampleQuality = 0,
+    };
 #endif
     return packet.instances().size() == 6 && packet.statistics().effectInstances == 2
         && boxes.boxes().size() == 1
@@ -149,6 +159,8 @@ int main() {
         && uiShaders.version.size() == 64 && gfxShaders.version.size() == 64
         && uiShaders.pixelVariantBytes != 0 && gfxShaders.pixelVariantBytes == 0
         && !uiShaders.runtimeCompilationEnabled && !gfxShaders.runtimeCompilationEnabled
+        && uiMsaa.sampleCount == 4 && uiMsaa.sampleQuality == 0
+        && gfxMsaa.sampleCount == 4 && gfxMsaa.sampleQuality == 0
 #endif
         ? EXIT_SUCCESS
         : EXIT_FAILURE;

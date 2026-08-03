@@ -71,6 +71,205 @@ constexpr bool kExpectedRuntimeShaderCompilation = false;
     return result;
 }
 
+[[nodiscard]] std::uint32_t sampleQualityLevels(
+    ID3D12Device& device,
+    DXGI_FORMAT format,
+    std::uint32_t sampleCount) noexcept {
+    D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS support{
+        .Format = format,
+        .SampleCount = sampleCount,
+        .Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE,
+    };
+    return SUCCEEDED(device.CheckFeatureSupport(
+        D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
+        &support,
+        sizeof(support)))
+        ? support.NumQualityLevels
+        : 0;
+}
+
+[[nodiscard]] bool verifyMultisampledUi(
+    ID3D12Device& device,
+    ID3D12CommandQueue& queue,
+    std::uint32_t sampleCount,
+    std::uint32_t sampleQuality) {
+    using namespace henia::ui;
+    constexpr std::uint32_t width = 64;
+    constexpr std::uint32_t height = 64;
+    constexpr DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
+
+    D3D12_RESOURCE_DESC multisampledDescription{};
+    multisampledDescription.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    multisampledDescription.Width = width;
+    multisampledDescription.Height = height;
+    multisampledDescription.DepthOrArraySize = 1;
+    multisampledDescription.MipLevels = 1;
+    multisampledDescription.Format = format;
+    multisampledDescription.SampleDesc = {sampleCount, sampleQuality};
+    multisampledDescription.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_CLEAR_VALUE clearValue{};
+    clearValue.Format = format;
+    clearValue.Color[3] = 1.0F;
+    ComPtr<ID3D12Resource> multisampledTarget;
+    if (FAILED(device.CreateCommittedResource(
+            &defaultHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &multisampledDescription,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,
+            &clearValue,
+            IID_PPV_ARGS(&multisampledTarget)))) {
+        return false;
+    }
+
+    D3D12_RESOURCE_DESC resolvedDescription = multisampledDescription;
+    resolvedDescription.SampleDesc = {1, 0};
+    resolvedDescription.Flags = D3D12_RESOURCE_FLAG_NONE;
+    ComPtr<ID3D12Resource> resolvedTarget;
+    if (FAILED(device.CreateCommittedResource(
+            &defaultHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &resolvedDescription,
+            D3D12_RESOURCE_STATE_RESOLVE_DEST,
+            nullptr,
+            IID_PPV_ARGS(&resolvedTarget)))) {
+        return false;
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDescription{};
+    rtvHeapDescription.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtvHeapDescription.NumDescriptors = 1;
+    ComPtr<ID3D12DescriptorHeap> rtvHeap;
+    if (FAILED(device.CreateDescriptorHeap(
+            &rtvHeapDescription,
+            IID_PPV_ARGS(&rtvHeap)))) {
+        return false;
+    }
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    device.CreateRenderTargetView(multisampledTarget.Get(), nullptr, rtv);
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT rows = 0;
+    UINT64 rowBytes = 0;
+    UINT64 readbackBytes = 0;
+    device.GetCopyableFootprints(
+        &resolvedDescription,
+        0,
+        1,
+        0,
+        &footprint,
+        &rows,
+        &rowBytes,
+        &readbackBytes);
+    const D3D12_HEAP_PROPERTIES readbackHeap = heapProperties(D3D12_HEAP_TYPE_READBACK);
+    const D3D12_RESOURCE_DESC readbackDescription = bufferDescription(readbackBytes);
+    ComPtr<ID3D12Resource> readback;
+    if (FAILED(device.CreateCommittedResource(
+            &readbackHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &readbackDescription,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,
+            IID_PPV_ARGS(&readback)))) {
+        return false;
+    }
+
+    Frame frame;
+    frame.reserve(4, 2);
+    frame.begin().fillRect(
+        {{8.0F, 8.0F}, {56.0F, 56.0F}},
+        {1.0F, 1.0F, 1.0F, 1.0F});
+    const RenderPacket packet = frame.finish();
+    D3D12Renderer renderer;
+    if (!renderer.initialize(
+            device,
+            format,
+            {
+                .instanceCapacity = 4,
+                .submissionCapacity = 1,
+                .batchCapacity = 2,
+                .textureCapacity = 1,
+                .textureUploadBatchCapacity = 1,
+                .sampleCount = sampleCount,
+                .sampleQuality = sampleQuality,
+            })) {
+        std::cerr << renderer.lastError() << '\n';
+        return false;
+    }
+
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> commandList;
+    if (FAILED(device.CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(&allocator)))
+        || FAILED(device.CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            allocator.Get(),
+            nullptr,
+            IID_PPV_ARGS(&commandList)))) {
+        return false;
+    }
+    constexpr std::array<float, 4> clearColor{0.0F, 0.0F, 0.0F, 1.0F};
+    commandList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    commandList->ClearRenderTargetView(rtv, clearColor.data(), 0, nullptr);
+    if (!renderer.record(packet, *commandList.Get(), 0, width, height)) {
+        std::cerr << renderer.lastError() << '\n';
+        return false;
+    }
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = multisampledTarget.Get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+    commandList->ResourceBarrier(1, &barrier);
+    commandList->ResolveSubresource(
+        resolvedTarget.Get(), 0, multisampledTarget.Get(), 0, format);
+    barrier.Transition.pResource = resolvedTarget.Get();
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    commandList->ResourceBarrier(1, &barrier);
+
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = resolvedTarget.Get();
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION destination{};
+    destination.pResource = readback.Get();
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    destination.PlacedFootprint = footprint;
+    commandList->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+    if (FAILED(commandList->Close())) return false;
+    ID3D12CommandList* lists[]{commandList.Get()};
+    queue.ExecuteCommandLists(1, lists);
+    if (!waitForQueue(device, queue)) return false;
+
+    void* mappedAddress = nullptr;
+    const D3D12_RANGE readRange{0, static_cast<SIZE_T>(readbackBytes)};
+    if (FAILED(readback->Map(0, &readRange, &mappedAddress))
+        || mappedAddress == nullptr) {
+        return false;
+    }
+    const auto* mapped = static_cast<const std::byte*>(mappedAddress);
+    const auto pixel = [&](std::uint32_t x, std::uint32_t y) {
+        const std::size_t offset = footprint.Offset
+            + static_cast<std::size_t>(y) * footprint.Footprint.RowPitch
+            + static_cast<std::size_t>(x) * 4U;
+        return henia::test::Rgba8{
+            static_cast<std::uint8_t>(mapped[offset]),
+            static_cast<std::uint8_t>(mapped[offset + 1U]),
+            static_cast<std::uint8_t>(mapped[offset + 2U]),
+            static_cast<std::uint8_t>(mapped[offset + 3U]),
+        };
+    };
+    const henia::test::Rgba8 center = pixel(32, 32);
+    const henia::test::Rgba8 outside = pixel(1, 1);
+    readback->Unmap(0, nullptr);
+    renderer.shutdown();
+    return center.red > 240 && center.green > 240 && center.blue > 240
+        && outside.red < 8 && outside.green < 8 && outside.blue < 8;
+}
+
 [[noreturn]] void fail(const char* message) {
     std::cerr << message << '\n';
     std::exit(EXIT_FAILURE);
@@ -163,6 +362,44 @@ int main() {
         fail("D3D12 renderer rejected an explicitly matched sRGB target format");
     }
     srgbTargetRenderer.shutdown();
+    D3D12Renderer unsupportedSamples;
+    if (unsupportedSamples.initialize(
+            *device.Get(),
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            {.sampleCount = 3})
+        || unsupportedSamples.lastError()
+            != "D3D12 renderer render-target format/sample count is unsupported by the configured device") {
+        fail("D3D12 renderer did not diagnose an unsupported target sample count");
+    }
+    D3D12Renderer unsupportedQuality;
+    if (unsupportedQuality.initialize(
+            *device.Get(),
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            {.sampleQuality = 1})
+        || unsupportedQuality.lastError()
+            != "D3D12 renderer sampleQuality is outside the supported range") {
+        fail("D3D12 renderer did not diagnose an unsupported sample quality");
+    }
+    for (const std::uint32_t sampleCount : {2U, 4U}) {
+        const std::uint32_t qualityLevels = sampleQualityLevels(
+            *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, sampleCount);
+        if (qualityLevels == 0
+            || !verifyMultisampledUi(*device.Get(), *queue.Get(), sampleCount, 0)) {
+            fail("D3D12 renderer failed a required MSAA resolve/readback test");
+        }
+        if (qualityLevels > 1
+            && !verifyMultisampledUi(
+                *device.Get(), *queue.Get(), sampleCount, qualityLevels - 1U)) {
+            fail("D3D12 renderer failed a nonzero-quality MSAA resolve/readback test");
+        }
+    }
+    for (const std::uint32_t sampleCount : {8U, 16U, 32U}) {
+        if (sampleQualityLevels(
+                *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, sampleCount) != 0
+            && !verifyMultisampledUi(*device.Get(), *queue.Get(), sampleCount, 0)) {
+            fail("D3D12 renderer failed a supported higher-sample resolve/readback test");
+        }
+    }
     D3D12Renderer renderer;
     const D3D12RendererConfiguration rendererConfiguration{
         .instanceCapacity = 128,
@@ -187,14 +424,20 @@ int main() {
         || renderer.statistics().pipelineCacheHits != 0) {
         fail("D3D12 UI pipelines were not populated into the host cache");
     }
-    D3D12RendererConfiguration changedConfiguration = rendererConfiguration;
-    changedConfiguration.batchCapacity = 7;
+    D3D12RendererConfiguration changedSampleCount = rendererConfiguration;
+    changedSampleCount.sampleCount = 2;
+    D3D12RendererConfiguration changedSampleQuality = rendererConfiguration;
+    changedSampleQuality.sampleQuality = 1;
     if (!peerRenderer.initialize(
             *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, rendererConfiguration)
         || !peerRenderer.initialize(
             *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, rendererConfiguration)
         || peerRenderer.initialize(
-            *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, changedConfiguration)
+            *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, changedSampleCount)
+        || peerRenderer.lastError()
+            != "D3D12 renderer is already initialized with a different configuration"
+        || peerRenderer.initialize(
+            *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, changedSampleQuality)
         || peerRenderer.lastError()
             != "D3D12 renderer is already initialized with a different configuration"
         || !peerRenderer.initialized()
@@ -209,6 +452,23 @@ int main() {
         fail("D3D12 renderer could not be recreated beside another live instance");
     }
     peerRenderer.shutdown();
+    D3D12RendererConfiguration multisampledCacheConfiguration = rendererConfiguration;
+    multisampledCacheConfiguration.sampleCount = 2;
+    D3D12Renderer multisampledCacheRenderer;
+    D3D12Renderer multisampledCachePeer;
+    if (!multisampledCacheRenderer.initialize(
+            *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, multisampledCacheConfiguration)
+        || multisampledCacheRenderer.statistics().pipelineCacheMisses != 4
+        || multisampledCacheRenderer.statistics().pipelineCacheStores != 4
+        || multisampledCacheRenderer.statistics().pipelineCacheHits != 0
+        || !multisampledCachePeer.initialize(
+            *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, multisampledCacheConfiguration)
+        || multisampledCachePeer.statistics().pipelineCacheHits != 4
+        || multisampledCachePeer.statistics().pipelineCacheMisses != 0) {
+        fail("D3D12 UI pipeline cache did not isolate render-target sample settings");
+    }
+    multisampledCachePeer.shutdown();
+    multisampledCacheRenderer.shutdown();
     if (renderer.pendingTextureUploadBatches() != 1
         || renderer.statistics().textureUploads != 0) {
         fail("D3D12 texture upload was committed before fence completion");
