@@ -488,6 +488,32 @@ void verifyCoordinateSpaceInvalidation(TextPainter& painter) {
         "logical viewport change did not invalidate layout");
 }
 
+void verifyTypographyInvalidation(TextPainter& painter) {
+    UiDocument document(painter);
+    document.setViewport({120.0F, 40.0F});
+    auto root = std::make_unique<ProbeWidget>(
+        Vec2{40.0F, 20.0F}, Color{0.2F, 0.4F, 0.8F, 1.0F});
+    ProbeWidget* probe = root.get();
+    document.setRoot(std::move(root));
+    static_cast<void>(document.compose());
+    static_cast<void>(document.compose());
+    const UiDocumentStatistics before = document.statistics();
+    const std::uint64_t measuresBefore = probe->measureCalls;
+    const std::uint64_t arrangementsBefore = probe->arrangeCalls;
+    const std::uint64_t paintsBefore = probe->paintCalls;
+
+    document.invalidateTypography();
+    static_cast<void>(document.compose());
+    const UiDocumentStatistics after = document.statistics();
+    require(after.typographyInvalidations == before.typographyInvalidations + 1
+            && after.layoutPasses == before.layoutPasses + 1
+            && after.paintPasses == before.paintPasses + 1
+            && probe->measureCalls == measuresBefore + 1
+            && probe->arrangeCalls == arrangementsBefore + 1
+            && probe->paintCalls == paintsBefore + 1,
+        "typography publication did not invalidate retained layout and paint");
+}
+
 } // namespace
 
 int main() {
@@ -505,6 +531,7 @@ int main() {
     verifyStableEmptySnapshots(painter);
     verifyThemeCascade(painter, font);
     verifyCoordinateSpaceInvalidation(painter);
+    verifyTypographyInvalidation(painter);
 
     std::cout << "HeniaUI retained subtree tests passed\n";
     return EXIT_SUCCESS;

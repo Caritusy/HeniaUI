@@ -181,6 +181,31 @@ publishes the glyph plus a face revision. `Win32FontLoader::appendGlyphs`
 provides the optional GDI rasterizer bridge; the platform-neutral core does not
 depend on it.
 
+`Win32AsyncFontSet` adds a bounded on-demand path without changing that ownership
+model. The owner thread routes Unicode scalars to locale-aware Latin, CJK,
+Japanese, Korean, symbol, and emoji faces and pushes deduplicated jobs through an
+SPSC queue. One private DirectWrite worker owns its font-face interfaces and
+produces self-contained Alpha8 bitmap results. A second bounded SPSC queue
+returns those results; a semaphore parks the worker when result storage is full
+instead of spinning. Neither worker operation accesses `FontStore`,
+`TextureStore`, `DynamicGlyphAtlas`, `TextPainter`, `UiDocument`, or a renderer.
+
+`TextGlyphRequestBackend` lets `TextPainter` enqueue text before layout, so all
+existing controls gain on-demand fallback without platform dependencies in
+Core. The host calls `commitReady(budget)` on the font-set owner thread, then
+synchronizes changed textures, calls `UiDocument::invalidateTypography()`, and
+only then composes. Face revisions lazily reject stale layout/render cache
+entries; explicit document invalidation is still required because an otherwise
+stable retained tree has no reason to revisit typography. Atlas pages may be
+preallocated during font-set construction so interactive commits perform only
+region uploads and bounded font publication until those pages fill.
+
+The built-in routing is scalar fallback, not a universal shaping engine.
+Locale-specific chains select the preferred Han forms. DirectWrite emoji
+outlines are flattened to the existing monochrome Alpha8 contract. Arabic,
+Indic, bidirectional ordering, ligatures, variation sequences, and other
+multi-codepoint behavior remain the responsibility of `TextShapingBackend`.
+
 `TextEditorState` owns committed UTF-8, codepoint-boundary cursor/selection,
 bounded undo/redo snapshots, clipboard operations, and a separate IME preedit
 range. Preedit updates never mutate committed storage; commit is one undoable
@@ -614,3 +639,10 @@ access through a published handle is read-only.
 Widget callbacks may throw. Exceptions propagate through the input-dispatch and
 Win32-adapter APIs so the host can choose its own exception boundary; no callback
 is invoked through a false `noexcept` promise.
+
+Asynchronous Win32 font baking follows the same single-owner rule. Only its
+DirectWrite worker and bounded queues are concurrent. The producer-side owner
+performs requests and bounded commits; store revisions, atlas packing, texture
+updates, renderer synchronization, and retained-document invalidation stay on
+that owner thread. A full result queue blocks only the worker and never the UI
+thread.

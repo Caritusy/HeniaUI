@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include "henia/ui/backend/opengl/OpenGlRenderer.h"
+#include "henia/ui/platform/win32/Win32AsyncFont.h"
 #include "henia/ui/platform/win32/Win32Clipboard.h"
 #include "henia/ui/platform/win32/Win32FontLoader.h"
 #include "henia/ui/platform/win32/Win32InputAdapter.h"
@@ -54,6 +55,13 @@ constexpr Color kBorder{0.11F, 0.19F, 0.27F, 1.0F};
 constexpr Color kAccent{0.10F, 0.72F, 0.91F, 1.0F};
 constexpr Color kText{0.90F, 0.95F, 0.98F, 1.0F};
 constexpr Color kMuted{0.48F, 0.59F, 0.67F, 1.0F};
+
+constexpr std::string_view kMultilingualSample =
+    "English: asynchronous glyph atlas | "
+    "\u4E2D\u6587: \u5F02\u6B65\u5B57\u4F53\u70D8\u7119 | "
+    "\u65E5\u672C\u8A9E: \u975E\u540C\u671F\u30D5\u30A9\u30F3\u30C8 | "
+    "\uD55C\uAD6D\uC5B4: \uBE44\uB3D9\uAE30 \uAE00\uAF34 | "
+    "Caf\u00E9 \u03A9 \u221E \u2605 \U0001F525";
 
 using CreateContextAttributesFn = HGLRC(WINAPI*)(HDC, HGLRC, const int*);
 using SwapIntervalFn = BOOL(WINAPI*)(int);
@@ -416,7 +424,7 @@ struct GalleryState final {
     PopupLayer* popup = nullptr;
     Label* status = nullptr;
     std::string statusText = "Ready - use mouse, wheel, Tab, arrows, Enter and Space";
-    std::string text = "Editable UTF-8 text";
+    std::string text = "Editable UTF-8: \u4E2D\u6587 / \u65E5\u672C\u8A9E / \uD55C\uAD6D\uC5B4";
     Color color{0.12F, 0.64F, 0.92F, 1.0F};
     KeyCode binding = KeyCode::F9;
     double slider = 0.62;
@@ -514,6 +522,23 @@ struct GalleryState final {
             .multiline = true,
         });
     multiline.setClipboard(&clipboard);
+
+    Panel& multilingual = addCard(
+        first, font, "Multilingual text", "On-demand DirectWrite glyphs / bounded main-thread commit");
+    multilingual.emplaceChild<Label>(
+        "English: HeniaUI async atlas", LabelStyle{font, 13.0F, kText});
+    multilingual.emplaceChild<Label>(
+        "\u4E2D\u6587: \u5F02\u6B65\u5B57\u4F53\u70D8\u7119",
+        LabelStyle{font, 13.0F, kText});
+    multilingual.emplaceChild<Label>(
+        "\u65E5\u672C\u8A9E: \u975E\u540C\u671F\u30D5\u30A9\u30F3\u30C8",
+        LabelStyle{font, 13.0F, kText});
+    multilingual.emplaceChild<Label>(
+        "\uD55C\uAD6D\uC5B4: \uBE44\uB3D9\uAE30 \uAE00\uAF34",
+        LabelStyle{font, 13.0F, kText});
+    multilingual.emplaceChild<Label>(
+        "Caf\u00E9 / \u03A9 / \u221E / \u2605 / \U0001F525",
+        LabelStyle{font, 13.0F, kMuted});
 
     Panel& values = addCard(
         first, font, "Values", "Slider and keyboard-editable NumericInput");
@@ -857,9 +882,31 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return 2;
     }
 
+    Win32AsyncFontSet asyncFonts(textures, fonts, {
+        .primaryFont = font,
+        .logicalPixelHeight = 32.0F,
+        .dpiScale = static_cast<float>(initialDpi) / 96.0F,
+        .initialAtlasWidth = 1024,
+        .initialAtlasHeight = 512,
+        .dynamicAtlas = {
+            .pageWidth = 1024,
+            .pageHeight = 1024,
+            .padding = 1,
+            .maximumPages = 8,
+        },
+        .preallocatedPagesPerFace = 1,
+    });
+    if (!asyncFonts.valid()) {
+        showRendererError(native.window, L"HeniaUI multilingual fonts", asyncFonts.lastError());
+        return 2;
+    }
+    static_cast<void>(asyncFonts.requestUtf8(kMultilingualSample));
+
     TextRunCache textCache(fonts);
     textCache.reserve(2048, 512);
     TextPainter text(textCache);
+    text.setFallbackFonts(asyncFonts.fontChain(Win32FontLocale::SimplifiedChinese));
+    text.setGlyphRequestBackend(&asyncFonts);
     Win32Clipboard clipboard(native.window);
     GalleryState state;
     UiDocument document(text, galleryTheme(font));
@@ -914,6 +961,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             break;
         }
 
+        if (asyncFonts.commitReady(32) != 0) {
+            if (!renderer.synchronizeTextures(textures)) {
+                result = 7;
+                break;
+            }
+            document.invalidateTypography();
+        }
+
         RECT client{};
         GetClientRect(native.window, &client);
         const std::uint32_t width = static_cast<std::uint32_t>(
@@ -929,8 +984,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             result = 4;
             break;
         }
+        const bool fontsSettled = asyncFonts.idle();
         const bool captureSnapshot = snapshot && !snapshotSaved
-            && (!headless || headlessFrames == 2);
+            && (!headless || (headlessFrames >= 2 && fontsSettled));
         if (captureSnapshot) {
             glFinish();
             if (!saveSnapshot(width, height)) {
@@ -947,7 +1003,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             constexpr auto minimumFrameTime = std::chrono::microseconds(6945);
             std::this_thread::sleep_until(frameStarted + minimumFrameTime);
         }
-        if (headless && ++headlessFrames >= 3) {
+        if (headless && ++headlessFrames >= 240) {
+            result = fontsSettled ? result : 8;
+            break;
+        }
+        if (headless && headlessFrames >= 3 && fontsSettled) {
             break;
         }
     }

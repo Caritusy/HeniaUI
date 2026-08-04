@@ -42,6 +42,14 @@ public:
         std::vector<TextShapingGlyph>& output) const = 0;
 };
 
+// Optional non-owning bridge for on-demand glyph systems. TextPainter calls it
+// before layout so platform adapters can enqueue work without blocking.
+class TextGlyphRequestBackend {
+public:
+    virtual ~TextGlyphRequestBackend() = default;
+    virtual void requestText(std::string_view text) = 0;
+};
+
 struct TextLayoutGlyph final {
     FontHandle font{};
     std::uint32_t glyphId = 0;
@@ -210,9 +218,20 @@ class TextPainter final {
 public:
     explicit TextPainter(TextRunCache& cache) noexcept;
 
+    // Single-font operations append this ordered fallback chain. Explicit span
+    // overloads remain exact, which lets individual controls override it.
+    void setFallbackFonts(std::span<const FontHandle> fonts);
+    [[nodiscard]] std::span<const FontHandle> fallbackFonts() const noexcept;
+    void setGlyphRequestBackend(TextGlyphRequestBackend* backend) noexcept;
+    [[nodiscard]] TextGlyphRequestBackend* glyphRequestBackend() const noexcept;
+
     [[nodiscard]] TextMetrics measure(FontHandle font, float size, std::string_view text);
     [[nodiscard]] TextMetrics measure(
         std::span<const FontHandle> fontChain,
+        float size,
+        std::string_view text);
+    [[nodiscard]] const TextLayoutResult* layout(
+        FontHandle font,
         float size,
         std::string_view text);
     [[nodiscard]] const TextLayoutResult* layout(
@@ -251,7 +270,13 @@ public:
         std::size_t byteEnd);
 
 private:
+    [[nodiscard]] std::span<const FontHandle> resolvedFonts(FontHandle primary);
+
     TextRunCache* mCache = nullptr;
+    TextGlyphRequestBackend* mGlyphRequests = nullptr;
+    FontHandle mResolvedPrimary{};
+    std::vector<FontHandle> mFallbackFonts;
+    std::vector<FontHandle> mResolvedFonts;
 };
 
 } // namespace henia::ui

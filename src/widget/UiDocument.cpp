@@ -138,6 +138,11 @@ void UiDocument::setTheme(Theme themeValue) noexcept {
 
 const Theme& UiDocument::theme() const noexcept { return mTheme; }
 
+void UiDocument::invalidateTypography() noexcept {
+    ++mStatistics.typographyInvalidations;
+    if (mRoot != nullptr) mRoot->markLayoutDirtyRecursive();
+}
+
 void UiDocument::setFragmentAreaTracking(bool enabled) noexcept {
     mFrame.setFragmentAreaTracking(enabled);
 }

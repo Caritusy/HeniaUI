@@ -264,6 +264,7 @@ if(WIN32)
     )
 
     add_library(HeniaUIWin32 STATIC
+        src/platform/win32/Win32AsyncFont.cpp
         src/platform/win32/Win32Clipboard.cpp
         src/platform/win32/Win32FontLoader.cpp
         src/platform/win32/Win32InputAdapter.cpp
@@ -276,7 +277,7 @@ if(WIN32)
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     )
-    target_link_libraries(HeniaUIWin32 PUBLIC HeniaUI::Core PRIVATE gdi32 imm32 user32)
+    target_link_libraries(HeniaUIWin32 PUBLIC HeniaUI::Core PRIVATE dwrite gdi32 imm32 user32)
     if(MSVC)
         target_compile_options(HeniaUIWin32 PRIVATE /W4 /permissive- /utf-8 /GR-)
     endif()

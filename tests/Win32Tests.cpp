@@ -1,16 +1,19 @@
 #include "henia/ui/Frame.h"
+#include "henia/ui/platform/win32/Win32AsyncFont.h"
 #include "henia/ui/platform/win32/Win32FontLoader.h"
 #include "henia/ui/platform/win32/Win32InputAdapter.h"
 #include "henia/ui/text/TextLayout.h"
 #include "henia/ui/widget/controls/Panel.h"
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -492,6 +495,63 @@ int main() {
         || fonts.find(font)->glyph(U'\u00E9') == nullptr
         || dynamic.statistics().glyphsAdded != 1) {
         std::cerr << "Win32 dynamic glyph atlas growth failed\n";
+        return EXIT_FAILURE;
+    }
+
+    Win32AsyncFontSet asyncFonts(textures, fonts, {
+        .families = {
+            .primary = L"Segoe UI",
+            .simplifiedChinese = {},
+            .traditionalChinese = {},
+            .japanese = {},
+            .korean = {},
+            .symbols = {},
+            .emoji = {},
+        },
+        .primaryFont = font,
+        .logicalPixelHeight = 24.0F,
+        .dynamicAtlas = {
+            .pageWidth = 64,
+            .pageHeight = 64,
+            .padding = 1,
+            .maximumPages = 2,
+        },
+        .preallocatedPagesPerFace = 1,
+        .requestQueueCapacity = 16,
+        .resultQueueCapacity = 4,
+    });
+    constexpr std::array asynchronousCodepoints{U'\u00F1'};
+    const std::uint64_t revisionBeforeAsync = fonts.find(font)->revision();
+    if (!asyncFonts.valid()
+        || asyncFonts.font(Win32FontRole::Primary) != font
+        || asyncFonts.fontChain().size() != 1
+        || asyncFonts.request(asynchronousCodepoints) != 1
+        || asyncFonts.request(asynchronousCodepoints) != 0
+        || fonts.find(font)->revision() != revisionBeforeAsync) {
+        std::cerr << "Win32 asynchronous font request or deduplication failed\n";
+        return EXIT_FAILURE;
+    }
+    std::size_t committedAsync = 0;
+    const auto asyncDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < asyncDeadline
+        && fonts.find(font)->glyph(U'\u00F1') == nullptr) {
+        committedAsync += asyncFonts.commitReady(2);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    static_cast<void>(asyncFonts.commitReady(4));
+    const Win32AsyncFontStatistics asyncStatistics = asyncFonts.statistics();
+    if (committedAsync != 1
+        || fonts.find(font)->glyph(U'\u00F1') == nullptr
+        || fonts.find(font)->revision() != revisionBeforeAsync + 1
+        || !asyncFonts.idle()
+        || asyncStatistics.uniqueCodepointsRequested != 1
+        || asyncStatistics.bakeJobsQueued != 1
+        || asyncStatistics.deduplicatedBakeJobs != 1
+        || asyncStatistics.rasterizedGlyphs != 1
+        || asyncStatistics.committedGlyphs != 1
+        || asyncStatistics.pendingBakeJobs != 0
+        || asyncStatistics.readyResults != 0) {
+        std::cerr << "Win32 asynchronous font publication statistics are invalid\n";
         return EXIT_FAILURE;
     }
 

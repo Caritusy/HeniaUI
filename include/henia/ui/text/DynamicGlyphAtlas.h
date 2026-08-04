@@ -51,6 +51,9 @@ public:
         FontHandle font,
         DynamicGlyphAtlasOptions options = {}) noexcept;
 
+    // Allocates stable empty atlas pages ahead of the interactive loop.
+    // Existing pages are retained; count may not exceed maximumPages.
+    [[nodiscard]] bool reservePages(std::size_t count);
     [[nodiscard]] bool add(const RasterizedGlyph& glyph);
     [[nodiscard]] bool add(std::span<const RasterizedGlyph> glyphs);
 

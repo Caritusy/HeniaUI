@@ -224,10 +224,7 @@ void TextInput::onPaint(Canvas& canvas, TextPainter& textPainter, const Theme&) 
     const Color textColor = mDisplayText.empty() && !mPlaceholder.empty()
         ? mStyle.placeholderColor
         : mStyle.textColor;
-    const TextLayoutResult* layout = textPainter.layout(
-        mFontChain,
-        mStyle.fontSize,
-        visibleText);
+    const TextLayoutResult* layout = layoutText(textPainter, visibleText);
     float textY = content.min.y;
     if (!mStyle.multiline && layout != nullptr) {
         textY += std::max((content.height() - layout->metrics.height) * 0.5F, 0.0F);
@@ -335,13 +332,19 @@ std::string TextInput::filtered(std::string_view textValue) const {
     return result;
 }
 
+const TextLayoutResult* TextInput::layoutText(
+    TextPainter& painter,
+    std::string_view text) {
+    if (mStyle.fallbackFonts.empty()) {
+        return painter.layout(mStyle.font, mStyle.fontSize, text);
+    }
+    return painter.layout(mFontChain, mStyle.fontSize, text);
+}
+
 std::size_t TextInput::caretAt(Vec2 point) {
-    if (mLastPainter == nullptr || mFontChain.empty()) return mEditor.text().size();
+    if (mLastPainter == nullptr) return mEditor.text().size();
     mDisplayText = mEditor.displayText();
-    const TextLayoutResult* layout = mLastPainter->layout(
-        mFontChain,
-        mStyle.fontSize,
-        mDisplayText);
+    const TextLayoutResult* layout = layoutText(*mLastPainter, mDisplayText);
     return layout == nullptr ? 0 : TextPainter::hitTest(
         *layout,
         {point.x - mTextOrigin.x, point.y - mTextOrigin.y});

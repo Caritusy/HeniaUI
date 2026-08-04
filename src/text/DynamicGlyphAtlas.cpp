@@ -15,6 +15,16 @@ DynamicGlyphAtlas::DynamicGlyphAtlas(
     DynamicGlyphAtlasOptions options) noexcept
     : mTextures(&textures), mFonts(&fonts), mFont(font), mOptions(options) {}
 
+bool DynamicGlyphAtlas::reservePages(std::size_t count) {
+    if (count > mOptions.maximumPages || mFonts->find(mFont) == nullptr) return false;
+    mPageState.reserve(count);
+    mPageHandles.reserve(count);
+    while (mPageState.size() < count) {
+        if (!allocatePage()) return false;
+    }
+    return true;
+}
+
 bool DynamicGlyphAtlas::add(const RasterizedGlyph& glyph) {
     return add(std::span<const RasterizedGlyph>(&glyph, 1));
 }

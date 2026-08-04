@@ -927,6 +927,17 @@ public:
     }
 };
 
+class GlyphRequestProbe final : public TextGlyphRequestBackend {
+public:
+    void requestText(std::string_view text) override {
+        ++requests;
+        lastText.assign(text);
+    }
+
+    std::size_t requests = 0;
+    std::string lastText;
+};
+
 void testFallbackShapingAndDynamicGlyphPages() {
     TextureStore textures;
     const std::array<std::byte, 16> empty{};
@@ -992,6 +1003,21 @@ void testFallbackShapingAndDynamicGlyphPages() {
             && mixedSelectionAvailable,
         "cluster-aware multiline caret, hit testing, or selection geometry failed");
 
+    TextRunCache defaultFallbackCache(fonts);
+    TextPainter defaultFallbackPainter(defaultFallbackCache);
+    defaultFallbackPainter.setFallbackFonts(chain);
+    GlyphRequestProbe requestProbe;
+    defaultFallbackPainter.setGlyphRequestBackend(&requestProbe);
+    const TextLayoutResult* defaultFallbackLayout = defaultFallbackPainter.layout(
+        latin, 10.0F, mixed);
+    require(defaultFallbackPainter.fallbackFonts().size() == 2
+            && defaultFallbackLayout != nullptr
+            && defaultFallbackLayout->glyphs.size() == 2
+            && defaultFallbackLayout->glyphs[0].font == latin
+            && defaultFallbackLayout->glyphs[1].font == cjk
+            && requestProbe.requests == 1 && requestProbe.lastText == mixed,
+        "single-font fallback or automatic glyph request integration failed");
+
     ComplexScriptShaper shaper;
     TextRunCache shapedCache(fonts, &shaper);
     TextPainter shapedPainter(shapedCache);
@@ -1018,6 +1044,11 @@ void testFallbackShapingAndDynamicGlyphPages() {
         .padding = 0,
         .maximumPages = 2,
     });
+    require(dynamic.reservePages(1)
+            && dynamic.pages().size() == 1
+            && dynamic.statistics().fullPageAllocations == 1
+            && !dynamic.reservePages(3),
+        "dynamic glyph atlas startup page reservation is incorrect");
     const std::array<std::byte, 4> cjkPixels{
         std::byte{0xFF}, std::byte{0xC0}, std::byte{0xC0}, std::byte{0xFF}};
     const std::uint64_t revisionBefore = fonts.find(latin)->revision();
@@ -1057,6 +1088,7 @@ void testFallbackShapingAndDynamicGlyphPages() {
     const GlyphMetrics* ideographicSpace = fonts.find(latin)->glyph(U'\u3000');
     require(fonts.find(latin)->revision() == revisionBefore + 3
             && atlasStatistics.pages == 2 && atlasStatistics.glyphsAdded == 3
+            && atlasStatistics.fullPageAllocations == 2
             && atlasStatistics.uploadedBytes == 13,
         "dynamic atlas revisions or page statistics are incorrect");
     require(ideographicSpace != nullptr && ideographicSpace->size == Vec2{}

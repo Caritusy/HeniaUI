@@ -132,7 +132,7 @@ The repository also builds:
 | CMake | 3.24 or newer |
 | Language | C++23, RTTI not required |
 | Core and Gfx | Platform-neutral; continuously built on Windows and Linux |
-| Win32 adapters | Windows SDK, GDI, IMM32, and User32 |
+| Win32 adapters | Windows SDK, DirectWrite, GDI, IMM32, and User32 |
 | OpenGL backend | Windows host with an already-current compatible OpenGL 3.3 context |
 | D3D12 backend | Windows host with a D3D12 device and host-owned command submission |
 
@@ -328,6 +328,52 @@ minimal builds.
 supports codepoint-safe navigation, clipboard operations, and bounded undo/redo.
 The Win32 adapter translates an existing host `WndProc` stream; it never
 subclasses or owns the window.
+
+### Asynchronous multilingual fonts
+
+`Win32AsyncFontSet` supplies on-demand English, Simplified and Traditional
+Chinese, Japanese, Korean, symbols, and monochrome emoji fallback faces. A
+private DirectWrite worker rasterizes requested Unicode scalars into owned
+Alpha8 bitmaps. It never touches `FontStore`, `TextureStore`, a renderer, or a
+widget document. The owner thread publishes only a bounded number of completed
+results per frame.
+
+```cpp
+#include <henia/ui/platform/win32/Win32AsyncFont.h>
+
+henia::ui::Win32AsyncFontSet multilingual(textures, fontStore, {
+    .primaryFont = primaryFont,
+    .logicalPixelHeight = 18.0F,
+    .dpiScale = dpi / 96.0F,
+    .preallocatedPagesPerFace = 1,
+});
+
+textPainter.setFallbackFonts(multilingual.fontChain(
+    henia::ui::Win32FontLocale::SimplifiedChinese));
+textPainter.setGlyphRequestBackend(&multilingual);
+
+// Interactive frame: publish, upload, invalidate, then compose.
+if (multilingual.commitReady(32) != 0) {
+    if (!renderer.synchronizeTextures(textures)) {
+        return false;
+    }
+    document.invalidateTypography();
+}
+renderer.render(document.compose(), document.coordinateSpace().render);
+```
+
+All `TextPainter`-driven controls automatically enqueue their UTF-8 text. The
+queues are bounded and requests are deduplicated per face/codepoint, so layout
+never waits for rasterization. `fontChain()` selects locale-specific CJK face
+order while keeping stable handles. Construct a matching font set when the
+font's logical size or raster DPI changes; preallocated atlas pages avoid the
+first runtime page allocation.
+
+This scalar fallback path covers Latin, CJK, kana, Hangul, common symbols, and
+many other characters available in the configured system faces. Color emoji is
+currently flattened to the library's Alpha8 text contract. Arabic, Indic,
+bidirectional text, ligatures, and emoji sequences still require an appropriate
+`TextShapingBackend`; the simple shaper does not claim full Unicode shaping.
 
 ### GPU-instanced 3D shapes
 

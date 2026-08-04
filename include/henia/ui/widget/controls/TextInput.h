@@ -56,6 +56,9 @@ protected:
 
 private:
     void rebuildFontChain();
+    [[nodiscard]] const TextLayoutResult* layoutText(
+        TextPainter& painter,
+        std::string_view text);
     [[nodiscard]] std::string filtered(std::string_view text) const;
     [[nodiscard]] std::size_t caretAt(Vec2 point);
     void finishEdit(std::uint64_t previousTextRevision, bool changed);

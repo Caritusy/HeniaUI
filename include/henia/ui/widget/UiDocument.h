@@ -29,6 +29,7 @@ struct UiDocumentStatistics final {
     std::uint64_t dpiChanges = 0;
     std::uint64_t inputTransformChanges = 0;
     std::uint64_t renderTransformChanges = 0;
+    std::uint64_t typographyInvalidations = 0;
 };
 
 class UiDocument final {
@@ -59,6 +60,9 @@ public:
     [[nodiscard]] const UiCoordinateSpace& coordinateSpace() const noexcept;
     void setTheme(Theme theme) noexcept;
     [[nodiscard]] const Theme& theme() const noexcept;
+    // Call after owner-thread font/atlas publication so retained measurements
+    // and paint segments observe the new face revisions.
+    void invalidateTypography() noexcept;
     void setFragmentAreaTracking(bool enabled) noexcept;
     [[nodiscard]] bool fragmentAreaTracking() const noexcept;
 
