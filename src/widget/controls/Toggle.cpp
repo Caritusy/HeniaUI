@@ -6,6 +6,19 @@
 namespace henia::ui {
 namespace {
 
+[[nodiscard]] constexpr Color mixColor(
+    Color first,
+    Color second,
+    float amount) noexcept {
+    const float value = std::clamp(amount, 0.0F, 1.0F);
+    return {
+        first.red + (second.red - first.red) * value,
+        first.green + (second.green - first.green) * value,
+        first.blue + (second.blue - first.blue) * value,
+        first.alpha + (second.alpha - first.alpha) * value,
+    };
+}
+
 [[nodiscard]] bool activation(const InputEvent& event, const Widget& widget) noexcept {
     return event.kind == InputEventKind::KeyDown && widget.focused()
         && (event.key == KeyCode::Enter || event.key == KeyCode::Space);
@@ -75,8 +88,25 @@ void Checkbox::onPaint(Canvas& canvas, TextPainter& text, const Theme&) {
         {frame().min.x + mStyle.padding + size,
          frame().min.y + std::max((frame().height() - size) * 0.5F, 0.0F) + size},
     };
-    canvas.fillRect(indicator, mChecked ? mStyle.active : mStyle.background, 4.0F);
-    canvas.strokeRect(indicator, focused() ? mStyle.focus : mStyle.border, 4.0F, 1.0F);
+    const bool active = pressed();
+    const bool hot = hovered() || active;
+    if (hot) {
+        Color halo = mStyle.focus;
+        halo.alpha *= active ? 0.24F : 0.13F;
+        canvas.roundedGlow(indicator, halo, 4.0F, active ? 5.0F : 3.0F);
+    }
+    const Color fill = mChecked ? mStyle.active : mStyle.background;
+    canvas.fillRect(
+        indicator,
+        hot ? mixColor(fill, mStyle.focus, active ? 0.20F : 0.10F) : fill,
+        4.0F);
+    canvas.strokeRect(
+        indicator,
+        focused() || hot
+            ? mixColor(mStyle.border, mStyle.focus, active ? 0.86F : 0.62F)
+            : mStyle.border,
+        4.0F,
+        hot ? 1.5F : 1.0F);
     if (mChecked) {
         const float x0 = indicator.min.x + size * 0.22F;
         const float y0 = indicator.min.y + size * 0.52F;
@@ -86,11 +116,11 @@ void Checkbox::onPaint(Canvas& canvas, TextPainter& text, const Theme&) {
             {indicator.min.x + size * 0.80F, indicator.min.y + size * 0.29F},
             mStyle.mark, 2.0F, LineCap::Round);
     }
-    const TextMetrics metrics = text.measure(mStyle.font, mStyle.fontSize, mText);
-    text.draw(canvas, mStyle.font, mStyle.fontSize,
-        {indicator.max.x + mStyle.gap,
-         frame().min.y + std::max((frame().height() - metrics.height) * 0.5F, 0.0F)},
-        mStyle.textColor, mText);
+    if (const TextLayoutResult* layout = text.layout(mStyle.font, mStyle.fontSize, mText)) {
+        Vec2 origin = TextPainter::centeredVisualOrigin(*layout, frame());
+        origin.x = indicator.max.x + mStyle.gap;
+        text.drawLayout(canvas, *layout, origin, mStyle.textColor);
+    }
 }
 
 void Checkbox::activate() {
@@ -139,16 +169,36 @@ void Toggle::onPaint(Canvas& canvas, TextPainter& text, const Theme&) {
     const float y = frame().min.y + std::max((frame().height() - height) * 0.5F, 0.0F);
     const Rect track{{frame().min.x + mStyle.padding, y},
                      {frame().min.x + mStyle.padding + width, y + height}};
-    canvas.fillRect(track, mChecked ? mStyle.active : mStyle.background, height * 0.5F);
-    canvas.strokeRect(track, focused() ? mStyle.focus : mStyle.border, height * 0.5F, 1.0F);
+    const bool active = pressed();
+    const bool hot = hovered() || active;
+    if (hot) {
+        Color halo = mStyle.focus;
+        halo.alpha *= active ? 0.24F : 0.13F;
+        canvas.roundedGlow(track, halo, height * 0.5F, active ? 5.0F : 3.0F);
+    }
+    const Color fill = mChecked ? mStyle.active : mStyle.background;
+    canvas.fillRect(
+        track,
+        hot ? mixColor(fill, mStyle.focus, active ? 0.20F : 0.10F) : fill,
+        height * 0.5F);
+    canvas.strokeRect(
+        track,
+        focused() || hot
+            ? mixColor(mStyle.border, mStyle.focus, active ? 0.86F : 0.62F)
+            : mStyle.border,
+        height * 0.5F,
+        hot ? 1.5F : 1.0F);
     const float knobRadius = std::max(height * 0.5F - 3.0F, 0.0F);
     const float knobX = mChecked ? track.max.x - height * 0.5F : track.min.x + height * 0.5F;
-    canvas.circle({knobX, y + height * 0.5F}, knobRadius, mStyle.mark);
-    const TextMetrics metrics = text.measure(mStyle.font, mStyle.fontSize, mText);
-    text.draw(canvas, mStyle.font, mStyle.fontSize,
-        {track.max.x + mStyle.gap,
-         frame().min.y + std::max((frame().height() - metrics.height) * 0.5F, 0.0F)},
-        mStyle.textColor, mText);
+    canvas.circle(
+        {knobX, y + height * 0.5F},
+        knobRadius + (active ? 0.75F : 0.0F),
+        mStyle.mark);
+    if (const TextLayoutResult* layout = text.layout(mStyle.font, mStyle.fontSize, mText)) {
+        Vec2 origin = TextPainter::centeredVisualOrigin(*layout, frame());
+        origin.x = track.max.x + mStyle.gap;
+        text.drawLayout(canvas, *layout, origin, mStyle.textColor);
+    }
 }
 
 void Toggle::activate() {

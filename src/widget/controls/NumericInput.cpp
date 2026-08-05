@@ -216,15 +216,31 @@ Vec2 NumericInput::onMeasure(TextPainter&, Constraints) {
 void NumericInput::onPaint(Canvas& canvas, TextPainter& textPainter, const Theme& theme) {
     const ResolvedNumericInputStyle style = resolve(mStyle, theme);
     const Rect bounds = frame();
+    if (hovered() || focused() || pressed()) {
+        Color glow = style.focus;
+        glow.alpha *= pressed() ? 0.16F : focused() ? 0.12F : 0.07F;
+        canvas.roundedGlow(bounds, glow, style.radius, pressed() ? 6.0F : 4.0F);
+    }
     canvas.fillRect(bounds, style.background, style.radius);
-    canvas.strokeRect(bounds, focused() ? style.focus : style.border, style.radius, style.borderWidth);
+    canvas.strokeRect(
+        bounds,
+        focused() ? style.focus
+                  : hovered() ? theme.accentStrong
+                              : style.border,
+        style.radius,
+        style.borderWidth + (focused() || hovered() ? 0.5F : 0.0F));
 
     const float buttonWidth = std::min(style.stepButtonWidth, bounds.width() * 0.4F);
     const Rect decrement{bounds.min, {bounds.min.x + buttonWidth, bounds.max.y}};
     const Rect increment{{bounds.max.x - buttonWidth, bounds.min.y}, bounds.max};
+    const Rect valueRegion{{decrement.max.x, bounds.min.y}, {increment.min.x, bounds.max.y}};
     const Region activeRegion = pressed() ? mPressedRegion : mHoverRegion;
-    if ((hovered() || pressed()) && activeRegion != Region::Value) {
-        const Rect target = activeRegion == Region::Increment ? increment : decrement;
+    if (hovered() || pressed()) {
+        const Rect target = activeRegion == Region::Increment
+            ? increment
+            : activeRegion == Region::Decrement
+                ? decrement
+                : valueRegion;
         canvas.fillRect(target, pressed() ? style.pressed : style.hover, style.radius);
     }
     canvas.line(
@@ -239,13 +255,18 @@ void NumericInput::onPaint(Canvas& canvas, TextPainter& textPainter, const Theme
         1.0F);
 
     const std::string valueText = mEditing ? mEditingText : formatValue();
-    const TextMetrics valueMetrics = textPainter.measure(style.font, style.fontSize, valueText);
     const float valueMinX = decrement.max.x;
     const float valueWidth = std::max(increment.min.x - valueMinX, 0.0F);
-    const float textY = bounds.min.y + std::max((bounds.height() - valueMetrics.height) * 0.5F, 0.0F);
-    textPainter.draw(canvas, style.font, style.fontSize,
-        {valueMinX + std::max((valueWidth - valueMetrics.width) * 0.5F, 0.0F), textY},
-        style.textColor, valueText);
+    if (const TextLayoutResult* layout = textPainter.layout(
+            style.font, style.fontSize, valueText)) {
+        textPainter.drawLayout(
+            canvas,
+            *layout,
+            TextPainter::centeredVisualOrigin(
+                *layout,
+                {{valueMinX, bounds.min.y}, {valueMinX + valueWidth, bounds.max.y}}),
+            style.textColor);
+    }
 
     const auto drawMinus = [&](const Rect& region) {
         const Vec2 center{

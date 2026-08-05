@@ -849,6 +849,108 @@ void verifyEditorGradeTextInput(TextPainter& painter, FontHandle font) {
     }
 }
 
+void verifyOpticalCenteringAndControlFeedback(
+    TextPainter& painter,
+    FontHandle font) {
+    TextLayoutResult synthetic;
+    synthetic.metrics = {18.0F, 20.0F};
+    synthetic.glyphs.push_back({
+        .bounds = {{2.0F, 4.0F}, {12.0F, 14.0F}},
+    });
+    const Rect target{{10.0F, 20.0F}, {50.0F, 60.0F}};
+    const Vec2 origin = TextPainter::centeredVisualOrigin(synthetic, target);
+    const Rect visual = TextPainter::visualBounds(synthetic);
+    if (std::abs(origin.x + (visual.min.x + visual.max.x) * 0.5F - 30.0F) > 0.001F
+        || std::abs(origin.y + (visual.min.y + visual.max.y) * 0.5F - 40.0F) > 0.001F) {
+        fail("Visual text bounds were not centered in the target rectangle");
+    }
+
+    UiDocument inputDocument(painter);
+    inputDocument.reserve(128, 16);
+    inputDocument.setViewport({260.0F, 60.0F});
+    auto inputRoot = std::make_unique<Panel>();
+    TextInput& input = inputRoot->emplaceChild<TextInput>(
+        "",
+        TextInputStyle{
+            .font = font,
+            .fontSize = 14.0F,
+            .controlWidth = 240.0F,
+            .controlHeight = 38.0F,
+        });
+    input.setPlaceholder("Ag");
+    inputDocument.setRoot(std::move(inputRoot));
+    const RenderPacket inputPacket = inputDocument.compose();
+    const auto glyph = std::ranges::find_if(
+        inputPacket.instances(),
+        [](const DrawInstance& instance) noexcept {
+            return instance.kind == PrimitiveKind::Glyph;
+        });
+    if (glyph == inputPacket.instances().end()
+        || std::abs((glyph->bounds.min.y + glyph->bounds.max.y) * 0.5F
+                - (input.frame().min.y + input.frame().max.y) * 0.5F) > 0.001F) {
+        fail("Single-line TextInput placeholder was not optically centered");
+    }
+    const UiDocumentStatistics inputBefore = inputDocument.statistics();
+    static_cast<void>(inputDocument.dispatch({
+        .kind = InputEventKind::PointerMove,
+        .position = rectCenter(input.frame()),
+    }));
+    const RenderPacket inputHovered = inputDocument.compose();
+    const UiDocumentStatistics inputAfter = inputDocument.statistics();
+    if (!input.hovered()
+        || inputAfter.layoutPasses != inputBefore.layoutPasses
+        || inputAfter.paintPasses != inputBefore.paintPasses + 1U
+        || inputHovered.revision() == inputPacket.revision()
+        || std::ranges::none_of(
+            inputHovered.instances(),
+            [](const DrawInstance& instance) noexcept {
+                return instance.kind == PrimitiveKind::RoundedGlow;
+            })) {
+        fail("TextInput hover did not produce paint-only visual feedback");
+    }
+
+    UiDocument controlsDocument(painter);
+    controlsDocument.reserve(256, 32);
+    controlsDocument.setViewport({300.0F, 150.0F});
+    auto controlsRoot = std::make_unique<Panel>(PanelStyle{
+        .gap = 8.0F,
+        .direction = LayoutDirection::Column,
+    });
+    Checkbox& checkbox = controlsRoot->emplaceChild<Checkbox>(
+        "Checkbox", false, ToggleStyle{.font = font});
+    Toggle& toggle = controlsRoot->emplaceChild<Toggle>(
+        "Toggle", false, ToggleStyle{.font = font});
+    Slider& slider = controlsRoot->emplaceChild<Slider>(
+        0.5, 0.0, 1.0, 0.01, SliderStyle{.width = 240.0F});
+    controlsDocument.setRoot(std::move(controlsRoot));
+    static_cast<void>(controlsDocument.compose());
+    const std::uint64_t layouts = controlsDocument.statistics().layoutPasses;
+    const double sliderValue = slider.value();
+    for (Widget* control : std::array<Widget*, 3>{&checkbox, &toggle, &slider}) {
+        const std::uint64_t paints = controlsDocument.statistics().paintPasses;
+        static_cast<void>(controlsDocument.dispatch({
+            .kind = InputEventKind::PointerMove,
+            .position = rectCenter(control->frame()),
+        }));
+        const RenderPacket hovered = controlsDocument.compose();
+        if (!control->hovered()
+            || controlsDocument.statistics().layoutPasses != layouts
+            || controlsDocument.statistics().paintPasses != paints + 1U
+            || std::ranges::none_of(
+                hovered.instances(),
+                [](const DrawInstance& instance) noexcept {
+                    return instance.kind == PrimitiveKind::RoundedGlow
+                        || (instance.kind == PrimitiveKind::Ellipse
+                            && instance.color.alpha < 0.5F);
+                })) {
+            fail("Interactive control hover did not produce paint-only feedback");
+        }
+    }
+    if (checkbox.checked() || toggle.checked() || slider.value() != sliderValue) {
+        fail("Hover feedback changed an interactive control value");
+    }
+}
+
 void verifyProductionOverlayWidgets(TextPainter& painter, FontHandle font) {
     {
         UiDocument document(painter);
@@ -1153,6 +1255,7 @@ int main() {
     verifyConstraintSensitiveLayout(painter);
     verifyInteractionCapabilities(painter, font);
     verifyEditorGradeTextInput(painter, font);
+    verifyOpticalCenteringAndControlFeedback(painter, font);
     verifyProductionOverlayWidgets(painter, font);
     UiDocument document(painter);
     document.reserve(512, 32);

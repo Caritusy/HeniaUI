@@ -4,6 +4,22 @@
 #include <cmath>
 
 namespace henia::ui {
+namespace {
+
+[[nodiscard]] constexpr Color mixColor(
+    Color first,
+    Color second,
+    float amount) noexcept {
+    const float value = std::clamp(amount, 0.0F, 1.0F);
+    return {
+        first.red + (second.red - first.red) * value,
+        first.green + (second.green - first.green) * value,
+        first.blue + (second.blue - first.blue) * value,
+        first.alpha + (second.alpha - first.alpha) * value,
+    };
+}
+
+} // namespace
 
 Slider::Slider(double value, double minimum, double maximum, double step, SliderStyle style) noexcept
     : Widget(WidgetKind::Slider), mStyle(style) {
@@ -67,21 +83,38 @@ bool Slider::handleInput(const InputEvent& event) {
 Vec2 Slider::onMeasure(TextPainter&, Constraints) { return {mStyle.width, mStyle.height}; }
 
 void Slider::onPaint(Canvas& canvas, TextPainter&, const Theme&) {
-    const float radius = std::max(mStyle.knobRadius, 0.0F);
-    const float left = frame().min.x + radius;
-    const float right = frame().max.x - radius;
+    const bool active = pressed();
+    const bool hot = hovered() || active;
+    const float baseRadius = std::max(mStyle.knobRadius, 0.0F);
+    const float radius = baseRadius + (active ? 1.5F : hot ? 0.75F : 0.0F);
+    const float left = frame().min.x + baseRadius;
+    const float right = frame().max.x - baseRadius;
     const float centerY = (frame().min.y + frame().max.y) * 0.5F;
     const float usable = std::max(right - left, 0.0F);
     const float amount = static_cast<float>((mValue - mMinimum) / (mMaximum - mMinimum));
     const float knobX = left + usable * std::clamp(amount, 0.0F, 1.0F);
-    const Rect track{{left, centerY - mStyle.trackHeight * 0.5F},
-                     {right, centerY + mStyle.trackHeight * 0.5F}};
-    canvas.fillRect(track, mStyle.track, mStyle.trackHeight * 0.5F);
+    const float trackHeight = mStyle.trackHeight + (hot ? 1.0F : 0.0F);
+    const Rect track{{left, centerY - trackHeight * 0.5F},
+                     {right, centerY + trackHeight * 0.5F}};
+    canvas.fillRect(
+        track,
+        hot ? mixColor(mStyle.track, mStyle.focus, active ? 0.28F : 0.14F) : mStyle.track,
+        trackHeight * 0.5F);
     if (knobX > left) {
-        canvas.fillRect({track.min, {knobX, track.max.y}}, mStyle.fill, mStyle.trackHeight * 0.5F);
+        canvas.fillRect(
+            {track.min, {knobX, track.max.y}},
+            hot ? mixColor(mStyle.fill, mStyle.focus, active ? 0.42F : 0.20F) : mStyle.fill,
+            trackHeight * 0.5F);
     }
-    if (focused()) canvas.circle({knobX, centerY}, radius + 2.0F, mStyle.focus);
-    canvas.circle({knobX, centerY}, radius, mStyle.knob);
+    if (focused() || hot) {
+        Color halo = mStyle.focus;
+        halo.alpha *= active ? 0.42F : hovered() ? 0.24F : 0.30F;
+        canvas.circle({knobX, centerY}, radius + (active ? 5.0F : 3.5F), halo);
+    }
+    canvas.circle(
+        {knobX, centerY},
+        radius,
+        active ? mixColor(mStyle.knob, mStyle.focus, 0.22F) : mStyle.knob);
 }
 
 double Slider::normalized(double value) const noexcept {

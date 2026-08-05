@@ -13,6 +13,19 @@ namespace {
     return value < U' ' || (value >= 0x7FU && value <= 0x9FU);
 }
 
+[[nodiscard]] constexpr Color mixColor(
+    Color first,
+    Color second,
+    float amount) noexcept {
+    const float value = std::clamp(amount, 0.0F, 1.0F);
+    return {
+        first.red + (second.red - first.red) * value,
+        first.green + (second.green - first.green) * value,
+        first.blue + (second.blue - first.blue) * value,
+        first.alpha + (second.alpha - first.alpha) * value,
+    };
+}
+
 } // namespace
 
 TextInput::TextInput(std::string textValue, TextInputStyle style)
@@ -205,12 +218,28 @@ Vec2 TextInput::onMeasure(TextPainter& textPainter, Constraints) {
 void TextInput::onPaint(Canvas& canvas, TextPainter& textPainter, const Theme&) {
     mLastPainter = &textPainter;
     const Rect bounds = frame();
-    canvas.fillRect(bounds, mStyle.background, mStyle.radius);
+    const bool active = focused() || pressed();
+    const Color background = active
+        ? mixColor(mStyle.background, mStyle.focus, 0.13F)
+        : hovered()
+            ? mixColor(mStyle.background, mStyle.focus, 0.07F)
+            : mStyle.background;
+    const Color border = focused()
+        ? mStyle.focus
+        : hovered() || pressed()
+            ? mixColor(mStyle.border, mStyle.focus, pressed() ? 0.72F : 0.48F)
+            : mStyle.border;
+    if (hovered() || active) {
+        Color glow = mStyle.focus;
+        glow.alpha *= active ? 0.16F : 0.08F;
+        canvas.roundedGlow(bounds, glow, mStyle.radius, active ? 5.0F : 3.0F);
+    }
+    canvas.fillRect(bounds, background, mStyle.radius);
     canvas.strokeRect(
         bounds,
-        focused() ? mStyle.focus : mStyle.border,
+        border,
         mStyle.radius,
-        mStyle.borderWidth);
+        mStyle.borderWidth + (active ? 0.5F : 0.0F));
 
     const Rect content{
         {bounds.min.x + mStyle.padding.left, bounds.min.y + mStyle.padding.top},
@@ -227,7 +256,7 @@ void TextInput::onPaint(Canvas& canvas, TextPainter& textPainter, const Theme&) 
     const TextLayoutResult* layout = layoutText(textPainter, visibleText);
     float textY = content.min.y;
     if (!mStyle.multiline && layout != nullptr) {
-        textY += std::max((content.height() - layout->metrics.height) * 0.5F, 0.0F);
+        textY = TextPainter::centeredVisualOrigin(*layout, content).y;
     }
     if (layout != nullptr && focused() && !mDisplayText.empty()) {
         const Vec2 caret = TextPainter::caretPosition(*layout, mEditor.displayCaret());

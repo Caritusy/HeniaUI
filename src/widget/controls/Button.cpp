@@ -6,6 +6,19 @@
 namespace henia::ui {
 namespace {
 
+[[nodiscard]] constexpr Color mixColor(
+    Color first,
+    Color second,
+    float amount) noexcept {
+    const float value = std::clamp(amount, 0.0F, 1.0F);
+    return {
+        first.red + (second.red - first.red) * value,
+        first.green + (second.green - first.green) * value,
+        first.blue + (second.blue - first.blue) * value,
+        first.alpha + (second.alpha - first.alpha) * value,
+    };
+}
+
 struct ResolvedButtonStyle final {
     FontHandle font{};
     float fontSize = 14.0F;
@@ -129,17 +142,35 @@ Vec2 Button::onMeasure(TextPainter& textPainter, Constraints) {
 
 void Button::onPaint(Canvas& canvas, TextPainter& textPainter, const Theme& theme) {
     const ResolvedButtonStyle style = resolve(mStyle, theme);
-    const Color background = pressed() ? style.pressed : (hovered() ? style.hover : style.background);
+    const bool active = pressed();
+    const bool hot = hovered() || active;
+    const Color background = active ? style.pressed : (hot ? style.hover : style.background);
+    if (hot || focused()) {
+        Color glow = theme.accent;
+        glow.alpha *= active ? 0.18F : hot ? 0.10F : 0.08F;
+        canvas.roundedGlow(frame(), glow, style.radius, active ? 6.0F : 4.0F);
+    }
     canvas.fillRect(frame(), background, style.radius);
     if (style.borderWidth > 0.0F && style.border.alpha > 0.0F) {
-        canvas.strokeRect(frame(), style.border, style.radius, style.borderWidth);
+        const Color border = focused()
+            ? theme.accent
+            : hot
+                ? mixColor(style.border, theme.accent, active ? 0.72F : 0.45F)
+                : style.border;
+        canvas.strokeRect(
+            frame(),
+            border,
+            style.radius,
+            style.borderWidth + (hot ? 0.5F : 0.0F));
     }
-    const TextMetrics metrics = textPainter.measure(style.font, style.fontSize, mText);
-    const Vec2 origin{
-        frame().min.x + std::max((frame().width() - metrics.width) * 0.5F, 0.0F),
-        frame().min.y + std::max((frame().height() - metrics.height) * 0.5F, 0.0F),
-    };
-    textPainter.draw(canvas, style.font, style.fontSize, origin, style.textColor, mText);
+    if (const TextLayoutResult* layout = textPainter.layout(
+            style.font, style.fontSize, mText)) {
+        textPainter.drawLayout(
+            canvas,
+            *layout,
+            TextPainter::centeredVisualOrigin(*layout, frame()),
+            style.textColor);
+    }
 }
 
 } // namespace henia::ui

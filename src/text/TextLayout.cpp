@@ -633,6 +633,30 @@ std::size_t TextPainter::hitTest(
     return best->byteOffset;
 }
 
+Rect TextPainter::visualBounds(const TextLayoutResult& layout) noexcept {
+    if (layout.glyphs.empty()) {
+        return {{0.0F, 0.0F}, {layout.metrics.width, layout.metrics.height}};
+    }
+    Rect result = layout.glyphs.front().bounds;
+    for (const TextLayoutGlyph& glyph : layout.glyphs) {
+        result.min.x = std::min(result.min.x, glyph.bounds.min.x);
+        result.min.y = std::min(result.min.y, glyph.bounds.min.y);
+        result.max.x = std::max(result.max.x, glyph.bounds.max.x);
+        result.max.y = std::max(result.max.y, glyph.bounds.max.y);
+    }
+    return result;
+}
+
+Vec2 TextPainter::centeredVisualOrigin(
+    const TextLayoutResult& layout,
+    Rect bounds) noexcept {
+    const Rect visual = visualBounds(layout);
+    return {
+        (bounds.min.x + bounds.max.x - visual.min.x - visual.max.x) * 0.5F,
+        (bounds.min.y + bounds.max.y - visual.min.y - visual.max.y) * 0.5F,
+    };
+}
+
 Vec2 TextPainter::caretPosition(
     const TextLayoutResult& layout,
     std::size_t byteOffset) noexcept {

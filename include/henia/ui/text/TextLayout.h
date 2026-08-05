@@ -261,6 +261,11 @@ public:
     [[nodiscard]] static std::size_t hitTest(
         const TextLayoutResult& layout,
         Vec2 position) noexcept;
+    [[nodiscard]] static Rect visualBounds(
+        const TextLayoutResult& layout) noexcept;
+    [[nodiscard]] static Vec2 centeredVisualOrigin(
+        const TextLayoutResult& layout,
+        Rect bounds) noexcept;
     [[nodiscard]] static Vec2 caretPosition(
         const TextLayoutResult& layout,
         std::size_t byteOffset) noexcept;
