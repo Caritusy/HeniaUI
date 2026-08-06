@@ -40,6 +40,7 @@ namespace henia::gfx {
     if (view.viewport.x > maximumViewport) return "view.viewport.x";
     if (view.viewport.y > maximumViewport) return "view.viewport.y";
     if (!std::isfinite(view.timeSeconds)) return "view.timeSeconds";
+    if (!std::isfinite(view.motionScale)) return "view.motionScale";
     if (static_cast<std::uint8_t>(view.clipDepthRange)
         > static_cast<std::uint8_t>(ClipDepthRange::ZeroToOne)) {
         return "view.clipDepthRange";
@@ -63,8 +64,14 @@ namespace henia::gfx {
     if (!std::isfinite(box.color.green)) return "box.color.green";
     if (!std::isfinite(box.color.blue)) return "box.color.blue";
     if (!std::isfinite(box.color.alpha)) return "box.color.alpha";
-    constexpr std::uint32_t validEffects = static_cast<std::uint32_t>(BoxEffect::HueCycle);
+    constexpr std::uint32_t validEffects = static_cast<std::uint32_t>(BoxEffect::HueCycle)
+        | static_cast<std::uint32_t>(BoxEffect::MotionTranslation);
     if ((static_cast<std::uint32_t>(box.effects) & ~validEffects) != 0) return "box.effects";
+    if ((static_cast<std::uint32_t>(box.effects)
+            & static_cast<std::uint32_t>(BoxEffect::MotionTranslation)) != 0U
+        && !finite(box.motionDelta())) {
+        return "box.motionDelta";
+    }
     return {};
 }
 

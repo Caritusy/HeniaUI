@@ -3,7 +3,9 @@ cbuffer FrameConstants : register(b0) {
     float4x4 viewProjection;
     float2 viewportSize;
     float timeSeconds;
+    float motionScale;
     uint frameFlags;
+    uint3 framePadding;
 };
 
 struct VertexInput {
@@ -11,6 +13,7 @@ struct VertexInput {
     float4 maximumAndHue : INSTANCE_MAXIMUM_HUE;
     float4 color : INSTANCE_COLOR;
     uint effects : INSTANCE_EFFECTS;
+    float3 motionDelta : INSTANCE_MOTION_DELTA;
     uint vertexId : SV_VertexID;
 };
 
@@ -93,8 +96,13 @@ PixelInput vertexMain(VertexInput input) {
     PixelInput output;
     int edgeIndex = input.vertexId / 6;
     float2 vertex = quad[input.vertexId % 6];
-    float3 start = lerp(input.minimumAndWidth.xyz, input.maximumAndHue.xyz, corner(edges[edgeIndex].x));
-    float3 finish = lerp(input.minimumAndWidth.xyz, input.maximumAndHue.xyz, corner(edges[edgeIndex].y));
+    float3 motionOffset = (input.effects & 2u) != 0u
+        ? input.motionDelta * motionScale
+        : 0.0;
+    float3 minimumValue = input.minimumAndWidth.xyz + motionOffset;
+    float3 maximumValue = input.maximumAndHue.xyz + motionOffset;
+    float3 start = lerp(minimumValue, maximumValue, corner(edges[edgeIndex].x));
+    float3 finish = lerp(minimumValue, maximumValue, corner(edges[edgeIndex].y));
     float4 startClip = mul(viewProjection, float4(start, 1.0));
     float4 finishClip = mul(viewProjection, float4(finish, 1.0));
     bool zeroToOne = (frameFlags & 1u) == 0u;

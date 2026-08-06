@@ -39,6 +39,23 @@ int main() {
     if (compatibilityBox.visibilityMask() != std::numeric_limits<std::uint32_t>::max()) {
         fail("Clearing a BoxInstance visibility mask did not restore compatibility visibility");
     }
+    compatibilityBox.setMotionDelta({1.25F, -2.5F, 3.75F});
+    if (compatibilityBox.motionDelta() != Vec3{1.25F, -2.5F, 3.75F}
+        || compatibilityBox.visibilityMask() != std::numeric_limits<std::uint32_t>::max()
+        || (static_cast<std::uint32_t>(compatibilityBox.effects)
+            & static_cast<std::uint32_t>(BoxEffect::MotionTranslation)) == 0U) {
+        fail("BoxInstance motion payload was not round-tripped");
+    }
+    compatibilityBox.setVisibilityMask(7U);
+    if (compatibilityBox.motionDelta() != Vec3{}
+        || compatibilityBox.visibilityMask() != 7U) {
+        fail("BoxInstance visibility mask did not replace motion payload");
+    }
+    compatibilityBox.setMotionDelta({0.0F, 0.0F, 0.0F});
+    compatibilityBox.clearMotionDelta();
+    if (compatibilityBox.visibilityMask() != std::numeric_limits<std::uint32_t>::max()) {
+        fail("Clearing BoxInstance motion did not restore compatibility visibility");
+    }
 
     ShapeBatch3D shapes;
     shapes.reserve(1024);

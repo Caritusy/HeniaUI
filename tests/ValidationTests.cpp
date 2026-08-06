@@ -258,6 +258,16 @@ int main() {
     propertyBatchCompilation();
     fuzzFiniteGeometryAndArithmetic();
     stressImmutable3dSnapshots();
+    henia::gfx::ViewParameters invalidMotionView{.viewport = {1.0F, 1.0F}};
+    invalidMotionView.motionScale = std::numeric_limits<float>::quiet_NaN();
+    if (henia::gfx::validate(invalidMotionView) != "view.motionScale") {
+        fail("Non-finite motion view scale was accepted");
+    }
+    henia::gfx::BoxInstance invalidMotionBox{};
+    invalidMotionBox.setMotionDelta({std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F});
+    if (henia::gfx::validate(invalidMotionBox) != "box.motionDelta") {
+        fail("Non-finite motion payload was accepted");
+    }
     std::cout << "HeniaUI validation/property tests passed\n";
     return EXIT_SUCCESS;
 }

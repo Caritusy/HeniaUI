@@ -164,21 +164,35 @@ struct Frustum final {
     return std::max(width, height) < static_cast<double>(minimumPixels);
 }
 
-[[nodiscard]] Bounds boxBounds(const BoxInstance& box) noexcept {
-    return {box.minimum, box.maximum, box.lineWidth, box.visibilityMask()};
+[[nodiscard]] Bounds boxBounds(const BoxInstance& box, float motionScale) noexcept {
+    const Vec3 delta = box.motionDelta();
+    const Vec3 offset{
+        delta.x * motionScale,
+        delta.y * motionScale,
+        delta.z * motionScale,
+    };
+    return {
+        {box.minimum.x + offset.x, box.minimum.y + offset.y, box.minimum.z + offset.z},
+        {box.maximum.x + offset.x, box.maximum.y + offset.y, box.maximum.z + offset.z},
+        box.lineWidth,
+        box.visibilityMask(),
+    };
 }
 
-[[nodiscard]] Bounds pageBounds(std::span<const BoxInstance> boxes) noexcept {
-    Bounds result = boxBounds(boxes.front());
+[[nodiscard]] Bounds pageBounds(
+    std::span<const BoxInstance> boxes,
+    float motionScale) noexcept {
+    Bounds result = boxBounds(boxes.front(), motionScale);
     for (const BoxInstance& box : boxes.subspan(1)) {
-        result.minimum.x = std::min(result.minimum.x, box.minimum.x);
-        result.minimum.y = std::min(result.minimum.y, box.minimum.y);
-        result.minimum.z = std::min(result.minimum.z, box.minimum.z);
-        result.maximum.x = std::max(result.maximum.x, box.maximum.x);
-        result.maximum.y = std::max(result.maximum.y, box.maximum.y);
-        result.maximum.z = std::max(result.maximum.z, box.maximum.z);
-        result.maximumLineWidth = std::max(result.maximumLineWidth, box.lineWidth);
-        result.visibilityMaskUnion |= box.visibilityMask();
+        const Bounds current = boxBounds(box, motionScale);
+        result.minimum.x = std::min(result.minimum.x, current.minimum.x);
+        result.minimum.y = std::min(result.minimum.y, current.minimum.y);
+        result.minimum.z = std::min(result.minimum.z, current.minimum.z);
+        result.maximum.x = std::max(result.maximum.x, current.maximum.x);
+        result.maximum.y = std::max(result.maximum.y, current.maximum.y);
+        result.maximum.z = std::max(result.maximum.z, current.maximum.z);
+        result.maximumLineWidth = std::max(result.maximumLineWidth, current.maximumLineWidth);
+        result.visibilityMaskUnion |= current.visibilityMaskUnion;
     }
     return result;
 }
@@ -206,6 +220,7 @@ struct VisibilityList::Implementation final {
     Mat4 viewProjection{};
     Vec2 viewport{};
     ClipDepthRange clipDepthRange = ClipDepthRange::ZeroToOne;
+    float motionScale = 0.0F;
     float minimumProjectedExtentPixels = 0.0F;
     std::uint32_t applicationVisibilityMask = ~std::uint32_t{0};
     VisibilityStatistics statistics{};
@@ -274,6 +289,7 @@ bool VisibilityList::update(
         && state.sourceRevision == batch.revision()
         && state.viewProjection == view.viewProjection
         && state.viewport == view.viewport
+        && state.motionScale == view.motionScale
         && state.clipDepthRange == view.clipDepthRange
         && state.applicationVisibilityMask == options.applicationVisibilityMask
         && state.minimumProjectedExtentPixels == options.minimumProjectedExtentPixels;
@@ -296,11 +312,13 @@ bool VisibilityList::update(
     const bool reuseAllChunks = state.hasResult
         && state.sourceIdentity == batch.identity()
         && state.sourceRevision == batch.revision()
+        && state.motionScale == view.motionScale
         && state.chunks.size() == pageCount;
     const bool canIncrement = state.hasResult
         && state.sourceIdentity == batch.identity()
         && state.sourceRevision != std::numeric_limits<std::uint64_t>::max()
         && state.sourceRevision + 1U == batch.revision()
+        && state.motionScale == view.motionScale
         && state.chunks.size() == pageCount
         && !batch.requiresFullUpload()
         && !batch.dirtyRanges().empty();
@@ -320,7 +338,7 @@ bool VisibilityList::update(
             }
         }
         if (rebuild) {
-            state.chunks[pageIndex] = pageBounds(batch.boxPage(pageIndex));
+            state.chunks[pageIndex] = pageBounds(batch.boxPage(pageIndex), view.motionScale);
             ++statistics.rebuiltChunks;
         } else {
             ++statistics.reusedChunks;
@@ -350,7 +368,7 @@ bool VisibilityList::update(
                 ++statistics.applicationMaskRejectedInstances;
                 continue;
             }
-            const Bounds bounds = boxBounds(box);
+            const Bounds bounds = boxBounds(box, view.motionScale);
             if (outsideFrustum(bounds, frustum, view)) {
                 ++statistics.frustumRejectedInstances;
                 continue;
@@ -371,6 +389,7 @@ bool VisibilityList::update(
     state.sourceRevision = batch.revision();
     state.viewProjection = view.viewProjection;
     state.viewport = view.viewport;
+    state.motionScale = view.motionScale;
     state.clipDepthRange = view.clipDepthRange;
     state.applicationVisibilityMask = options.applicationVisibilityMask;
     state.minimumProjectedExtentPixels = options.minimumProjectedExtentPixels;

@@ -1238,6 +1238,37 @@ int main() {
         glFinish();
         return readCurrentPixels();
     };
+    ShapeBatch3D motionShapes;
+    BoxInstance motionBox{
+        .minimum = {-0.25F, -0.25F, 0.25F},
+        .lineWidth = 5.0F,
+        .maximum = {0.25F, 0.25F, 0.75F},
+        .color = {0.2F, 0.8F, 0.4F, 1.0F},
+    };
+    motionBox.setMotionDelta({0.5F, 0.0F, 0.0F});
+    static_cast<void>(motionShapes.addBox(motionBox));
+    const InstanceBatch motionBatch = motionShapes.snapshot();
+    ViewParameters motionView = henia::test::gfxClipView(ClipDepthRange::ZeroToOne);
+    const std::vector<henia::test::Rgba8> motionAtZero = renderGfxFrame(motionBatch, motionView);
+    const OpenGlGfxStatistics motionFirstStatistics = clipGfx.statistics();
+    motionView.motionScale = 1.0F;
+    const std::vector<henia::test::Rgba8> motionAtOne = renderGfxFrame(motionBatch, motionView);
+    const OpenGlGfxStatistics motionSecondStatistics = clipGfx.statistics();
+    const bool motionPixelsEqual = motionAtZero.size() == motionAtOne.size()
+        && std::equal(
+            motionAtZero.begin(), motionAtZero.end(), motionAtOne.begin(),
+            [](const henia::test::Rgba8& left, const henia::test::Rgba8& right) noexcept {
+                return left.red == right.red && left.green == right.green
+                    && left.blue == right.blue && left.alpha == right.alpha;
+            });
+    if (motionPixelsEqual
+        || motionFirstStatistics.fullInstanceUploads != 1
+        || motionSecondStatistics.fullInstanceUploads != 1
+        || motionSecondStatistics.uploadedInstanceBytes
+            != motionFirstStatistics.uploadedInstanceBytes
+        || motionSecondStatistics.viewUpdates != motionFirstStatistics.viewUpdates + 1U) {
+        fail("OpenGL motion scale did not move immutable instances without re-uploading them");
+    }
     constexpr std::array depthRanges{
         ClipDepthRange::ZeroToOne,
         ClipDepthRange::MinusOneToOne,

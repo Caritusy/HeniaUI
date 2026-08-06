@@ -218,9 +218,11 @@ layout(location = 0) in vec4 instanceMinimumAndWidth;
 layout(location = 1) in vec4 instanceMaximumAndHue;
 layout(location = 2) in vec4 instanceColor;
 layout(location = 3) in uint instanceEffects;
+layout(location = 4) in vec3 instanceMotionDelta;
 
 uniform mat4 viewProjection;
 uniform vec2 viewportSize;
+uniform float motionScale;
 uniform int zeroToOneDepth;
 
 flat out vec4 lineColor;
@@ -307,8 +309,11 @@ bool clipSegment(inout vec4 startClip, inout vec4 finishClip, bool zeroToOne) {
 void main() {
     int edgeIndex = gl_VertexID / 6;
     vec2 vertex = quad[gl_VertexID % 6];
-    vec3 minimumValue = instanceMinimumAndWidth.xyz;
-    vec3 maximumValue = instanceMaximumAndHue.xyz;
+    vec3 motionOffset = (instanceEffects & 2u) != 0u
+        ? instanceMotionDelta * motionScale
+        : vec3(0.0);
+    vec3 minimumValue = instanceMinimumAndWidth.xyz + motionOffset;
+    vec3 maximumValue = instanceMaximumAndHue.xyz + motionOffset;
     vec3 start = mix(minimumValue, maximumValue, corner(edges[edgeIndex].x));
     vec3 finish = mix(minimumValue, maximumValue, corner(edges[edgeIndex].y));
     vec4 startClip = viewProjection * vec4(start, 1.0);
@@ -487,6 +492,7 @@ struct OpenGlRenderDevice::Implementation final {
     GLint viewProjectionLocation = -1;
     GLint viewportLocation = -1;
     GLint timeLocation = -1;
+    GLint motionScaleLocation = -1;
     GLint depthRangeLocation = -1;
     std::size_t capacity = 0;
     std::vector<UploadSlot> uploadSlots;
@@ -605,13 +611,15 @@ bool OpenGlRenderDevice::Implementation::initialize(
     viewProjectionLocation = gl.getUniformLocation(program, "viewProjection");
     viewportLocation = gl.getUniformLocation(program, "viewportSize");
     timeLocation = gl.getUniformLocation(program, "timeSeconds");
+    motionScaleLocation = gl.getUniformLocation(program, "motionScale");
     depthRangeLocation = gl.getUniformLocation(program, "zeroToOneDepth");
     const GLenum uniformError = consumeOperationErrors();
     if (uniformError != GL_NO_ERROR) {
         assignGlFailure(error, "OpenGL gfx uniform lookup failed", uniformError, "program", program);
         return false;
     }
-    if (viewProjectionLocation < 0 || viewportLocation < 0 || timeLocation < 0 || depthRangeLocation < 0) {
+    if (viewProjectionLocation < 0 || viewportLocation < 0 || timeLocation < 0
+        || motionScaleLocation < 0 || depthRangeLocation < 0) {
         error = "OpenGL gfx shader uniforms are unavailable";
         return false;
     }
@@ -909,6 +917,7 @@ bool OpenGlRenderDevice::Implementation::render(
     gl.uniformMatrix4fv(viewProjectionLocation, 1, GL_FALSE, view.viewProjection.values.data());
     gl.uniform2f(viewportLocation, view.viewport.x, view.viewport.y);
     gl.uniform1f(timeLocation, view.timeSeconds);
+    gl.uniform1f(motionScaleLocation, view.motionScale);
     gl.uniform1i(depthRangeLocation, view.clipDepthRange == ClipDepthRange::ZeroToOne ? 1 : 0);
     ++statistics.viewUpdates;
     if (consumeOperationErrors() != GL_NO_ERROR) {
@@ -1078,7 +1087,9 @@ void OpenGlRenderDevice::Implementation::configureAttributes() const noexcept {
     gl.vertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(32));
     gl.enableVertexAttribArray(3);
     gl.vertexAttribIPointer(3, 1, GL_UNSIGNED_INT, stride, reinterpret_cast<const void*>(48));
-    for (GLuint attribute = 0; attribute < 4; ++attribute) {
+    gl.enableVertexAttribArray(4);
+    gl.vertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(52));
+    for (GLuint attribute = 0; attribute < 5; ++attribute) {
         gl.vertexAttribDivisor(attribute, 1);
     }
 }
@@ -1188,6 +1199,7 @@ bool OpenGlRenderDevice::Implementation::shutdown() noexcept {
     viewProjectionLocation = -1;
     viewportLocation = -1;
     timeLocation = -1;
+    motionScaleLocation = -1;
     depthRangeLocation = -1;
     uploadSlots.clear();
     uploadRing.clear();
@@ -1210,6 +1222,7 @@ void OpenGlRenderDevice::Implementation::abandon() noexcept {
     viewProjectionLocation = -1;
     viewportLocation = -1;
     timeLocation = -1;
+    motionScaleLocation = -1;
     depthRangeLocation = -1;
     uploadSlots.clear();
     uploadRing.clear();

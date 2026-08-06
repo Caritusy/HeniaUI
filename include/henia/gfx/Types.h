@@ -3,6 +3,7 @@
 #include "henia/RenderProfile.h"
 
 #include <array>
+#include <bit>
 #include <cstdint>
 
 namespace henia::gfx {
@@ -48,6 +49,9 @@ struct ViewParameters final {
     Mat4 viewProjection{};
     Vec2 viewport{};
     float timeSeconds = 0.0F;
+    // Per-frame translation scale for BoxEffect::MotionTranslation. Keeping
+    // this in the view avoids rebuilding immutable instance data every frame.
+    float motionScale = 0.0F;
     ClipDepthRange clipDepthRange = ClipDepthRange::ZeroToOne;
 };
 
@@ -71,6 +75,7 @@ struct DepthState final {
 enum class BoxEffect : std::uint32_t {
     None = 0,
     HueCycle = 1U << 0U,
+    MotionTranslation = 1U << 1U,
 };
 
 [[nodiscard]] constexpr BoxEffect operator|(BoxEffect left, BoxEffect right) noexcept {
@@ -91,15 +96,55 @@ struct BoxInstance final {
     // Stored in the existing reserved tail so the public/GPU layout remains
     // 64 bytes. Old producers whose reserved words are zero remain visible.
     constexpr void setVisibilityMask(std::uint32_t mask) noexcept {
+        effects = static_cast<BoxEffect>(
+            static_cast<std::uint32_t>(effects)
+            & ~static_cast<std::uint32_t>(BoxEffect::MotionTranslation));
         reserved[0] = mask;
         reserved[1] = kVisibilityMaskMarker;
+        reserved[2] = 0;
     }
     constexpr void clearVisibilityMask() noexcept {
+        if ((static_cast<std::uint32_t>(effects)
+                & static_cast<std::uint32_t>(BoxEffect::MotionTranslation)) != 0U) {
+            return;
+        }
         reserved[0] = 0;
         reserved[1] = 0;
+        reserved[2] = 0;
     }
     [[nodiscard]] constexpr std::uint32_t visibilityMask() const noexcept {
+        if ((static_cast<std::uint32_t>(effects)
+                & static_cast<std::uint32_t>(BoxEffect::MotionTranslation)) != 0U) {
+            return ~std::uint32_t{0};
+        }
         return reserved[1] == kVisibilityMaskMarker ? reserved[0] : ~std::uint32_t{0};
+    }
+    constexpr void setMotionDelta(Vec3 value) noexcept {
+        effects = static_cast<BoxEffect>(
+            static_cast<std::uint32_t>(effects)
+            | static_cast<std::uint32_t>(BoxEffect::MotionTranslation));
+        reserved[0] = std::bit_cast<std::uint32_t>(value.x);
+        reserved[1] = std::bit_cast<std::uint32_t>(value.y);
+        reserved[2] = std::bit_cast<std::uint32_t>(value.z);
+    }
+    constexpr void clearMotionDelta() noexcept {
+        effects = static_cast<BoxEffect>(
+            static_cast<std::uint32_t>(effects)
+            & ~static_cast<std::uint32_t>(BoxEffect::MotionTranslation));
+        reserved[0] = 0;
+        reserved[1] = 0;
+        reserved[2] = 0;
+    }
+    [[nodiscard]] constexpr Vec3 motionDelta() const noexcept {
+        if ((static_cast<std::uint32_t>(effects)
+                & static_cast<std::uint32_t>(BoxEffect::MotionTranslation)) == 0U) {
+            return {};
+        }
+        return {
+            std::bit_cast<float>(reserved[0]),
+            std::bit_cast<float>(reserved[1]),
+            std::bit_cast<float>(reserved[2]),
+        };
     }
     [[nodiscard]] constexpr bool operator==(const BoxInstance&) const noexcept = default;
 };

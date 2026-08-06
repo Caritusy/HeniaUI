@@ -36,9 +36,11 @@ struct FrameConstants final {
     std::array<float, 16> viewProjection{};
     std::array<float, 2> viewport{};
     float timeSeconds = 0.0F;
+    float motionScale = 0.0F;
     std::uint32_t flags = 0;
+    std::array<std::uint32_t, 3> padding{};
 };
-static_assert(sizeof(FrameConstants) == 80);
+static_assert(sizeof(FrameConstants) == 96);
 
 [[nodiscard]] D3D12_HEAP_PROPERTIES heapProperties(D3D12_HEAP_TYPE type) noexcept {
     D3D12_HEAP_PROPERTIES properties{};
@@ -524,11 +526,12 @@ bool D3D12RenderDevice::Implementation::createPipeline(
     D3D12_SHADER_BYTECODE vertexShader,
     D3D12_SHADER_BYTECODE pixelShader,
     DepthState depth) noexcept {
-    constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 4> inputs{{
+    constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 5> inputs{{
         {"INSTANCE_MINIMUM_WIDTH", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
         {"INSTANCE_MAXIMUM_HUE", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
         {"INSTANCE_COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
         {"INSTANCE_EFFECTS", 0, DXGI_FORMAT_R32_UINT, 0, 48, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
+        {"INSTANCE_MOTION_DELTA", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 52, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
     }};
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
     description.pRootSignature = rootSignature.Get();
@@ -819,6 +822,7 @@ bool D3D12RenderDevice::Implementation::record(
         .viewProjection = view.viewProjection.values,
         .viewport = {view.viewport.x, view.viewport.y},
         .timeSeconds = view.timeSeconds,
+        .motionScale = view.motionScale,
         .flags = view.clipDepthRange == ClipDepthRange::MinusOneToOne ? 1U : 0U,
     };
     commandList.SetPipelineState(pipeline);
