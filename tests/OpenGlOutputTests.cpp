@@ -1069,6 +1069,34 @@ int main() {
         fail("OpenGL independent-context gfx shutdown failed");
     }
 
+    OpenGlRenderDevice dedicatedGfx;
+    if (!dedicatedGfx.initialize(1, 1, OpenGlStatePolicy::DedicatedContext)
+        || !dedicatedGfx.initialize(1, 1, OpenGlStatePolicy::DedicatedContext)
+        || dedicatedGfx.initialize(1, 1, OpenGlStatePolicy::Preserve)
+        || dedicatedGfx.lastError()
+            != "OpenGL gfx renderer is already initialized with a different configuration") {
+        fail("OpenGL dedicated-context gfx lifecycle failed");
+    }
+    glEnable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    if (!dedicatedGfx.render(boxBatch, validView)) {
+        std::cerr << dedicatedGfx.lastError() << '\n';
+        fail("OpenGL dedicated-context gfx render failed");
+    }
+    GLint dedicatedPolygonMode[2]{};
+    glGetIntegerv(GL_POLYGON_MODE, dedicatedPolygonMode);
+    const OpenGlGfxStatistics dedicatedStatistics = dedicatedGfx.statistics();
+    if (glIsEnabled(GL_CULL_FACE) == GL_TRUE
+        || glIsEnabled(GL_BLEND) != GL_TRUE
+        || dedicatedPolygonMode[0] != GL_FILL || dedicatedPolygonMode[1] != GL_FILL
+        || dedicatedStatistics.successfulFrames != 1
+        || dedicatedStatistics.dedicatedContextFrames != 1
+        || dedicatedStatistics.stateRestoreFailures != 0
+        || !dedicatedGfx.shutdown()) {
+        fail("OpenGL dedicated-context gfx did not keep its explicit state contract");
+    }
+
     for (std::size_t index = 1; index < 512; ++index) {
         if (shapes.addBox({}) == ShapeBatch3D::kInvalidIndex) {
             fail("OpenGL gfx paged expansion rejected a valid box");
@@ -1099,6 +1127,7 @@ int main() {
         || gfxStatistics.uploadedInstanceBytes != 514U * sizeof(BoxInstance)
         || gfxStatistics.wrongContextCalls != 2 || gfxStatistics.ignoredHostErrors == 0
         || gfxStatistics.stateRestoreFailures != 0 || gfxStatistics.initializationFailures != 0
+        || gfxStatistics.dedicatedContextFrames != 0
         || gfxStatistics.frameAttempts
             != gfxStatistics.successfulFrames + gfxStatistics.rejectedFrames
         || gfxStatistics.profile.cumulative.samples != gfxStatistics.successfulFrames

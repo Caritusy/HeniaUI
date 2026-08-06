@@ -507,8 +507,8 @@ therefore call and check `shutdown()` before destroying a live renderer. If the
 context is permanently lost first, `abandon()` clears stale names without GL
 calls and permits initialization on a replacement context.
 
-Each render submission uses a full state-isolation contract. The 2D and 3D
-backends capture and restore the current program (or bind zero when a captured,
+Each render submission uses a full state-isolation contract by default. The 2D
+and 3D backends capture and restore the current program (or bind zero when a captured,
 pending-delete program disappears), VAO, array-buffer binding, viewport,
 scissor box, blend enable/factors/equations, depth/cull/stencil enables,
 front/back polygon modes, draw-buffer-zero color mask, framebuffer sRGB,
@@ -519,6 +519,13 @@ isolates the depth function, depth write mask, and depth range. Texture
 synchronization isolates the texture binding plus pixel-unpack buffer,
 alignment, and row length. Initialization also preserves the host VAO and
 array-buffer bindings.
+
+The OpenGL 3D device also accepts `OpenGlStatePolicy::DedicatedContext` for a
+context whose state is exclusively owned by the caller. In that mode it binds
+its complete required pipeline state but skips synchronous host-state queries
+and restoration during initialization and rendering. The default remains
+`Preserve`; using the dedicated policy on a shared context is a contract error
+because the caller must not expect prior bindings or enables to survive.
 
 OpenGL error flags cannot be restored. Immediately before an isolated render or
 destruction boundary, HeniaUI drains pre-existing host errors, counts them in

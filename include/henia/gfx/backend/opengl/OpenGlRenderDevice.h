@@ -9,6 +9,11 @@
 
 namespace henia::gfx {
 
+enum class OpenGlStatePolicy : std::uint8_t {
+    Preserve,
+    DedicatedContext,
+};
+
 struct OpenGlGfxStatistics final {
     std::uint64_t frameAttempts = 0;
     std::uint64_t successfulFrames = 0;
@@ -37,6 +42,7 @@ struct OpenGlGfxStatistics final {
     std::uint64_t wrongContextCalls = 0;
     std::uint64_t ignoredHostErrors = 0;
     std::uint64_t stateRestoreFailures = 0;
+    std::uint64_t dedicatedContextFrames = 0;
     std::uint64_t initializationFailures = 0;
     std::uint64_t lifecycleRejections = 0;
     std::uint64_t abandonedContexts = 0;
@@ -50,6 +56,8 @@ struct OpenGlGfxStatistics final {
 // WGL cannot portably validate membership of a different shared context.
 // Instance upload slots are fence-owned and polled with zero timeout; render()
 // returns false rather than waiting when changed content has no safe slot.
+// DedicatedContext skips host-state capture/restoration and is valid only when
+// the caller exclusively owns every state transition on the current context.
 // Repeated initialize() is idempotent only for the exact owner/configuration;
 // use shutdown() for an orderly rebuild or abandon() after permanent context loss.
 class OpenGlRenderDevice final {
@@ -64,7 +72,8 @@ public:
 
     [[nodiscard]] bool initialize(
         std::size_t boxCapacity = 65536,
-        std::size_t uploadSlotCount = 3) noexcept;
+        std::size_t uploadSlotCount = 3,
+        OpenGlStatePolicy statePolicy = OpenGlStatePolicy::Preserve) noexcept;
     [[nodiscard]] bool render(
         const InstanceBatch& batch,
         const ViewParameters& view,
