@@ -101,8 +101,10 @@ bound render target stores that output:
   linear RGB with the sRGB transfer curve. Alpha remains linear.
 
 `OpenGlRenderer::render(..., targetColorSpace)` disables or enables
-`GL_FRAMEBUFFER_SRGB` for the draw and restores the host's previous state. The
-host must bind an attachment whose internal format supports the declared mode.
+`GL_FRAMEBUFFER_SRGB` for the draw. The default `Preserve` state policy restores
+the host's previous value; opt-in `DedicatedContext` deliberately leaves the
+renderer-established state in place. The host must bind an attachment whose
+internal format supports the declared mode.
 
 `D3D12RendererConfiguration::targetColorSpace` must match the RT format passed
 to `initialize()`. A linear configuration uses an `*_UNORM` RT format; an sRGB

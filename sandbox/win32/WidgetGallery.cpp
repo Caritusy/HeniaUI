@@ -55,13 +55,8 @@ constexpr Color kBorder{0.11F, 0.19F, 0.27F, 1.0F};
 constexpr Color kAccent{0.10F, 0.72F, 0.91F, 1.0F};
 constexpr Color kText{0.90F, 0.95F, 0.98F, 1.0F};
 constexpr Color kMuted{0.48F, 0.59F, 0.67F, 1.0F};
-
-constexpr std::string_view kMultilingualSample =
-    "English: asynchronous glyph atlas | "
-    "\u4E2D\u6587: \u5F02\u6B65\u5B57\u4F53\u70D8\u7119 | "
-    "\u65E5\u672C\u8A9E: \u975E\u540C\u671F\u30D5\u30A9\u30F3\u30C8 | "
-    "\uD55C\uAD6D\uC5B4: \uBE44\uB3D9\uAE30 \uAE00\uAF34 | "
-    "Caf\u00E9 \u03A9 \u221E \u2605 \U0001F525";
+constexpr std::array kGalleryTextSizes{
+    11.5F, 12.0F, 12.5F, 13.0F, 13.5F, 14.0F, 17.0F, 22.0F, 27.0F, 32.0F};
 
 using CreateContextAttributesFn = HGLRC(WINAPI*)(HDC, HGLRC, const int*);
 using SwapIntervalFn = BOOL(WINAPI*)(int);
@@ -748,6 +743,7 @@ public:
         TextureStore& textures,
         OpenGlRenderer& renderer,
         Win32FontScaleCache& fonts,
+        Win32AsyncFontSet& asyncFonts,
         Win32Clipboard& clipboard,
         GalleryState& state,
         FontHandle initialFont) noexcept
@@ -756,6 +752,7 @@ public:
           mTextures(&textures),
           mRenderer(&renderer),
           mFonts(&fonts),
+          mAsyncFonts(&asyncFonts),
           mClipboard(&clipboard),
           mState(&state),
           mFont(initialFont) {}
@@ -772,8 +769,13 @@ public:
                 area.bottom - area.top,
                 SWP_NOACTIVATE | SWP_NOZORDER);
         }
+        const float dpiScale = static_cast<float>(std::max(change.dpiY, 1U)) / 96.0F;
         const FontHandle selected = mFonts->selectForDpi(change.dpiY);
-        if (!selected.valid() || !mRenderer->synchronizeTextures(*mTextures)) {
+        if (!selected.valid()
+            || !mAsyncFonts->setDpiScale(dpiScale)
+            || !mFonts->prewarmTextSizes(kGalleryTextSizes, dpiScale)
+            || !mAsyncFonts->prewarmTextSizes(kGalleryTextSizes)
+            || !mRenderer->synchronizeTextures(*mTextures)) {
             mFailed = true;
             return;
         }
@@ -818,6 +820,7 @@ private:
     TextureStore* mTextures = nullptr;
     OpenGlRenderer* mRenderer = nullptr;
     Win32FontScaleCache* mFonts = nullptr;
+    Win32AsyncFontSet* mAsyncFonts = nullptr;
     Win32Clipboard* mClipboard = nullptr;
     GalleryState* mState = nullptr;
     FontHandle mFont{};
@@ -872,6 +875,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         .ranges = ranges,
     });
     const std::uint32_t initialDpi = std::max(GetDpiForWindow(native.window), 1U);
+    const float initialDpiScale = static_cast<float>(initialDpi) / 96.0F;
     const FontHandle font = fontScaleCache.selectForDpi(initialDpi);
     if (!font.valid()) {
         MessageBoxW(
@@ -884,8 +888,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     Win32AsyncFontSet asyncFonts(textures, fonts, {
         .primaryFont = font,
+        .primaryRasterResolver = &fontScaleCache,
         .logicalPixelHeight = 32.0F,
-        .dpiScale = static_cast<float>(initialDpi) / 96.0F,
+        .dpiScale = initialDpiScale,
         .initialAtlasWidth = 1024,
         .initialAtlasHeight = 512,
         .dynamicAtlas = {
@@ -900,11 +905,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         showRendererError(native.window, L"HeniaUI multilingual fonts", asyncFonts.lastError());
         return 2;
     }
-    static_cast<void>(asyncFonts.requestUtf8(kMultilingualSample));
-
     TextRunCache textCache(fonts);
     textCache.reserve(2048, 512);
     TextPainter text(textCache);
+    static_cast<void>(fontScaleCache.prewarmTextSizes(kGalleryTextSizes, initialDpiScale));
+    static_cast<void>(asyncFonts.prewarmTextSizes(kGalleryTextSizes));
+    text.setFontRasterResolver(&asyncFonts);
     text.setFallbackFonts(asyncFonts.fontChain(Win32FontLocale::SimplifiedChinese));
     text.setGlyphRequestBackend(&asyncFonts);
     Win32Clipboard clipboard(native.window);
@@ -930,6 +936,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         textures,
         renderer,
         fontScaleCache,
+        asyncFonts,
         clipboard,
         state,
         font);
@@ -984,6 +991,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             result = 4;
             break;
         }
+        // Headless validation has no presentation boundary to naturally drain
+        // the GL queue. Complete each frame so rapid async-font packet revisions
+        // cannot lap the renderer's deliberately nonblocking upload ring.
+        if (headless) glFinish();
         const bool fontsSettled = asyncFonts.idle();
         const bool captureSnapshot = snapshot && !snapshotSaved
             && (!headless || (headlessFrames >= 2 && fontsSettled));

@@ -13,7 +13,7 @@ struct VertexInput {
     float4 maximumAndHue : INSTANCE_MAXIMUM_HUE;
     float4 color : INSTANCE_COLOR;
     uint effects : INSTANCE_EFFECTS;
-    float3 motionDelta : INSTANCE_MOTION_DELTA;
+    uint3 reserved : INSTANCE_RESERVED;
     uint vertexId : SV_VertexID;
 };
 
@@ -34,13 +34,38 @@ static const int2 edges[12] = {
     int2(4, 5), int2(6, 7), int2(4, 6), int2(5, 7),
     int2(0, 4), int2(1, 5), int2(2, 6), int2(3, 7)
 };
-static const float2 quad[6] = {
-    float2(0.0, -1.0), float2(1.0, -1.0), float2(1.0, 1.0),
-    float2(0.0, -1.0), float2(1.0, 1.0), float2(0.0, 1.0)
+static const float2 quad[4] = {
+    float2(0.0, -1.0), float2(1.0, -1.0),
+    float2(1.0, 1.0), float2(0.0, 1.0)
 };
 
 float3 corner(int code) {
     return float3(float(code & 1), float((code >> 1) & 1), float((code >> 2) & 1));
+}
+
+float unpackMotionComponent(uint value) {
+    uint bits = ((value >> 20u) << 31u)
+        | (((value >> 12u) & 0xffu) << 23u)
+        | ((value & 0xfffu) << 11u);
+    return asfloat(bits);
+}
+
+float3 decodeMotionDelta(VertexInput input) {
+    float3 result = float3(0.0, 0.0, 0.0);
+    if ((input.effects & 4u) == 0u) {
+        result = float3(
+            asfloat(input.reserved.x),
+            asfloat(input.reserved.y),
+            asfloat(input.reserved.z));
+    } else {
+        uint low = input.reserved.y;
+        uint high = input.reserved.z;
+        result = float3(
+            unpackMotionComponent(low & 0x1fffffu),
+            unpackMotionComponent((low >> 21u) | ((high & 0x3ffu) << 11u)),
+            unpackMotionComponent((high >> 10u) & 0x1fffffu));
+    }
+    return result;
 }
 
 float planeDistance(float4 clipPoint, int planeIndex, bool zeroToOne) {
@@ -94,10 +119,10 @@ uint clipSegment(inout float4 startClip, inout float4 finishClip, bool zeroToOne
 
 PixelInput vertexMain(VertexInput input) {
     PixelInput output;
-    int edgeIndex = input.vertexId / 6;
-    float2 vertex = quad[input.vertexId % 6];
+    int edgeIndex = input.vertexId / 4;
+    float2 vertex = quad[input.vertexId % 4];
     float3 motionOffset = (input.effects & 2u) != 0u
-        ? input.motionDelta * motionScale
+        ? decodeMotionDelta(input) * motionScale
         : 0.0;
     float3 minimumValue = input.minimumAndWidth.xyz + motionOffset;
     float3 maximumValue = input.maximumAndHue.xyz + motionOffset;

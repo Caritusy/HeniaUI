@@ -78,8 +78,10 @@ namespace henia::ui {
         }
     }
     if (const std::string_view issue = validateColor(command.color); !issue.empty()) return issue;
-    if (!std::isfinite(command.radius) || command.radius < 0.0F) return "radius";
-    if (!std::isfinite(command.thickness) || command.thickness < 0.0F) return "thickness";
+    if (!std::isfinite(command.radius)
+        || (command.kind != PrimitiveKind::Glyph && command.radius < 0.0F)) return "radius";
+    if (!std::isfinite(command.thickness)
+        || (command.kind != PrimitiveKind::Glyph && command.thickness < 0.0F)) return "thickness";
     if (static_cast<std::uint8_t>(command.lineCap) > static_cast<std::uint8_t>(LineCap::Round)) {
         return "line.cap";
     }

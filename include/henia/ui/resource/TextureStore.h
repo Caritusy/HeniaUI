@@ -60,6 +60,32 @@ struct TextureCreateOptions final {
     TextureColorSpace colorSpace = TextureColorSpace::Linear;
 };
 
+struct TextureRegionUpdate final {
+    TextureHandle handle{};
+    TextureRegion region{};
+    std::uint32_t sourceRowPitch = 0;
+    std::span<const std::byte> pixels{};
+};
+
+class PreparedTextureUpdate final {
+public:
+    PreparedTextureUpdate() = default;
+    [[nodiscard]] bool valid() const noexcept { return mReady; }
+
+private:
+    friend class TextureStore;
+    struct Entry final {
+        TextureHandle handle{};
+        std::uint64_t expectedRevision = 0;
+        TextureRegion dirtyRegion{};
+        std::uint64_t regionCount = 0;
+        std::vector<std::byte> pixels;
+        std::vector<std::byte> rollbackPixels;
+    };
+    std::vector<Entry> mEntries;
+    bool mReady = false;
+};
+
 struct TextureView final {
     TextureHandle handle{};
     TextureFormat format = TextureFormat::Rgba8;
@@ -89,6 +115,8 @@ struct TextureStoreStatistics final {
     std::size_t externalTextures = 0;
     std::uint64_t backingRestorations = 0;
     std::uint64_t backingRestorationFailures = 0;
+    std::uint64_t regionUpdates = 0;
+    std::uint64_t coalescedDirtyArea = 0;
 };
 
 class TextureStore final {
@@ -117,6 +145,12 @@ public:
         TextureRegion region,
         std::uint32_t sourceRowPitch,
         std::span<const std::byte> pixels);
+    // Stages all regions and their rollback union before mutating live entries.
+    // Each touched texture advances exactly one revision when committed.
+    [[nodiscard]] PreparedTextureUpdate prepareRegionUpdates(
+        std::span<const TextureRegionUpdate> updates);
+    [[nodiscard]] bool commit(PreparedTextureUpdate&& update) noexcept;
+    [[nodiscard]] bool updateRegions(std::span<const TextureRegionUpdate> updates);
     // Discard is explicit so a host with multiple renderers can acknowledge
     // synchronization on every device/context before releasing CPU data.
     [[nodiscard]] bool discardCpuBacking(TextureHandle handle);
@@ -163,6 +197,8 @@ private:
     std::size_t mReusableSlots = 0;
     std::uint64_t mBackingRestorations = 0;
     std::uint64_t mBackingRestorationFailures = 0;
+    std::uint64_t mRegionUpdates = 0;
+    std::uint64_t mCoalescedDirtyArea = 0;
 };
 
 } // namespace henia::ui

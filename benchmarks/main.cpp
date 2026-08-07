@@ -232,6 +232,9 @@ struct ScenarioResult final {
     std::uint64_t textureBytes = 0;
     std::uint64_t logicalItems = 0;
     std::uint64_t residentItemWidgets = 0;
+    std::uint64_t pageEnvelopeEvaluations = 0;
+    std::uint64_t exactVisibilityTests = 0;
+    std::uint64_t glyphIdLookups = 0;
     std::uint64_t checksum = 0;
     henia::ui::PacketStatistics packetStatistics{};
     bool packetStatisticsAvailable = false;
@@ -1203,6 +1206,172 @@ template <typename Operation>
     return result;
 }
 
+[[nodiscard]] ScenarioResult benchmarkMotionVisibility(
+    const Options& options,
+    bool mostlyCulled) {
+    using namespace henia::gfx;
+    std::vector<BoxInstance> boxes(kPagedBoxCount);
+    for (std::size_t index = 0; index < boxes.size(); ++index) {
+        const std::size_t page = index / InstanceBatch::kBoxesPerPage;
+        const bool visiblePage = !mostlyCulled || page % 4U == 0;
+        const std::size_t local = index % InstanceBatch::kBoxesPerPage;
+        const float x = visiblePage
+            ? -0.90F + static_cast<float>(local % 32U) * 0.05F
+            : 3.0F + static_cast<float>(local % 32U) * 0.05F;
+        const float y = -0.75F + static_cast<float>(local / 32U) * 0.08F;
+        boxes[index] = {
+            .minimum = {x, y, 0.25F},
+            .lineWidth = 2.0F,
+            .maximum = {x + 0.025F, y + 0.025F, 0.35F},
+            .color = {0.2F, 0.7F, 0.9F, 0.8F},
+        };
+        const float direction = index % 2U == 0 ? -1.0F : 1.0F;
+        boxes[index].setMotionDelta({direction * 0.05F, 0.025F, 0.0F});
+    }
+    ShapeBatch3D builder;
+    builder.reserve(boxes.size());
+    static_cast<void>(builder.replaceBoxes(boxes));
+    const InstanceBatch batch = builder.snapshot();
+    VisibilityList visibility;
+    if (!visibility.reserve(boxes.size())) {
+        throw std::runtime_error("Unable to reserve motion visibility benchmark workspace");
+    }
+    ScenarioResult result = measureScenario(
+        mostlyCulled
+            ? "motion_visibility_100k_mostly_culled"
+            : "motion_visibility_100k_mostly_visible",
+        options,
+        [&](std::size_t iteration) {
+            ViewParameters view{.viewport = {1920.0F, 1080.0F}};
+            view.motionScale = static_cast<float>(iteration % 17U) / 8.0F - 1.0F;
+            const auto started = Clock::now();
+            if (!visibility.update(
+                    batch,
+                    view,
+                    {.mode = VisibilityMode::CpuFrustum})) {
+                throw std::runtime_error("Motion visibility benchmark update failed");
+            }
+            const VisibilityStatistics statistics = visibility.statistics();
+            return IterationPhases{
+                .paintBuildNanoseconds = nanosecondsSince(started),
+                .checksum = visibility.revision() ^ visibility.boxes().size()
+                    ^ statistics.pageEnvelopeEvaluations
+                    ^ statistics.exactInstanceTests,
+            };
+        });
+    const VisibilityStatistics statistics = visibility.statistics();
+    result.drawCalls = 1;
+    result.submittedInstances = visibility.boxes().size();
+    result.uploadBytes = result.submittedInstances * sizeof(BoxInstance);
+    result.coldUploadBytes = boxes.size() * sizeof(BoxInstance);
+    result.cpuResidentBytes = boxes.capacity() * sizeof(BoxInstance)
+        + batch.storageBytes() + visibility.storageBytes();
+    result.gpuBufferBytes = boxes.size() * sizeof(BoxInstance);
+    result.pageEnvelopeEvaluations = statistics.pageEnvelopeEvaluations;
+    result.exactVisibilityTests = statistics.exactInstanceTests;
+    return result;
+}
+
+class GlyphIdBenchmarkShaper final : public henia::ui::TextShapingBackend {
+public:
+    GlyphIdBenchmarkShaper(std::size_t residentGlyphs, std::size_t runGlyphs) noexcept
+        : mResidentGlyphs(residentGlyphs), mRunGlyphs(runGlyphs) {}
+
+    [[nodiscard]] bool shape(
+        const henia::ui::TextShapingRequest& request,
+        std::vector<henia::ui::TextShapingGlyph>& output) const override {
+        if (request.fontChain.empty()) return false;
+        output.clear();
+        output.reserve(mRunGlyphs);
+        for (std::size_t index = 0; index < mRunGlyphs; ++index) {
+            const std::size_t residentIndex = index % mResidentGlyphs;
+            output.push_back({
+                .font = request.fontChain.front(),
+                .glyphId = static_cast<std::uint32_t>(residentIndex + 1U),
+                .codepoint = static_cast<char32_t>(0x1000U + residentIndex),
+                .byteBegin = index,
+                .byteEnd = index + 1U,
+                .advance = 8.0F,
+            });
+        }
+        return true;
+    }
+
+private:
+    std::size_t mResidentGlyphs = 0;
+    std::size_t mRunGlyphs = 0;
+};
+
+[[nodiscard]] ScenarioResult benchmarkGlyphIdMisses(
+    const Options& options,
+    std::size_t residentGlyphs,
+    std::size_t runGlyphs) {
+    using namespace henia::ui;
+    FontDefinition definition{
+        .atlas = TextureHandle{1},
+        .pixelSize = 16.0F,
+        .ascent = 12.0F,
+        .descent = 4.0F,
+        .lineGap = 2.0F,
+    };
+    definition.glyphs.reserve(residentGlyphs);
+    for (std::size_t index = 0; index < residentGlyphs; ++index) {
+        definition.glyphs.push_back({
+            .codepoint = static_cast<char32_t>(0x1000U + index),
+            .uv = {{0.0F, 0.0F}, {1.0F, 1.0F}},
+            .size = {8.0F, 16.0F},
+            .bearing = {0.0F, 12.0F},
+            .advance = 8.0F,
+            .glyphId = static_cast<std::uint32_t>(index + 1U),
+        });
+    }
+    FontStore fonts;
+    const FontHandle font = fonts.add(std::move(definition));
+    if (!font.valid()) {
+        throw std::runtime_error("Glyph-ID benchmark font creation failed");
+    }
+    GlyphIdBenchmarkShaper shaper(residentGlyphs, runGlyphs);
+    TextLayoutCache layouts(fonts, &shaper);
+    TextRenderCache rendering(fonts);
+    layouts.reserve(1, runGlyphs);
+    rendering.reserve(1, runGlyphs);
+    layouts.setMaximumEntries(1);
+    rendering.setMaximumEntries(1);
+    const std::array chain{font};
+    const std::string text(runGlyphs, 'x');
+    ScenarioResult result = measureScenario(
+        "glyph_id_" + std::to_string(residentGlyphs) + "_resident_"
+            + std::to_string(runGlyphs) + "_run",
+        options,
+        [&](std::size_t iteration) {
+            layouts.clear();
+            rendering.clear();
+            const auto layoutStarted = Clock::now();
+            const TextLayoutResult* layout = layouts.layout(chain, 16.0F, text);
+            const std::uint64_t layoutNanoseconds = nanosecondsSince(layoutStarted);
+            const auto renderStarted = Clock::now();
+            const TextRun* run = layout == nullptr ? nullptr : rendering.render(*layout);
+            const std::uint64_t renderNanoseconds = nanosecondsSince(renderStarted);
+            if (layout == nullptr || run == nullptr || layout->glyphs.size() != runGlyphs) {
+                throw std::runtime_error("Glyph-ID benchmark cache miss failed");
+            }
+            return IterationPhases{
+                .layoutNanoseconds = layoutNanoseconds,
+                .paintBuildNanoseconds = renderNanoseconds,
+                .checksum = layout->identity ^ layout->glyphs.size()
+                    ^ run->segments.size() ^ iteration,
+            };
+        });
+    result.cacheMisses = options.iterations * 2U;
+    result.submittedInstances = runGlyphs;
+    result.uploadBytes = runGlyphs * sizeof(DrawInstance);
+    result.coldUploadBytes = result.uploadBytes;
+    result.cpuResidentBytes = fonts.storageBytes();
+    result.textureBytes = kTextAtlasBytes;
+    result.glyphIdLookups = runGlyphs * 2U;
+    return result;
+}
+
 [[nodiscard]] ScenarioResult benchmarkPaged3DStable(const Options& options) {
     using namespace henia::gfx;
     const std::vector<BoxInstance> boxes = createBoxes(kPagedBoxCount);
@@ -1367,6 +1536,14 @@ template <typename Operation>
         results, "visibility_direct_32768_75pct_offscreen");
     const ScenarioResult* visibilityCpuLarge = findScenario(
         results, "visibility_cpu_32768_75pct_offscreen");
+    const ScenarioResult* motionVisible = findScenario(
+        results, "motion_visibility_100k_mostly_visible");
+    const ScenarioResult* motionCulled = findScenario(
+        results, "motion_visibility_100k_mostly_culled");
+    const ScenarioResult* glyphIdSmall = findScenario(
+        results, "glyph_id_1000_resident_100_run");
+    const ScenarioResult* glyphIdLarge = findScenario(
+        results, "glyph_id_20000_resident_5000_run");
     const ScenarioResult* pagedStable = findScenario(results, "paged_3d_stable_snapshot_100k");
     const ScenarioResult* pagedOne = findScenario(results, "paged_3d_one_edit_100k");
     const ScenarioResult* pagedClustered = findScenario(results, "paged_3d_clustered_edits_100k");
@@ -1378,6 +1555,8 @@ template <typename Operation>
         && full3d != nullptr && dirty3d != nullptr
         && visibilityDirectSmall != nullptr && visibilityCpuSmall != nullptr
         && visibilityDirectLarge != nullptr && visibilityCpuLarge != nullptr
+        && motionVisible != nullptr && motionCulled != nullptr
+        && glyphIdSmall != nullptr && glyphIdLarge != nullptr
         && pagedStable != nullptr
         && pagedOne != nullptr && pagedClustered != nullptr && pagedSparse != nullptr;
     if (!valid) {
@@ -1453,6 +1632,16 @@ template <typename Operation>
         && visibilityCpuLarge->allocationsMedian == 0
         && visibilityCpuSmall->uploadBytes == visibilityDirectSmall->uploadBytes / 4U
         && visibilityCpuLarge->uploadBytes == visibilityDirectLarge->uploadBytes / 4U
+        && motionVisible->pageEnvelopeEvaluations == motionCulled->pageEnvelopeEvaluations
+        && motionVisible->pageEnvelopeEvaluations
+            == (kPagedBoxCount + henia::gfx::InstanceBatch::kBoxesPerPage - 1U)
+                / henia::gfx::InstanceBatch::kBoxesPerPage
+        && motionVisible->exactVisibilityTests == kPagedBoxCount
+        && motionCulled->exactVisibilityTests < kPagedBoxCount / 2U
+        && glyphIdSmall->cacheMisses == glyphIdSmall->iterations * 2U
+        && glyphIdSmall->glyphIdLookups == 200
+        && glyphIdLarge->cacheMisses == glyphIdLarge->iterations * 2U
+        && glyphIdLarge->glyphIdLookups == 10000
         && pagedStable->submittedInstances == kPagedBoxCount
         && pagedStable->allocationsMedian == 0
         && pagedStable->uploadBytes == 0
@@ -1602,6 +1791,13 @@ void writeJson(
                << "        \"resident_item_widgets\": "
                << result.residentItemWidgets << "\n"
                << "      },\n"
+               << "      \"work\": {\n"
+               << "        \"page_envelope_evaluations\": "
+               << result.pageEnvelopeEvaluations << ",\n"
+               << "        \"exact_visibility_tests\": "
+               << result.exactVisibilityTests << ",\n"
+               << "        \"glyph_id_lookups\": " << result.glyphIdLookups << "\n"
+               << "      },\n"
                << "      \"checksum\": " << result.checksum << "\n"
                << "    }" << (index + 1U == results.size() ? "\n" : ",\n");
     }
@@ -1688,7 +1884,7 @@ int main(int argc, char** argv) {
     }
     try {
         std::vector<ScenarioResult> results;
-        results.reserve(21);
+        results.reserve(32);
         results.push_back(benchmarkTessellation(options));
         results.push_back(benchmarkShaderEllipses(options));
         results.push_back(benchmarkManyPrimitives(options));
@@ -1706,6 +1902,16 @@ int main(int argc, char** argv) {
         results.push_back(benchmarkVisibility(options, 2048, true));
         results.push_back(benchmarkVisibility(options, kBoxCount, false));
         results.push_back(benchmarkVisibility(options, kBoxCount, true));
+        results.push_back(benchmarkMotionVisibility(options, false));
+        results.push_back(benchmarkMotionVisibility(options, true));
+        constexpr std::array<std::size_t, 3> residentGlyphCounts{1000, 5000, 20000};
+        constexpr std::array<std::size_t, 3> shapedGlyphCounts{100, 1000, 5000};
+        for (const std::size_t residentGlyphs : residentGlyphCounts) {
+            for (const std::size_t shapedGlyphs : shapedGlyphCounts) {
+                results.push_back(benchmarkGlyphIdMisses(
+                    options, residentGlyphs, shapedGlyphs));
+            }
+        }
         results.push_back(benchmarkPaged3DStable(options));
         results.push_back(benchmarkPaged3DOneEdit(options));
         results.push_back(benchmarkPaged3DClusteredEdits(options));

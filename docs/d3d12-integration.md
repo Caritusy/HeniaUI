@@ -113,6 +113,14 @@ revision is copied as one contiguous range. `SubmissionReuse` validation occurs
 before staging writes or transitions, so the host fence contract prevents both
 resources from being overwritten while in flight.
 
+Every fence-tracked texture-upload batch also owns one persistently mapped
+upload arena. Ordinary dirty textures suballocate 512-byte-aligned placed
+footprints from it, so steady-state atlas region updates create no committed
+upload resources. The arena resets only after its upload fence completes. A
+burst or texture larger than the configured arena uses one explicit committed
+fallback allocation for that update; capacity, peak footprint bytes, fallbacks,
+resource creations, and map operations are reported separately.
+
 With `VisibilityMode::CpuFrustum` (or an activated `Automatic` policy), the
 submission slot's mapped indirect-argument resource is updated only after the
 same reuse check and `ExecuteIndirect` consumes the compact instance count.
@@ -138,7 +146,8 @@ Both renderers overwrite and do not restore:
 - viewport 0 and scissor rectangle 0.
 
 The UI renderer additionally binds its shader-visible CBV/SRV/UAV descriptor
-heap for any packet containing textures and sets descriptor table 0. This can
+heap when it enters a textured batch run and sets descriptor table 0. Zero-texture
+batches use the heap-free root signature and do no descriptor-table copy. This can
 invalidate the host's descriptor tables, including tables unrelated to HeniaUI.
 The host must rebind all shader-visible heaps it needs and then set every root
 descriptor/table/constant used by its next draw. A packet containing only
@@ -146,7 +155,9 @@ geometry uses a separate heap-free root signature/PSO and does not call
 `SetDescriptorHeaps`, but it still overwrites the other listed state.
 
 Neither renderer changes render/depth-target bindings, attachment transitions,
-index-buffer binding, blend factor, or stencil reference. Hosts should bind
+blend factor, or stencil reference. The Gfx renderer binds its immutable
+16-bit edge-quad index buffer; the UI renderer does not bind an index buffer.
+Hosts should bind
 their complete known-good draw state rather than depend on this shorter
 unchanged list.
 

@@ -65,8 +65,16 @@ namespace henia::gfx {
     if (!std::isfinite(box.color.blue)) return "box.color.blue";
     if (!std::isfinite(box.color.alpha)) return "box.color.alpha";
     constexpr std::uint32_t validEffects = static_cast<std::uint32_t>(BoxEffect::HueCycle)
-        | static_cast<std::uint32_t>(BoxEffect::MotionTranslation);
+        | static_cast<std::uint32_t>(BoxEffect::MotionTranslation)
+        | static_cast<std::uint32_t>(BoxEffect::PackedMotionTranslation)
+        | static_cast<std::uint32_t>(BoxEffect::ExplicitVisibilityMask);
     if ((static_cast<std::uint32_t>(box.effects) & ~validEffects) != 0) return "box.effects";
+    if ((static_cast<std::uint32_t>(box.effects)
+            & static_cast<std::uint32_t>(BoxEffect::PackedMotionTranslation)) != 0U
+        && (static_cast<std::uint32_t>(box.effects)
+            & static_cast<std::uint32_t>(BoxEffect::MotionTranslation)) == 0U) {
+        return "box.effects";
+    }
     if ((static_cast<std::uint32_t>(box.effects)
             & static_cast<std::uint32_t>(BoxEffect::MotionTranslation)) != 0U
         && !finite(box.motionDelta())) {

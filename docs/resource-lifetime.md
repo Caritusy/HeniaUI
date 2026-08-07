@@ -53,11 +53,13 @@ discard/restoration, and regeneration. Recreate the entry when those semantics
 change. Native format selection and external-resource validation follow
 [Color, alpha, and texture contract](color-and-texture-contract.md).
 
-Use `updateRegion()` for a rectangular edit. The store copies only the supplied
-rows and retains the previous tight rectangle for transactional OpenGL
-rollback. A renderer exactly one revision behind can issue a subresource
-upload; multiple edits accumulated before it synchronizes fall back to a full
-upload from the current CPU image. `restoreCpuBacking()` does not create a new
+Use `updateRegion()` for one rectangular edit or `updateRegions()` for an atomic
+logical batch. The store stages all writes, groups them per texture, advances
+each affected texture once, and retains the conservative dirty union plus its
+previous pixels for transactional backend rollback. Repeated glyph writes made
+before synchronization therefore remain one partial upload instead of forcing
+a full texture replacement. A renderer with a genuine revision gap still falls
+back to the current full CPU image. `restoreCpuBacking()` does not create a new
 revision; use `update()` when the logical texture content changes.
 
 `TextureStore::statistics()` reports live/reusable slots, retained CPU bytes,

@@ -17,14 +17,30 @@ struct OpenGlRenderStatistics final {
     std::uint64_t successfulFrames = 0;
     std::uint64_t drawCalls = 0;
     std::uint64_t submittedInstances = 0;
+    std::uint64_t generatedVertices = 0;
+    std::uint64_t textureFreeBatches = 0;
+    std::uint64_t texturedBatches = 0;
+    std::uint64_t texturePathRuns = 0;
+    std::uint64_t textureBindingChanges = 0;
+    std::uint64_t textureAlphaModeUploads = 0;
+    std::uint64_t attributeFormatConfigurations = 0;
+    std::uint64_t attributeOffsetUpdates = 0;
+    std::uint64_t baseInstanceDraws = 0;
     std::uint64_t instanceUploads = 0;
     std::uint64_t uploadedInstanceBytes = 0;
+    std::uint64_t instanceMapOperations = 0;
+    std::uint64_t instanceUnmapOperations = 0;
+    std::uint64_t persistentInstanceCopies = 0;
+    std::uint64_t packetValidationWalks = 0;
+    std::uint64_t packetValidationCacheHits = 0;
+    std::uint64_t validatedInstances = 0;
     std::uint64_t uploadSlotExhaustions = 0;
     std::uint64_t fullUploadFallbacks = 0;
     std::uint64_t uploadFenceFailures = 0;
     std::uint64_t textureUploads = 0;
     std::uint64_t fullTextureUploads = 0;
     std::uint64_t partialTextureUploads = 0;
+    std::uint64_t textureDirtyHistoryFallbacks = 0;
     std::uint64_t uploadedTextureBytes = 0;
     std::uint64_t gpuTextureBytes = 0;
     std::uint64_t retiredTextures = 0;
@@ -34,17 +50,32 @@ struct OpenGlRenderStatistics final {
     std::uint64_t capacityRejectedFrames = 0;
     std::uint64_t wrongContextCalls = 0;
     std::uint64_t ignoredHostErrors = 0;
+    std::uint64_t stateCaptures = 0;
+    std::uint64_t stateRestorations = 0;
     std::uint64_t stateRestoreFailures = 0;
+    std::uint64_t dedicatedContextFrames = 0;
     std::uint64_t initializationFailures = 0;
     std::uint64_t textureSynchronizationFailures = 0;
     std::uint64_t lifecycleRejections = 0;
     std::uint64_t abandonedContexts = 0;
+    bool persistentUploadActive = false;
+    bool baseInstanceActive = false;
     RenderProfile profile{};
 };
 
 enum class OpenGlExternalTextureOwnership : std::uint8_t {
     Borrowed,
     Transferred,
+};
+
+enum class OpenGlUiStatePolicy : std::uint8_t {
+    Preserve,
+    DedicatedContext,
+};
+
+enum class OpenGlUploadStrategy : std::uint8_t {
+    TransientMap,
+    PersistentMap,
 };
 
 // OpenGlRenderer never creates, binds, or swaps a native context. Its owner must
@@ -54,6 +85,9 @@ enum class OpenGlExternalTextureOwnership : std::uint8_t {
 // movable: its resources must be shut down on the owning context and thread.
 // Instance upload slots are fence-owned and polled with zero timeout; render()
 // returns false rather than waiting when changed content has no safe slot.
+// Preserve is the integration-safe state policy. DedicatedContext avoids the
+// capture/restore walk and leaves the context configured for HeniaUI. Persistent
+// uploads are opt-in and require OpenGL 4.4 or ARB_buffer_storage.
 // Repeated initialize() is idempotent only for the exact owner/configuration;
 // use shutdown() for an orderly rebuild or abandon() after permanent context loss.
 class OpenGlRenderer final {
@@ -73,7 +107,9 @@ public:
     [[nodiscard]] bool initialize(
         std::size_t instanceCapacity = 16384,
         std::size_t textureCapacity = 256,
-        std::size_t uploadSlotCount = 3) noexcept;
+        std::size_t uploadSlotCount = 3,
+        OpenGlUiStatePolicy statePolicy = OpenGlUiStatePolicy::Preserve,
+        OpenGlUploadStrategy uploadStrategy = OpenGlUploadStrategy::TransientMap) noexcept;
     [[nodiscard]] bool synchronizeTextures(TextureStore& textures) noexcept;
     // Validates level-zero storage in the owner context. Borrowed names are
     // never deleted; transferred names follow renderer-owned lifetime.
@@ -82,8 +118,9 @@ public:
         TextureHandle handle,
         std::uint32_t textureObject,
         OpenGlExternalTextureOwnership ownership = OpenGlExternalTextureOwnership::Borrowed) noexcept;
-    // targetColorSpace controls GL_FRAMEBUFFER_SRGB for this draw; the host's
-    // previous state is restored. The bound attachment must support it.
+    // targetColorSpace controls GL_FRAMEBUFFER_SRGB for this draw. Preserve
+    // restores the host's previous state; DedicatedContext intentionally does
+    // not. The bound attachment must support the selected color space.
     [[nodiscard]] bool render(
         const RenderPacket& packet,
         std::uint32_t viewportWidth,

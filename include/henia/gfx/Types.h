@@ -76,6 +76,10 @@ enum class BoxEffect : std::uint32_t {
     None = 0,
     HueCycle = 1U << 0U,
     MotionTranslation = 1U << 1U,
+    // Storage-format flags used by BoxInstance. They are public so serialized
+    // instances and custom backends can decode the same 64-byte layout.
+    PackedMotionTranslation = 1U << 2U,
+    ExplicitVisibilityMask = 1U << 3U,
 };
 
 [[nodiscard]] constexpr BoxEffect operator|(BoxEffect left, BoxEffect right) noexcept {
@@ -83,7 +87,10 @@ enum class BoxEffect : std::uint32_t {
 }
 
 struct BoxInstance final {
-    static constexpr std::uint32_t kVisibilityMaskMarker = 0x48564953U;
+    static constexpr std::uint32_t kPackedComponentBits = 21U;
+    static constexpr std::uint32_t kPackedMantissaBits = 12U;
+    static constexpr std::uint32_t kPackedComponentMask =
+        (std::uint32_t{1} << kPackedComponentBits) - 1U;
 
     Vec3 minimum{};
     float lineWidth = 1.5F;
@@ -93,53 +100,52 @@ struct BoxInstance final {
     BoxEffect effects = BoxEffect::None;
     std::array<std::uint32_t, 3> reserved{};
 
-    // Stored in the existing reserved tail so the public/GPU layout remains
-    // 64 bytes. Old producers whose reserved words are zero remain visible.
+    // New instances keep a full 32-bit visibility mask in reserved[0] and
+    // three compact, full-range floating-point deltas in reserved[1..2]. The
+    // compact format retains sign/exponent and twelve mantissa bits. Legacy
+    // MotionTranslation instances without PackedMotionTranslation continue to
+    // decode their three original float words. This preserves the 64-byte GPU
+    // layout while making visibility and motion independent.
     constexpr void setVisibilityMask(std::uint32_t mask) noexcept {
-        effects = static_cast<BoxEffect>(
-            static_cast<std::uint32_t>(effects)
-            & ~static_cast<std::uint32_t>(BoxEffect::MotionTranslation));
+        if (hasEffect(BoxEffect::MotionTranslation)
+            && !hasEffect(BoxEffect::PackedMotionTranslation)) {
+            const Vec3 legacy = motionDelta();
+            storePackedMotion(legacy);
+            addEffect(BoxEffect::PackedMotionTranslation);
+        }
         reserved[0] = mask;
-        reserved[1] = kVisibilityMaskMarker;
-        reserved[2] = 0;
+        addEffect(BoxEffect::ExplicitVisibilityMask);
     }
     constexpr void clearVisibilityMask() noexcept {
-        if ((static_cast<std::uint32_t>(effects)
-                & static_cast<std::uint32_t>(BoxEffect::MotionTranslation)) != 0U) {
-            return;
+        if (hasEffect(BoxEffect::MotionTranslation)
+            && !hasEffect(BoxEffect::PackedMotionTranslation)) {
+            const Vec3 legacy = motionDelta();
+            storePackedMotion(legacy);
+            addEffect(BoxEffect::PackedMotionTranslation);
         }
         reserved[0] = 0;
-        reserved[1] = 0;
-        reserved[2] = 0;
+        removeEffect(BoxEffect::ExplicitVisibilityMask);
     }
     [[nodiscard]] constexpr std::uint32_t visibilityMask() const noexcept {
-        if ((static_cast<std::uint32_t>(effects)
-                & static_cast<std::uint32_t>(BoxEffect::MotionTranslation)) != 0U) {
-            return ~std::uint32_t{0};
-        }
-        return reserved[1] == kVisibilityMaskMarker ? reserved[0] : ~std::uint32_t{0};
+        return hasEffect(BoxEffect::ExplicitVisibilityMask)
+            ? reserved[0] : ~std::uint32_t{0};
     }
     constexpr void setMotionDelta(Vec3 value) noexcept {
-        effects = static_cast<BoxEffect>(
-            static_cast<std::uint32_t>(effects)
-            | static_cast<std::uint32_t>(BoxEffect::MotionTranslation));
-        reserved[0] = std::bit_cast<std::uint32_t>(value.x);
-        reserved[1] = std::bit_cast<std::uint32_t>(value.y);
-        reserved[2] = std::bit_cast<std::uint32_t>(value.z);
+        storePackedMotion(value);
+        addEffect(BoxEffect::MotionTranslation);
+        addEffect(BoxEffect::PackedMotionTranslation);
     }
     constexpr void clearMotionDelta() noexcept {
-        effects = static_cast<BoxEffect>(
-            static_cast<std::uint32_t>(effects)
-            & ~static_cast<std::uint32_t>(BoxEffect::MotionTranslation));
-        reserved[0] = 0;
+        removeEffect(BoxEffect::MotionTranslation);
+        removeEffect(BoxEffect::PackedMotionTranslation);
         reserved[1] = 0;
         reserved[2] = 0;
     }
     [[nodiscard]] constexpr Vec3 motionDelta() const noexcept {
-        if ((static_cast<std::uint32_t>(effects)
-                & static_cast<std::uint32_t>(BoxEffect::MotionTranslation)) == 0U) {
+        if (!hasEffect(BoxEffect::MotionTranslation)) {
             return {};
         }
+        if (hasEffect(BoxEffect::PackedMotionTranslation)) return loadPackedMotion();
         return {
             std::bit_cast<float>(reserved[0]),
             std::bit_cast<float>(reserved[1]),
@@ -147,6 +153,53 @@ struct BoxInstance final {
         };
     }
     [[nodiscard]] constexpr bool operator==(const BoxInstance&) const noexcept = default;
+
+private:
+    [[nodiscard]] constexpr bool hasEffect(BoxEffect effect) const noexcept {
+        return (static_cast<std::uint32_t>(effects)
+            & static_cast<std::uint32_t>(effect)) != 0U;
+    }
+    constexpr void addEffect(BoxEffect effect) noexcept {
+        effects = static_cast<BoxEffect>(static_cast<std::uint32_t>(effects)
+            | static_cast<std::uint32_t>(effect));
+    }
+    constexpr void removeEffect(BoxEffect effect) noexcept {
+        effects = static_cast<BoxEffect>(static_cast<std::uint32_t>(effects)
+            & ~static_cast<std::uint32_t>(effect));
+    }
+    [[nodiscard]] static constexpr std::uint32_t packComponent(float value) noexcept {
+        const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+        return ((bits >> 31U) << 20U)
+            | (((bits >> 23U) & 0xFFU) << kPackedMantissaBits)
+            | ((bits >> (23U - kPackedMantissaBits))
+                & ((std::uint32_t{1} << kPackedMantissaBits) - 1U));
+    }
+    [[nodiscard]] static constexpr float unpackComponent(std::uint32_t value) noexcept {
+        const std::uint32_t bits = ((value >> 20U) << 31U)
+            | (((value >> kPackedMantissaBits) & 0xFFU) << 23U)
+            | ((value & ((std::uint32_t{1} << kPackedMantissaBits) - 1U))
+                << (23U - kPackedMantissaBits));
+        return std::bit_cast<float>(bits);
+    }
+    constexpr void storePackedMotion(Vec3 value) noexcept {
+        const std::uint64_t packed = static_cast<std::uint64_t>(packComponent(value.x))
+            | (static_cast<std::uint64_t>(packComponent(value.y)) << kPackedComponentBits)
+            | (static_cast<std::uint64_t>(packComponent(value.z))
+                << (kPackedComponentBits * 2U));
+        reserved[1] = static_cast<std::uint32_t>(packed);
+        reserved[2] = static_cast<std::uint32_t>(packed >> 32U);
+    }
+    [[nodiscard]] constexpr Vec3 loadPackedMotion() const noexcept {
+        const std::uint64_t packed = static_cast<std::uint64_t>(reserved[1])
+            | (static_cast<std::uint64_t>(reserved[2]) << 32U);
+        return {
+            unpackComponent(static_cast<std::uint32_t>(packed) & kPackedComponentMask),
+            unpackComponent(static_cast<std::uint32_t>(
+                packed >> kPackedComponentBits) & kPackedComponentMask),
+            unpackComponent(static_cast<std::uint32_t>(
+                packed >> (kPackedComponentBits * 2U)) & kPackedComponentMask),
+        };
+    }
 };
 
 using RenderProfile = henia::RenderProfile;

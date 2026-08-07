@@ -21,6 +21,8 @@ versioned JSON document suitable for CI comparison.
 | `large_3d_dirty_update` | One changed box while the previous 32,768-box immutable snapshot remains live. |
 | `visibility_direct_2048_75pct_offscreen` / `visibility_cpu_2048_75pct_offscreen` | Direct validation versus reusable CPU visibility for a small batch with spatially clustered 75% rejection. |
 | `visibility_direct_32768_75pct_offscreen` / `visibility_cpu_32768_75pct_offscreen` | The same comparison at the automatic-policy starting count. |
+| `motion_visibility_100k_mostly_visible` / `motion_visibility_100k_mostly_culled` | A stable 100,000-box batch with a different positive/zero/negative `motionScale` every iteration; reports O(page) envelope evaluations separately from exact surviving-box tests. |
+| `glyph_id_{1000,5000,20000}_resident_{100,1000,5000}_run` | The full resident/run-size matrix for forced layout and render-cache misses through external-shaper glyph IDs. |
 | `paged_3d_stable_snapshot_100k` | Stable publication of a 100,000-box paged snapshot. |
 | `paged_3d_one_edit_100k` | One edit in 100,000 boxes while the prior snapshot remains live. |
 | `paged_3d_clustered_edits_100k` | 32 adjacent edits contained by one 256-instance page. |
@@ -32,6 +34,10 @@ previous immutable revision live during every changed iteration.
 The visibility pairs alternate camera matrices after prewarming, reuse immutable
 page bounds, and report the compact count/upload model. Their CPU-cull rows must
 allocate zero bytes during measured updates.
+Motion visibility keeps the source revision fixed and varies only the global
+scale. The JSON `work` object exposes page-envelope evaluations and exact
+instance tests. Glyph-ID rows time layout and render-cache misses separately;
+their work object reports the two indexed lookups per shaped glyph.
 
 ## Metrics
 

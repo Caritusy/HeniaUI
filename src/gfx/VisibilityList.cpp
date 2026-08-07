@@ -29,6 +29,12 @@ struct Bounds final {
     std::uint32_t visibilityMaskUnion = 0;
 };
 
+struct PageEnvelope final {
+    Bounds base{};
+    Vec3 minimumMotion{};
+    Vec3 maximumMotion{};
+};
+
 struct Plane final {
     double x = 0.0;
     double y = 0.0;
@@ -179,21 +185,53 @@ struct Frustum final {
     };
 }
 
-[[nodiscard]] Bounds pageBounds(
-    std::span<const BoxInstance> boxes,
-    float motionScale) noexcept {
-    Bounds result = boxBounds(boxes.front(), motionScale);
+[[nodiscard]] PageEnvelope pageEnvelope(std::span<const BoxInstance> boxes) noexcept {
+    const BoxInstance& first = boxes.front();
+    const Vec3 firstMotion = first.motionDelta();
+    PageEnvelope result{
+        .base = {
+            first.minimum,
+            first.maximum,
+            first.lineWidth,
+            first.visibilityMask(),
+        },
+        .minimumMotion = firstMotion,
+        .maximumMotion = firstMotion,
+    };
     for (const BoxInstance& box : boxes.subspan(1)) {
-        const Bounds current = boxBounds(box, motionScale);
-        result.minimum.x = std::min(result.minimum.x, current.minimum.x);
-        result.minimum.y = std::min(result.minimum.y, current.minimum.y);
-        result.minimum.z = std::min(result.minimum.z, current.minimum.z);
-        result.maximum.x = std::max(result.maximum.x, current.maximum.x);
-        result.maximum.y = std::max(result.maximum.y, current.maximum.y);
-        result.maximum.z = std::max(result.maximum.z, current.maximum.z);
-        result.maximumLineWidth = std::max(result.maximumLineWidth, current.maximumLineWidth);
-        result.visibilityMaskUnion |= current.visibilityMaskUnion;
+        const Vec3 motion = box.motionDelta();
+        result.base.minimum.x = std::min(result.base.minimum.x, box.minimum.x);
+        result.base.minimum.y = std::min(result.base.minimum.y, box.minimum.y);
+        result.base.minimum.z = std::min(result.base.minimum.z, box.minimum.z);
+        result.base.maximum.x = std::max(result.base.maximum.x, box.maximum.x);
+        result.base.maximum.y = std::max(result.base.maximum.y, box.maximum.y);
+        result.base.maximum.z = std::max(result.base.maximum.z, box.maximum.z);
+        result.base.maximumLineWidth = std::max(result.base.maximumLineWidth, box.lineWidth);
+        result.base.visibilityMaskUnion |= box.visibilityMask();
+        result.minimumMotion.x = std::min(result.minimumMotion.x, motion.x);
+        result.minimumMotion.y = std::min(result.minimumMotion.y, motion.y);
+        result.minimumMotion.z = std::min(result.minimumMotion.z, motion.z);
+        result.maximumMotion.x = std::max(result.maximumMotion.x, motion.x);
+        result.maximumMotion.y = std::max(result.maximumMotion.y, motion.y);
+        result.maximumMotion.z = std::max(result.maximumMotion.z, motion.z);
     }
+    return result;
+}
+
+[[nodiscard]] Bounds boundsAtScale(
+    const PageEnvelope& envelope,
+    float motionScale) noexcept {
+    Bounds result = envelope.base;
+    const Vec3 minimumMotion = motionScale >= 0.0F
+        ? envelope.minimumMotion : envelope.maximumMotion;
+    const Vec3 maximumMotion = motionScale >= 0.0F
+        ? envelope.maximumMotion : envelope.minimumMotion;
+    result.minimum.x += minimumMotion.x * motionScale;
+    result.minimum.y += minimumMotion.y * motionScale;
+    result.minimum.z += minimumMotion.z * motionScale;
+    result.maximum.x += maximumMotion.x * motionScale;
+    result.maximum.y += maximumMotion.y * motionScale;
+    result.maximum.z += maximumMotion.z * motionScale;
     return result;
 }
 
@@ -208,7 +246,7 @@ struct Frustum final {
 struct VisibilityList::Implementation final {
     std::vector<std::size_t> indices;
     std::vector<BoxInstance> boxes;
-    std::vector<Bounds> chunks;
+    std::vector<PageEnvelope> chunks;
     std::size_t sourceCapacity = 0;
     // Visibility streams occupy a disjoint practical identity namespace so a
     // backend can never mistake a compact stream for its source InstanceBatch.
@@ -277,10 +315,15 @@ bool VisibilityList::update(
         state.assignError("visibility source count exceeds reserved capacity");
         return false;
     }
-    for (const BoxInstance& box : source) {
-        if (const std::string_view issue = validate(box); !issue.empty()) {
-            state.assignError(issue);
-            return false;
+    const bool sourceChanged = !state.hasResult
+        || state.sourceIdentity != batch.identity()
+        || state.sourceRevision != batch.revision();
+    if (sourceChanged) {
+        for (const BoxInstance& box : source) {
+            if (const std::string_view issue = validate(box); !issue.empty()) {
+                state.assignError(issue);
+                return false;
+            }
         }
     }
 
@@ -299,6 +342,8 @@ bool VisibilityList::update(
         reused.visibleInstances = state.boxes.size();
         reused.rebuiltChunks = 0;
         reused.reusedChunks = batch.boxPageCount();
+        reused.pageEnvelopeEvaluations = 0;
+        reused.exactInstanceTests = 0;
         reused.cullingNanoseconds = 0;
         reused.resultReused = true;
         state.statistics = reused;
@@ -312,13 +357,11 @@ bool VisibilityList::update(
     const bool reuseAllChunks = state.hasResult
         && state.sourceIdentity == batch.identity()
         && state.sourceRevision == batch.revision()
-        && state.motionScale == view.motionScale
         && state.chunks.size() == pageCount;
     const bool canIncrement = state.hasResult
         && state.sourceIdentity == batch.identity()
         && state.sourceRevision != std::numeric_limits<std::uint64_t>::max()
         && state.sourceRevision + 1U == batch.revision()
-        && state.motionScale == view.motionScale
         && state.chunks.size() == pageCount
         && !batch.requiresFullUpload()
         && !batch.dirtyRanges().empty();
@@ -338,7 +381,7 @@ bool VisibilityList::update(
             }
         }
         if (rebuild) {
-            state.chunks[pageIndex] = pageBounds(batch.boxPage(pageIndex), view.motionScale);
+            state.chunks[pageIndex] = pageEnvelope(batch.boxPage(pageIndex));
             ++statistics.rebuiltChunks;
         } else {
             ++statistics.reusedChunks;
@@ -350,14 +393,16 @@ bool VisibilityList::update(
     const Frustum frustum = extractFrustum(view.viewProjection, view.clipDepthRange);
     for (std::size_t pageIndex = 0; pageIndex < pageCount; ++pageIndex) {
         const std::span<const BoxInstance> page = batch.boxPage(pageIndex);
+        const Bounds chunkBounds = boundsAtScale(state.chunks[pageIndex], view.motionScale);
+        ++statistics.pageEnvelopeEvaluations;
         ++statistics.chunkTests;
-        if ((state.chunks[pageIndex].visibilityMaskUnion
+        if ((chunkBounds.visibilityMaskUnion
                 & options.applicationVisibilityMask) == 0) {
             statistics.applicationMaskRejectedInstances += page.size();
             statistics.chunkRejectedInstances += page.size();
             continue;
         }
-        if (outsideFrustum(state.chunks[pageIndex], frustum, view)) {
+        if (outsideFrustum(chunkBounds, frustum, view)) {
             statistics.frustumRejectedInstances += page.size();
             statistics.chunkRejectedInstances += page.size();
             continue;
@@ -369,6 +414,7 @@ bool VisibilityList::update(
                 continue;
             }
             const Bounds bounds = boxBounds(box, view.motionScale);
+            ++statistics.exactInstanceTests;
             if (outsideFrustum(bounds, frustum, view)) {
                 ++statistics.frustumRejectedInstances;
                 continue;
@@ -413,7 +459,7 @@ std::size_t VisibilityList::storageBytes() const noexcept {
     return sizeof(Implementation)
         + mImplementation->indices.capacity() * sizeof(std::size_t)
         + mImplementation->boxes.capacity() * sizeof(BoxInstance)
-        + mImplementation->chunks.capacity() * sizeof(Bounds);
+        + mImplementation->chunks.capacity() * sizeof(PageEnvelope);
 }
 
 std::uint64_t VisibilityList::identity() const noexcept { return mImplementation->outputIdentity; }

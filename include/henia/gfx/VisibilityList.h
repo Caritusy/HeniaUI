@@ -59,6 +59,10 @@ struct VisibilityStatistics final {
     std::uint64_t chunkRejectedInstances = 0;
     std::uint64_t rebuiltChunks = 0;
     std::uint64_t reusedChunks = 0;
+    // Source-derived envelopes are rebuilt only for changed instance pages.
+    // Evaluations are O(1) per page even when motionScale changes.
+    std::uint64_t pageEnvelopeEvaluations = 0;
+    std::uint64_t exactInstanceTests = 0;
     std::uint64_t cullingNanoseconds = 0;
     bool resultReused = false;
 };

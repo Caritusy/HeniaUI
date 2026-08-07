@@ -43,9 +43,9 @@ struct PixelInput {
     nointerpolation uint shaderParameter : SHADER_PARAMETER;
 };
 
-static const float2 corners[6] = {
-    float2(0.0, 0.0), float2(1.0, 0.0), float2(1.0, 1.0),
-    float2(0.0, 0.0), float2(1.0, 1.0), float2(0.0, 1.0)
+static const float2 corners[4] = {
+    float2(0.0, 0.0), float2(1.0, 0.0),
+    float2(0.0, 1.0), float2(1.0, 1.0)
 };
 
 PixelInput vertexMain(VertexInput input) {
@@ -89,6 +89,11 @@ PixelInput vertexMain(VertexInput input) {
     }
     float2 framebufferPixel = pixel * logicalToFramebufferScale
         + logicalToFramebufferTranslation;
+    if (kind == 4) {
+        float2 runOrigin = input.metrics * logicalToFramebufferScale
+            + logicalToFramebufferTranslation;
+        framebufferPixel += round(runOrigin) - runOrigin;
+    }
     float2 normalized = framebufferPixel / viewportSize;
     output.position = float4(normalized.x * 2.0 - 1.0, 1.0 - normalized.y * 2.0, 0.0, 1.0);
     output.pixelPosition = pixel;

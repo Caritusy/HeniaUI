@@ -37,8 +37,10 @@ struct GlSyncObject;
 using GlSync = GlSyncObject*;
 
 constexpr GLenum kArrayBuffer = 0x8892;
+constexpr GLenum kElementArrayBuffer = 0x8893;
 constexpr GLenum kArrayBufferBinding = 0x8894;
 constexpr GLenum kDynamicDraw = 0x88E8;
+constexpr GLenum kStaticDraw = 0x88E4;
 constexpr GLenum kVertexShader = 0x8B31;
 constexpr GLenum kFragmentShader = 0x8B30;
 constexpr GLenum kCompileStatus = 0x8B81;
@@ -109,6 +111,7 @@ using Uniform2fFn = void(APIENTRYP)(GLint, GLfloat, GLfloat);
 using Uniform1fFn = void(APIENTRYP)(GLint, GLfloat);
 using Uniform1iFn = void(APIENTRYP)(GLint, GLint);
 using DrawArraysInstancedFn = void(APIENTRYP)(GLenum, GLint, GLsizei, GLsizei);
+using DrawElementsInstancedFn = void(APIENTRYP)(GLenum, GLsizei, GLenum, const void*, GLsizei);
 using BlendFuncSeparateFn = void(APIENTRYP)(GLenum, GLenum, GLenum, GLenum);
 using BlendEquationSeparateFn = void(APIENTRYP)(GLenum, GLenum);
 using IsProgramFn = GLboolean(APIENTRYP)(GLuint);
@@ -151,6 +154,7 @@ struct GlFunctions final {
     Uniform1fFn uniform1f = nullptr;
     Uniform1iFn uniform1i = nullptr;
     DrawArraysInstancedFn drawArraysInstanced = nullptr;
+    DrawElementsInstancedFn drawElementsInstanced = nullptr;
     BlendFuncSeparateFn blendFuncSeparate = nullptr;
     BlendEquationSeparateFn blendEquationSeparate = nullptr;
     IsProgramFn isProgram = nullptr;
@@ -197,6 +201,7 @@ template <typename Function>
         && load(gl.uniformMatrix4fv, "glUniformMatrix4fv") && load(gl.uniform2f, "glUniform2f")
         && load(gl.uniform1f, "glUniform1f") && load(gl.uniform1i, "glUniform1i")
         && load(gl.drawArraysInstanced, "glDrawArraysInstanced")
+        && load(gl.drawElementsInstanced, "glDrawElementsInstanced")
         && load(gl.blendFuncSeparate, "glBlendFuncSeparate")
         && load(gl.blendEquationSeparate, "glBlendEquationSeparate")
         && load(gl.isProgram, "glIsProgram")
@@ -218,7 +223,7 @@ layout(location = 0) in vec4 instanceMinimumAndWidth;
 layout(location = 1) in vec4 instanceMaximumAndHue;
 layout(location = 2) in vec4 instanceColor;
 layout(location = 3) in uint instanceEffects;
-layout(location = 4) in vec3 instanceMotionDelta;
+layout(location = 4) in uvec3 instanceReserved;
 
 uniform mat4 viewProjection;
 uniform vec2 viewportSize;
@@ -238,12 +243,34 @@ const ivec2 edges[12] = ivec2[12](
     ivec2(0, 1), ivec2(2, 3), ivec2(0, 2), ivec2(1, 3),
     ivec2(4, 5), ivec2(6, 7), ivec2(4, 6), ivec2(5, 7),
     ivec2(0, 4), ivec2(1, 5), ivec2(2, 6), ivec2(3, 7));
-const vec2 quad[6] = vec2[6](
-    vec2(0.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0),
-    vec2(0.0, -1.0), vec2(1.0, 1.0), vec2(0.0, 1.0));
+const vec2 quad[4] = vec2[4](
+    vec2(0.0, -1.0), vec2(1.0, -1.0),
+    vec2(1.0, 1.0), vec2(0.0, 1.0));
 
 vec3 corner(int code) {
     return vec3(float(code & 1), float((code >> 1) & 1), float((code >> 2) & 1));
+}
+
+float unpackMotionComponent(uint value) {
+    uint bits = ((value >> 20u) << 31u)
+        | (((value >> 12u) & 0xffu) << 23u)
+        | ((value & 0xfffu) << 11u);
+    return uintBitsToFloat(bits);
+}
+
+vec3 motionDelta() {
+    if ((instanceEffects & 4u) == 0u) {
+        return vec3(
+            uintBitsToFloat(instanceReserved.x),
+            uintBitsToFloat(instanceReserved.y),
+            uintBitsToFloat(instanceReserved.z));
+    }
+    uint low = instanceReserved.y;
+    uint high = instanceReserved.z;
+    return vec3(
+        unpackMotionComponent(low & 0x1fffffu),
+        unpackMotionComponent((low >> 21u) | ((high & 0x3ffu) << 11u)),
+        unpackMotionComponent((high >> 10u) & 0x1fffffu));
 }
 
 bool finiteClip(vec4 value) {
@@ -307,10 +334,10 @@ bool clipSegment(inout vec4 startClip, inout vec4 finishClip, bool zeroToOne) {
 }
 
 void main() {
-    int edgeIndex = gl_VertexID / 6;
-    vec2 vertex = quad[gl_VertexID % 6];
+    int edgeIndex = gl_VertexID / 4;
+    vec2 vertex = quad[gl_VertexID % 4];
     vec3 motionOffset = (instanceEffects & 2u) != 0u
-        ? instanceMotionDelta * motionScale
+        ? motionDelta() * motionScale
         : vec3(0.0);
     vec3 minimumValue = instanceMinimumAndWidth.xyz + motionOffset;
     vec3 maximumValue = instanceMaximumAndHue.xyz + motionOffset;
@@ -489,6 +516,7 @@ struct OpenGlRenderDevice::Implementation final {
     GlFunctions gl{};
     GLuint program = 0;
     GLuint vertexArray = 0;
+    GLuint indexBuffer = 0;
     GLint viewProjectionLocation = -1;
     GLint viewportLocation = -1;
     GLint timeLocation = -1;
@@ -647,12 +675,39 @@ bool OpenGlRenderDevice::Implementation::initialize(
             return false;
         }
     }
+    gl.genBuffers(1, &indexBuffer);
+    if (const GLenum glError = consumeOperationErrors(); indexBuffer == 0 || glError != GL_NO_ERROR) {
+        assignGlFailure(error, "OpenGL gfx index-buffer creation failed", glError, "object", indexBuffer);
+        return false;
+    }
     gl.bindVertexArray(vertexArray);
     const auto restoreInitializationState = [&]() noexcept {
         if (!preserveState) return;
         gl.bindBuffer(kArrayBuffer, static_cast<GLuint>(previousArrayBuffer));
         gl.bindVertexArray(static_cast<GLuint>(previousVertexArray));
     };
+    constexpr auto edgeIndices = [] {
+        std::array<std::uint16_t, 72> result{};
+        constexpr std::array<std::uint16_t, 6> pattern{0, 1, 2, 2, 3, 0};
+        for (std::uint16_t edge = 0; edge < 12; ++edge) {
+            for (std::size_t index = 0; index < pattern.size(); ++index) {
+                result[static_cast<std::size_t>(edge) * pattern.size() + index] =
+                    static_cast<std::uint16_t>(edge * 4U + pattern[index]);
+            }
+        }
+        return result;
+    }();
+    gl.bindBuffer(kElementArrayBuffer, indexBuffer);
+    gl.bufferData(
+        kElementArrayBuffer,
+        static_cast<GlSize>(sizeof(edgeIndices)),
+        edgeIndices.data(),
+        kStaticDraw);
+    if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
+        restoreInitializationState();
+        assignGlFailure(error, "OpenGL gfx index-buffer storage allocation failed", glError, "object", indexBuffer);
+        return false;
+    }
     for (std::size_t index = 0; index < uploadSlots.size(); ++index) {
         const UploadSlot& slot = uploadSlots[index];
         gl.bindBuffer(kArrayBuffer, slot.buffer);
@@ -970,9 +1025,16 @@ bool OpenGlRenderDevice::Implementation::render(
         return false;
     }
     if (submittedCount != 0) {
-        gl.drawArraysInstanced(GL_TRIANGLES, 0, 72, static_cast<GLsizei>(submittedCount));
+        gl.drawElementsInstanced(
+            GL_TRIANGLES,
+            72,
+            GL_UNSIGNED_SHORT,
+            nullptr,
+            static_cast<GLsizei>(submittedCount));
         ++statistics.drawCalls;
         statistics.submittedInstances += submittedCount;
+        statistics.generatedVertices += submittedCount * 48U;
+        statistics.submittedIndices += submittedCount * 72U;
     }
     const GLenum drawError = consumeOperationErrors();
     const bool fenced = submittedCount == 0 || fenceUploadSlot(upload.slot);
@@ -1088,7 +1150,7 @@ void OpenGlRenderDevice::Implementation::configureAttributes() const noexcept {
     gl.enableVertexAttribArray(3);
     gl.vertexAttribIPointer(3, 1, GL_UNSIGNED_INT, stride, reinterpret_cast<const void*>(48));
     gl.enableVertexAttribArray(4);
-    gl.vertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(52));
+    gl.vertexAttribIPointer(4, 3, GL_UNSIGNED_INT, stride, reinterpret_cast<const void*>(52));
     for (GLuint attribute = 0; attribute < 5; ++attribute) {
         gl.vertexAttribDivisor(attribute, 1);
     }
@@ -1191,11 +1253,13 @@ bool OpenGlRenderDevice::Implementation::shutdown() noexcept {
                 gl.deleteBuffers(1, &slot.buffer);
             }
         }
+        if (indexBuffer != 0 && gl.deleteBuffers != nullptr) gl.deleteBuffers(1, &indexBuffer);
         if (vertexArray != 0 && gl.deleteVertexArrays != nullptr) gl.deleteVertexArrays(1, &vertexArray);
         if (program != 0 && gl.deleteProgram != nullptr) gl.deleteProgram(program);
     }
     program = 0;
     vertexArray = 0;
+    indexBuffer = 0;
     viewProjectionLocation = -1;
     viewportLocation = -1;
     timeLocation = -1;
@@ -1219,6 +1283,7 @@ void OpenGlRenderDevice::Implementation::abandon() noexcept {
     const bool hadOwner = ownerContext != nullptr;
     program = 0;
     vertexArray = 0;
+    indexBuffer = 0;
     viewProjectionLocation = -1;
     viewportLocation = -1;
     timeLocation = -1;
