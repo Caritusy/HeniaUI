@@ -396,6 +396,8 @@ int main() {
 
     D3D12GfxStatistics statistics = renderer.statistics();
     if (statistics.drawCalls != 2 || statistics.submittedInstances != boxes.size() * 2U
+        || statistics.generatedVertices != statistics.submittedInstances * 48U
+        || statistics.submittedIndices != statistics.submittedInstances * 72U
         || statistics.fullInstanceUploads != 1 || statistics.partialInstanceUploads != 0
         || statistics.uploadedInstanceBytes != boxes.size() * sizeof(BoxInstance)
         || statistics.instanceCopyOperations != 1

@@ -23,6 +23,9 @@ struct D3D12RendererConfiguration final {
     std::uint32_t batchCapacity = 256;
     std::uint32_t textureCapacity = 256;
     std::uint32_t textureUploadBatchCapacity = 3;
+    // Persistently mapped staging arena owned by each fence-tracked texture
+    // upload batch. Oversized bursts use an explicit fallback allocation.
+    std::size_t textureUploadArenaBytes = 4U * 1024U * 1024U;
     henia::backend::d3d12::InstanceStorageStrategy instanceStorage =
         henia::backend::d3d12::InstanceStorageStrategy::Automatic;
     std::size_t gpuLocalInstanceThresholdBytes =
@@ -44,7 +47,15 @@ struct D3D12RenderStatistics final {
     std::uint64_t successfulFrames = 0;
     std::uint64_t drawCalls = 0;
     std::uint64_t submittedInstances = 0;
+    std::uint64_t generatedVertices = 0;
+    std::uint64_t textureFreeBatches = 0;
+    std::uint64_t texturedBatches = 0;
+    std::uint64_t texturePathRuns = 0;
+    std::uint64_t rootSignatureChanges = 0;
     std::uint64_t instanceUploads = 0;
+    std::uint64_t packetValidationWalks = 0;
+    std::uint64_t packetValidationCacheHits = 0;
+    std::uint64_t validatedInstances = 0;
     // CPU writes into the submission slot's mapped staging resource.
     std::uint64_t uploadedInstanceBytes = 0;
     // Default-heap CopyBufferRegion work, separate from staging writes.
@@ -58,12 +69,19 @@ struct D3D12RenderStatistics final {
     std::uint64_t textureUploads = 0;
     std::uint64_t fullTextureUploads = 0;
     std::uint64_t partialTextureUploads = 0;
+    std::uint64_t textureDirtyHistoryFallbacks = 0;
     std::uint64_t uploadedTextureBytes = 0;
     std::uint64_t gpuTextureBytes = 0;
     std::uint64_t retiredTextures = 0;
     std::uint64_t externalTextures = 0;
     std::uint64_t textureUploadBatches = 0;
     std::uint64_t failedTextureUploadBatches = 0;
+    std::uint64_t textureStagingArenaCapacity = 0;
+    std::uint64_t peakTextureStagingBytes = 0;
+    std::uint64_t textureStagingArenaGrowths = 0;
+    std::uint64_t textureStagingFallbackAllocations = 0;
+    std::uint64_t committedTextureUploadResources = 0;
+    std::uint64_t textureStagingMapOperations = 0;
     std::uint64_t rejectedFrames = 0;
     std::uint64_t invalidInputFrames = 0;
     std::uint64_t capacityRejectedFrames = 0;

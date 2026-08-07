@@ -351,6 +351,8 @@ henia::ui::Win32AsyncFontSet multilingual(textures, fontStore, {
 textPainter.setFallbackFonts(multilingual.fontChain(
     henia::ui::Win32FontLocale::SimplifiedChinese));
 textPainter.setGlyphRequestBackend(&multilingual);
+textPainter.setFontRasterResolver(&multilingual);
+multilingual.prewarmTextSizes({13.0F, 14.0F, 16.0F, 18.0F, 22.0F});
 
 // Interactive frame: publish, upload, invalidate, then compose.
 if (multilingual.commitReady(32) != 0) {
@@ -363,11 +365,14 @@ renderer.render(document.compose(), document.coordinateSpace().render);
 ```
 
 All `TextPainter`-driven controls automatically enqueue their UTF-8 text. The
-queues are bounded and requests are deduplicated per face/codepoint, so layout
-never waits for rasterization. `fontChain()` selects locale-specific CJK face
-order while keeping stable handles. Construct a matching font set when the
-font's logical size or raster DPI changes; preallocated atlas pages avoid the
-first runtime page allocation.
+queues are bounded, requests are deduplicated per face/physical-size/codepoint,
+and retryable failures use bounded exponential backoff, so layout never waits
+for rasterization. `fontChain()` selects locale-specific CJK face order and a
+missing scalar advances through that chain instead of being broadcast to every
+CJK face. The raster resolver chooses a bounded integer physical-size variant;
+call `setDpiScale()` on monitor changes and prewarm known control sizes to avoid
+first-use atlas work. `releaseResources()` stops the worker and explicitly
+retires every internally owned face, glyph, and atlas page.
 
 This scalar fallback path covers Latin, CJK, kana, Hangul, common symbols, and
 many other characters available in the configured system faces. Color emoji is
@@ -392,7 +397,7 @@ renderDevice.render(snapshot, view, hasDepthAttachment);
 ```
 
 Each box stores bounds, color, pixel line width, hue offset, and generic effect
-parameters. The GPU expands twelve fixed edges into triangle quads. Camera and
+parameters. The GPU expands twelve fixed edges into indexed four-vertex quads. Camera and
 time changes update frame constants without rebuilding or re-uploading stable
 instance content. Optional visibility reuses immutable page bounds and keeps
 direct submission as the default path.
@@ -403,8 +408,11 @@ HeniaUI owns its CPU-side trees, immutable packets, renderer resources, and
 preallocated upload bookkeeping. The host owns application lifecycle and all
 presentation infrastructure.
 
-- OpenGL calls require the initialization context to be current. The renderer
-  restores the pipeline state it changes and never waits for an upload slot.
+- OpenGL calls require the initialization context to be current. The default
+  `Preserve` policy restores changed pipeline state; opt-in `DedicatedContext`
+  establishes HeniaUI state without the capture/restore walk. Instance uploads
+  are transient by default, with an opt-in persistently mapped strategy on
+  OpenGL 4.4/`ARB_buffer_storage`. Neither strategy waits for an upload slot.
 - D3D12 records into a host-owned direct command list. The host binds targets,
   performs resource transitions, submits work, and associates submission slots
   with fences.

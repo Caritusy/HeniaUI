@@ -682,6 +682,11 @@ void Canvas::glyphs(
         };
         command.uv = glyph.uv;
         command.color = color;
+        // Glyph shaders snap this shared run origin in framebuffer space. The
+        // relative glyph geometry remains fractional, preserving kerning while
+        // avoiding a second bitmap resample at an arbitrary run phase.
+        command.radius = origin.x;
+        command.thickness = origin.y;
         append(command);
     }
 }

@@ -14,11 +14,13 @@
 #include <wrl/client.h>
 
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <type_traits>
 #include <vector>
 
@@ -864,10 +866,43 @@ int main() {
     }
 
     const D3D12RenderStatistics statistics = renderer.statistics();
+    const std::size_t texturedPacketBatches = static_cast<std::size_t>(std::count_if(
+        packet.batches().begin(), packet.batches().end(),
+        [](const DrawBatch& batch) { return batch.textureCount != 0; }));
+    const std::size_t textureFreePacketBatches =
+        packet.batches().size() - texturedPacketBatches;
+    std::size_t packetTextureRuns = 0;
+    std::optional<bool> previousTexturePath;
+    for (const DrawBatch& batch : packet.batches()) {
+        const bool textured = batch.textureCount != 0;
+        if (!previousTexturePath.has_value() || *previousTexturePath != textured) {
+            ++packetTextureRuns;
+            previousTexturePath = textured;
+        }
+    }
     if (statistics.drawCalls != packet.batches().size() * 2U + 1U
         || statistics.submittedInstances != packet.instances().size() * 2U + 1U
+        || statistics.generatedVertices != statistics.submittedInstances * 4U
+        || statistics.texturedBatches != texturedPacketBatches * 2U
+        || statistics.textureFreeBatches != textureFreePacketBatches * 2U + 1U
+        || statistics.texturePathRuns != packetTextureRuns * 2U + 1U
+        || statistics.rootSignatureChanges != statistics.texturePathRuns
         || statistics.textureUploads != 2 || statistics.textureUploadBatches != 1
+        || statistics.textureStagingArenaCapacity
+            != rendererConfiguration.textureUploadArenaBytes
+                * rendererConfiguration.textureUploadBatchCapacity
+        || statistics.peakTextureStagingBytes == 0
+        || statistics.textureStagingArenaGrowths != 0
+        || statistics.textureStagingFallbackAllocations != 0
+        || statistics.committedTextureUploadResources
+            != rendererConfiguration.textureUploadBatchCapacity
+        || statistics.textureStagingMapOperations
+            != rendererConfiguration.textureUploadBatchCapacity
         || statistics.instanceUploads != 2
+        || statistics.packetValidationWalks < 2
+        || statistics.packetValidationCacheHits == 0
+        || statistics.validatedInstances
+            < packet.instances().size() + textureFreePacket.instances().size()
         || statistics.uploadedInstanceBytes
             != (packet.instances().size() + textureFreePacket.instances().size())
                 * sizeof(DrawInstance)
@@ -879,8 +914,8 @@ int main() {
                 * rendererConfiguration.submissionCapacity
         || statistics.gpuLocalFrames != 3 || statistics.directUploadFrames != 0
         || statistics.descriptorHeapBindings != 2
-        || statistics.descriptorTableCopies != packet.batches().size()
-        || statistics.descriptorTableCacheHits != packet.batches().size()
+        || statistics.descriptorTableCopies != texturedPacketBatches
+        || statistics.descriptorTableCacheHits != texturedPacketBatches
         || statistics.textureFreeFrames != 1
         || statistics.submissionFenceChecks != 2
         || statistics.submissionSlotBusyRejections != 1
@@ -940,11 +975,96 @@ int main() {
     }
     automaticRenderer.shutdown();
 
+    TextureStore oversizedUploadTextures;
+    std::vector<std::byte> oversizedUploadPixels(
+        64U * 64U * 4U,
+        std::byte{0x7F});
+    const TextureHandle oversizedUploadTexture = oversizedUploadTextures.create(
+        TextureFormat::Rgba8,
+        64,
+        64,
+        64U * 4U,
+        oversizedUploadPixels);
+    D3D12Renderer oversizedUploadRenderer;
+    const D3D12RendererConfiguration oversizedUploadConfiguration{
+        .instanceCapacity = 1,
+        .submissionCapacity = 1,
+        .batchCapacity = 1,
+        .textureCapacity = 1,
+        .textureUploadBatchCapacity = 1,
+        .textureUploadArenaBytes = 512,
+    };
+    if (!oversizedUploadTexture.valid()
+        || !oversizedUploadRenderer.initialize(
+            *device.Get(),
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            oversizedUploadConfiguration)
+        || !oversizedUploadRenderer.synchronizeTextures(
+            oversizedUploadTextures,
+            *queue.Get())
+        || !waitForQueue(*device.Get(), *queue.Get())
+        || !oversizedUploadRenderer.pollTextureUploads()) {
+        fail("D3D12 oversized texture staging fallback did not complete");
+    }
+    const D3D12RenderStatistics oversizedUploadStatistics =
+        oversizedUploadRenderer.statistics();
+    if (oversizedUploadStatistics.textureStagingArenaCapacity != 512
+        || oversizedUploadStatistics.peakTextureStagingBytes != 64U * 256U
+        || oversizedUploadStatistics.textureStagingArenaGrowths != 0
+        || oversizedUploadStatistics.textureStagingFallbackAllocations != 1
+        || oversizedUploadStatistics.committedTextureUploadResources != 2
+        || oversizedUploadStatistics.textureStagingMapOperations != 2
+        || oversizedUploadStatistics.textureUploads != 1
+        || oversizedUploadStatistics.uploadedTextureBytes != oversizedUploadPixels.size()) {
+        fail("D3D12 oversized texture upload did not use the explicit fallback path");
+    }
+    oversizedUploadRenderer.shutdown();
+
+    TextureStore historyTextures;
+    const std::array<std::byte, 16> historyPixels{};
+    const TextureHandle historyTexture = historyTextures.create(
+        TextureFormat::Alpha8, 4, 4, 4, historyPixels);
+    D3D12Renderer historyRenderer;
+    const D3D12RendererConfiguration historyConfiguration{
+        .instanceCapacity = 1,
+        .submissionCapacity = 1,
+        .batchCapacity = 1,
+        .textureCapacity = 1,
+        .textureUploadBatchCapacity = 1,
+    };
+    const std::array<std::byte, 1> historyPatch{std::byte{0x7F}};
+    if (!historyTexture.valid()
+        || !historyRenderer.initialize(
+            *device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, historyConfiguration)
+        || !historyRenderer.synchronizeTextures(historyTextures, *queue.Get())
+        || !waitForQueue(*device.Get(), *queue.Get())
+        || !historyRenderer.pollTextureUploads()
+        || !historyTextures.updateRegion(historyTexture, {0, 0, 1, 1}, 1, historyPatch)
+        || !historyTextures.updateRegion(historyTexture, {3, 3, 1, 1}, 1, historyPatch)
+        || !historyRenderer.synchronizeTextures(historyTextures, *queue.Get())
+        || !waitForQueue(*device.Get(), *queue.Get())
+        || !historyRenderer.pollTextureUploads()) {
+        fail("D3D12 dirty-history fallback fixture failed");
+    }
+    const D3D12RenderStatistics historyStatistics = historyRenderer.statistics();
+    if (historyStatistics.fullTextureUploads != 2
+        || historyStatistics.partialTextureUploads != 0
+        || historyStatistics.textureDirtyHistoryFallbacks != 1
+        || historyStatistics.uploadedTextureBytes != 32) {
+        fail("D3D12 did not report a deterministic full upload for lost dirty history");
+    }
+    historyRenderer.shutdown();
+
     alpha.fill(std::byte{0x80});
-    const std::array<std::byte, 1> partialAlpha{std::byte{0x80}};
-    if (!textures.updateRegion(atlas, {1, 1, 1, 1}, 1, partialAlpha)
+    const std::array<std::byte, 1> firstPartialAlpha{std::byte{0x80}};
+    const std::array<std::byte, 1> secondPartialAlpha{std::byte{0x80}};
+    const std::array partialAlphaUpdates{
+        TextureRegionUpdate{atlas, {1, 1, 1, 1}, 1, firstPartialAlpha},
+        TextureRegionUpdate{atlas, {2, 2, 1, 1}, 1, secondPartialAlpha},
+    };
+    if (!textures.updateRegions(partialAlphaUpdates)
         || !renderer.synchronizeTextures(textures, *queue.Get())) {
-        fail("D3D12 renderer could not queue a partial texture revision");
+        fail("D3D12 renderer could not queue a batched partial texture revision");
     }
     alpha.fill(std::byte{0x40});
     if (!textures.update(atlas, 4, alpha)
@@ -962,7 +1082,7 @@ int main() {
         || renderer.statistics().textureUploads != 4
         || renderer.statistics().fullTextureUploads != 3
         || renderer.statistics().partialTextureUploads != 1
-        || renderer.statistics().uploadedTextureBytes != 97) {
+        || renderer.statistics().uploadedTextureBytes != 100) {
         fail("D3D12 renderer did not commit repeated revisions in fence order");
     }
 
@@ -985,6 +1105,11 @@ int main() {
     const D3D12RenderStatistics updatedStatistics = renderer.statistics();
     if (updatedStatistics.drawCalls != packet.batches().size() * 3U + 1U
         || updatedStatistics.submittedInstances != packet.instances().size() * 3U + 1U
+        || updatedStatistics.generatedVertices != updatedStatistics.submittedInstances * 4U
+        || updatedStatistics.texturedBatches != texturedPacketBatches * 3U
+        || updatedStatistics.textureFreeBatches != textureFreePacketBatches * 3U + 1U
+        || updatedStatistics.texturePathRuns != packetTextureRuns * 3U + 1U
+        || updatedStatistics.rootSignatureChanges != updatedStatistics.texturePathRuns
         || updatedStatistics.instanceUploads != 3
         || updatedStatistics.uploadedInstanceBytes
             != (packet.instances().size() * 2U + textureFreePacket.instances().size())
@@ -999,8 +1124,8 @@ int main() {
         || updatedStatistics.textureUploadBatches != 3
         || updatedStatistics.failedTextureUploadBatches != 0
         || updatedStatistics.descriptorHeapBindings != 3
-        || updatedStatistics.descriptorTableCopies != packet.batches().size() * 2U
-        || updatedStatistics.descriptorTableCacheHits != packet.batches().size()
+        || updatedStatistics.descriptorTableCopies != texturedPacketBatches * 2U
+        || updatedStatistics.descriptorTableCacheHits != texturedPacketBatches
         || updatedStatistics.textureFreeFrames != 1) {
         fail("D3D12 repeated texture update statistics are incorrect");
     }

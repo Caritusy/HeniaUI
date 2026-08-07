@@ -2,6 +2,7 @@
 #include "henia/CheckedArithmetic.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <utility>
 
@@ -178,50 +179,134 @@ bool TextureStore::updateRegion(
     TextureRegion region,
     std::uint32_t sourceRowPitch,
     std::span<const std::byte> pixels) {
-    Entry* entry = find(handle);
-    if (entry == nullptr || entry->backingPolicy == TextureBackingPolicy::ExternalGpu
-        || entry->revision == std::numeric_limits<std::uint64_t>::max()
-        || region.width == 0 || region.height == 0
-        || region.x > entry->width || region.width > entry->width - region.x
-        || region.y > entry->height || region.height > entry->height - region.y) {
-        return false;
-    }
-    if (entry->pixels.empty() && !ensureCpuBacking(handle)) return false;
+    const std::array updates{TextureRegionUpdate{handle, region, sourceRowPitch, pixels}};
+    return updateRegions(updates);
+}
 
-    std::size_t copyBytes = 0;
-    std::size_t requiredBytes = 0;
-    if (!checkedMultiply(
-            static_cast<std::size_t>(region.width),
-            bytesPerPixel(entry->format),
-            copyBytes)
-        || !checkedMultiply(
-            static_cast<std::size_t>(sourceRowPitch),
-            static_cast<std::size_t>(region.height),
-            requiredBytes)
-        || sourceRowPitch < copyBytes || pixels.size() != requiredBytes) {
-        return false;
+PreparedTextureUpdate TextureStore::prepareRegionUpdates(
+    std::span<const TextureRegionUpdate> updates) {
+    PreparedTextureUpdate result;
+    if (updates.empty()) return result;
+    result.mEntries.reserve(updates.size());
+    for (const TextureRegionUpdate& update : updates) {
+        Entry* entry = find(update.handle);
+        if (entry == nullptr || entry->backingPolicy == TextureBackingPolicy::ExternalGpu
+            || entry->revision == std::numeric_limits<std::uint64_t>::max()
+            || update.region.width == 0 || update.region.height == 0
+            || update.region.x > entry->width
+            || update.region.width > entry->width - update.region.x
+            || update.region.y > entry->height
+            || update.region.height > entry->height - update.region.y) {
+            return {};
+        }
+        if (entry->pixels.empty() && !ensureCpuBacking(update.handle)) return {};
+
+        std::size_t copyBytes = 0;
+        std::size_t requiredBytes = 0;
+        if (!checkedMultiply(
+                static_cast<std::size_t>(update.region.width),
+                bytesPerPixel(entry->format),
+                copyBytes)
+            || !checkedMultiply(
+                static_cast<std::size_t>(update.sourceRowPitch),
+                static_cast<std::size_t>(update.region.height),
+                requiredBytes)
+            || update.sourceRowPitch < copyBytes || update.pixels.size() != requiredBytes) {
+            return {};
+        }
+
+        auto staged = std::find_if(
+            result.mEntries.begin(), result.mEntries.end(),
+            [&update](const PreparedTextureUpdate::Entry& value) {
+                return value.handle == update.handle;
+            });
+        if (staged == result.mEntries.end()) {
+            result.mEntries.push_back({
+                .handle = update.handle,
+                .expectedRevision = entry->revision,
+                .dirtyRegion = update.region,
+                .pixels = entry->pixels,
+            });
+            staged = result.mEntries.end() - 1;
+        } else {
+            const std::uint32_t left = std::min(staged->dirtyRegion.x, update.region.x);
+            const std::uint32_t top = std::min(staged->dirtyRegion.y, update.region.y);
+            const std::uint32_t right = std::max(
+                staged->dirtyRegion.x + staged->dirtyRegion.width,
+                update.region.x + update.region.width);
+            const std::uint32_t bottom = std::max(
+                staged->dirtyRegion.y + staged->dirtyRegion.height,
+                update.region.y + update.region.height);
+            staged->dirtyRegion = {left, top, right - left, bottom - top};
+        }
+        ++staged->regionCount;
+        const std::size_t xOffset = static_cast<std::size_t>(update.region.x)
+            * bytesPerPixel(entry->format);
+        for (std::uint32_t row = 0; row < update.region.height; ++row) {
+            std::copy_n(
+                update.pixels.data() + static_cast<std::size_t>(row) * update.sourceRowPitch,
+                copyBytes,
+                staged->pixels.data()
+                    + static_cast<std::size_t>(update.region.y + row) * entry->rowPitch
+                    + xOffset);
+        }
     }
 
-    std::vector<std::byte> rollback(copyBytes * region.height);
-    const std::size_t pixelBytes = bytesPerPixel(entry->format);
-    const std::size_t xOffset = static_cast<std::size_t>(region.x) * pixelBytes;
-    for (std::uint32_t row = 0; row < region.height; ++row) {
-        std::copy_n(
-            entry->pixels.data()
-                + static_cast<std::size_t>(region.y + row) * entry->rowPitch + xOffset,
-            copyBytes,
-            rollback.data() + static_cast<std::size_t>(row) * copyBytes);
-        std::copy_n(
-            pixels.data() + static_cast<std::size_t>(row) * sourceRowPitch,
-            copyBytes,
-            entry->pixels.data()
-                + static_cast<std::size_t>(region.y + row) * entry->rowPitch + xOffset);
+    for (PreparedTextureUpdate::Entry& staged : result.mEntries) {
+        const Entry* entry = find(staged.handle);
+        if (entry == nullptr || entry->revision != staged.expectedRevision) return {};
+        std::size_t rowBytes = 0;
+        std::size_t rollbackBytes = 0;
+        if (!checkedMultiply(
+                static_cast<std::size_t>(staged.dirtyRegion.width),
+                bytesPerPixel(entry->format),
+                rowBytes)
+            || !checkedMultiply(
+                rowBytes,
+                static_cast<std::size_t>(staged.dirtyRegion.height),
+                rollbackBytes)) {
+            return {};
+        }
+        staged.rollbackPixels.resize(rollbackBytes);
+        const std::size_t xOffset = static_cast<std::size_t>(staged.dirtyRegion.x)
+            * bytesPerPixel(entry->format);
+        for (std::uint32_t row = 0; row < staged.dirtyRegion.height; ++row) {
+            std::copy_n(
+                entry->pixels.data()
+                    + static_cast<std::size_t>(staged.dirtyRegion.y + row) * entry->rowPitch
+                    + xOffset,
+                rowBytes,
+                staged.rollbackPixels.data() + static_cast<std::size_t>(row) * rowBytes);
+        }
     }
-    ++entry->revision;
-    entry->rollbackPixels = std::move(rollback);
-    entry->dirtyRegion = region;
-    entry->fullUpdate = false;
+    result.mReady = true;
+    return result;
+}
+
+bool TextureStore::commit(PreparedTextureUpdate&& update) noexcept {
+    if (!update.mReady || update.mEntries.empty()) return false;
+    for (const PreparedTextureUpdate::Entry& staged : update.mEntries) {
+        const Entry* entry = find(staged.handle);
+        if (entry == nullptr || entry->revision != staged.expectedRevision) return false;
+    }
+    for (PreparedTextureUpdate::Entry& staged : update.mEntries) {
+        Entry* entry = find(staged.handle);
+        entry->pixels = std::move(staged.pixels);
+        entry->rollbackPixels = std::move(staged.rollbackPixels);
+        entry->dirtyRegion = staged.dirtyRegion;
+        entry->fullUpdate = false;
+        ++entry->revision;
+        mRegionUpdates += staged.regionCount;
+        mCoalescedDirtyArea += static_cast<std::uint64_t>(staged.dirtyRegion.width)
+            * staged.dirtyRegion.height;
+    }
+    update.mReady = false;
     return true;
+}
+
+bool TextureStore::updateRegions(std::span<const TextureRegionUpdate> updates) {
+    PreparedTextureUpdate prepared = prepareRegionUpdates(updates);
+    return prepared.valid() && commit(std::move(prepared));
 }
 
 bool TextureStore::discardCpuBacking(TextureHandle handle) {
@@ -320,6 +405,8 @@ TextureStoreStatistics TextureStore::statistics() const noexcept {
         .reusableSlots = mReusableSlots,
         .backingRestorations = mBackingRestorations,
         .backingRestorationFailures = mBackingRestorationFailures,
+        .regionUpdates = mRegionUpdates,
+        .coalescedDirtyArea = mCoalescedDirtyArea,
     };
     for (const Entry& entry : mEntries) {
         if (!entry.occupied) continue;

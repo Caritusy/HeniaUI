@@ -110,12 +110,14 @@ or DPI as global state for another swap chain.
 
 ## Font atlas density without layout churn
 
-`Win32FontScaleCache` rasterizes one atlas variant per required physical pixel
-height and returns the existing stable `FontHandle` when a window returns to a
-previously visited scale. Its public font metrics are normalized back to the
-requested logical pixel height, so 100%, 125%, 150%, and 200% variants preserve
-layout while increasing glyph texel density. New variants must be synchronized
-with the active renderer before packets reference them.
+`Win32FontScaleCache` rasterizes bounded integer-physical-pixel variants and
+returns the existing stable `FontHandle` when a window returns to a previously
+visited scale/size. `TextFontRasterResolver` lets layout select that variant from
+the final requested logical size. Public metrics are normalized back to logical
+units, so 100%, 125%, 150%, and 200% variants preserve layout while increasing
+glyph texel density. At the configured variant limit the closest resident raster
+is reused. New variants must be synchronized with the active renderer before
+packets reference them.
 
 Direct `Win32FontLoader` users can set `Win32FontRequest::metricsScale` to the
 physical-pixels-per-logical-unit value. Pass the same value to
@@ -123,9 +125,8 @@ physical-pixels-per-logical-unit value. Pass the same value to
 advances, and published logical glyph size are normalized.
 
 The cache retains variants intentionally to avoid atlas churn during repeated
-monitor moves. Hosts with a strict memory policy may own caches per font family
-and destroy their `FontStore`/`TextureStore` resources at an application-defined
-lifecycle boundary.
+monitor moves. Hosts can prewarm known sizes and explicitly release owner-created
+font/texture resources at an application-defined lifecycle boundary.
 
 ## Physical strokes and antialiasing
 

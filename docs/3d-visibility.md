@@ -32,16 +32,18 @@ glRenderer.render(snapshot, view, hasDepthAttachment, visibility);
 d3dRenderer.record(snapshot, view, commandList, slot, visibility, reuse);
 ```
 
-Application visibility groups use the existing 64-byte `BoxInstance` tail:
+Application visibility groups and motion translation share a packed but
+logically independent 64-byte `BoxInstance` tail:
 
 ```cpp
 box.setVisibilityMask(GameplayLayer | DebugLayer);
 box.clearVisibilityMask(); // restores the all-visible compatibility behavior
 ```
 
-The marker stored beside the mask distinguishes the new contract from old or
-zero-initialized reserved bytes. Consequently batches produced against older
-headers remain visible. A box is retained when its mask intersects
+Explicit effect bits distinguish the full-width mask and packed motion encoding
+from old or zero-initialized reserved bytes. Consequently batches produced
+against older headers remain visible, while either setter order preserves both
+features. A box is retained when its mask intersects
 `applicationVisibilityMask`; a zero application mask hides every box.
 
 `minimumProjectedExtentPixels == 0` disables size filtering. A positive value
@@ -56,11 +58,13 @@ and one coarse bound per 256-instance source page. `update()` then allocates
 nothing. Visible indices are ascending source indices and copied instances
 preserve color, line width, hue offset, effect flags, and reserved data.
 
-Page AABBs and their visibility-mask unions are rebuilt only for immutable
-dirty pages. Camera, viewport, clip-depth convention, application mask, and
-projected-size changes reuse those bounds. Animation time is not part of the
-visibility key. Repeating the same visibility inputs reuses the complete compact
-result and its revision.
+Page base AABBs, visibility-mask unions, and per-axis minimum/maximum motion
+deltas are rebuilt only for immutable dirty pages. Camera, viewport, clip-depth
+convention, application mask, projected-size, and global motion-scale changes
+reuse those envelopes. Each current-scale bound takes O(1) page work, including
+negative scales; exact moving-box tests occur only in surviving pages. Animation
+time is not part of the visibility key. Repeating the same visibility inputs
+reuses the complete compact result and its revision.
 
 Frustum rejection extracts the six canonical homogeneous planes once per update
 and tests each AABB's maximum-distance support point. X/Y planes include a
@@ -91,8 +95,9 @@ the current implementation keeps compaction on the CPU and does not add UAV
 resources or compute-queue ownership to the host contract.
 
 Both statistics structures expose direct/culling frame counts, source and
-rejected instance totals, chunk tests/rejections, result reuse, and CPU culling
-nanoseconds. D3D12 additionally exposes indirect argument updates and indirect
+rejected instance totals, page-envelope evaluations, exact instance tests,
+chunk tests/rejections, result reuse, and CPU culling nanoseconds. D3D12
+additionally exposes indirect argument updates and indirect
 draw calls. `submittedInstances` always reports the count that reaches the draw.
 
 ## Measured cost and threshold

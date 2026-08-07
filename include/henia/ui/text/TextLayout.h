@@ -48,6 +48,28 @@ class TextGlyphRequestBackend {
 public:
     virtual ~TextGlyphRequestBackend() = default;
     virtual void requestText(std::string_view text) = 0;
+    // Chain-aware backends can avoid broadcasting one missing codepoint to
+    // every possible fallback. The compatibility implementation preserves
+    // existing text-only adapters.
+    virtual void requestText(
+        std::span<const FontHandle> fontChain,
+        float logicalPixelSize,
+        std::string_view text) {
+        static_cast<void>(fontChain);
+        static_cast<void>(logicalPixelSize);
+        requestText(text);
+    }
+};
+
+// Optional size-aware font raster resolver. Platform caches can return a face
+// baked near the requested final physical size while preserving existing
+// behavior when no resolver is installed.
+class TextFontRasterResolver {
+public:
+    virtual ~TextFontRasterResolver() = default;
+    [[nodiscard]] virtual FontHandle resolveFont(
+        FontHandle font,
+        float logicalPixelSize) = 0;
 };
 
 struct TextLayoutGlyph final {
@@ -224,6 +246,8 @@ public:
     [[nodiscard]] std::span<const FontHandle> fallbackFonts() const noexcept;
     void setGlyphRequestBackend(TextGlyphRequestBackend* backend) noexcept;
     [[nodiscard]] TextGlyphRequestBackend* glyphRequestBackend() const noexcept;
+    void setFontRasterResolver(TextFontRasterResolver* resolver) noexcept;
+    [[nodiscard]] TextFontRasterResolver* fontRasterResolver() const noexcept;
 
     [[nodiscard]] TextMetrics measure(FontHandle font, float size, std::string_view text);
     [[nodiscard]] TextMetrics measure(
@@ -276,12 +300,17 @@ public:
 
 private:
     [[nodiscard]] std::span<const FontHandle> resolvedFonts(FontHandle primary);
+    [[nodiscard]] std::span<const FontHandle> resolvedRasterFonts(
+        std::span<const FontHandle> fonts,
+        float logicalPixelSize);
 
     TextRunCache* mCache = nullptr;
     TextGlyphRequestBackend* mGlyphRequests = nullptr;
+    TextFontRasterResolver* mFontRasterResolver = nullptr;
     FontHandle mResolvedPrimary{};
     std::vector<FontHandle> mFallbackFonts;
     std::vector<FontHandle> mResolvedFonts;
+    std::vector<FontHandle> mRasterFonts;
 };
 
 } // namespace henia::ui

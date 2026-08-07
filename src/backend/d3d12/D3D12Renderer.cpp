@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -232,6 +233,13 @@ struct D3D12Renderer::Implementation final {
         bool valid = false;
     };
 
+    struct PacketValidationCache final {
+        std::uint64_t identity = 0;
+        std::uint64_t revision = 0;
+        std::vector<std::array<std::uint8_t, DrawBatch::kTextureCapacity>> semantics;
+        bool valid = false;
+    };
+
     struct Submission final {
         ComPtr<ID3D12Resource> uploadInstances;
         ComPtr<ID3D12Resource> gpuLocalInstances;
@@ -268,11 +276,17 @@ struct D3D12Renderer::Implementation final {
         TextureAlphaMode alphaMode = TextureAlphaMode::Straight;
         TextureColorSpace colorSpace = TextureColorSpace::Linear;
         bool partial = false;
+        bool dirtyHistoryFallback = false;
     };
 
     struct TextureUploadBatch final {
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> commandList;
+        ComPtr<ID3D12Resource> uploadArena;
+        std::byte* mappedUploadArena = nullptr;
+        std::uint64_t uploadArenaCapacity = 0;
+        std::uint64_t uploadArenaOffset = 0;
+        std::uint64_t stagingBytes = 0;
         detail::D3D12TextureUploadTransaction transaction;
         std::vector<StagedTexture> staged;
     };
@@ -294,6 +308,7 @@ struct D3D12Renderer::Implementation final {
     std::vector<std::uint64_t> scheduledTextureRevisions;
     std::vector<TextureUploadBatch> textureUploadBatches;
     std::vector<std::uint32_t> dirtyTextures;
+    PacketValidationCache packetValidation;
     D3D12RendererConfiguration configuration{};
     DXGI_FORMAT renderTargetFormat = DXGI_FORMAT_UNKNOWN;
     std::uint32_t descriptorStride = 0;
@@ -372,6 +387,7 @@ bool D3D12Renderer::Implementation::initialize(
             || requested.batchCapacity != configuration.batchCapacity
             || requested.textureCapacity != configuration.textureCapacity
             || requested.textureUploadBatchCapacity != configuration.textureUploadBatchCapacity
+            || requested.textureUploadArenaBytes != configuration.textureUploadArenaBytes
             || requested.instanceStorage != configuration.instanceStorage
             || requested.gpuLocalInstanceThresholdBytes
                 != configuration.gpuLocalInstanceThresholdBytes
@@ -397,6 +413,7 @@ bool D3D12Renderer::Implementation::initialize(
     if (requested.instanceCapacity == 0 || requested.submissionCapacity == 0
         || requested.batchCapacity == 0 || requested.textureCapacity == 0
         || requested.textureUploadBatchCapacity == 0
+        || requested.textureUploadArenaBytes == 0
         || !checkedMultiply(requested.instanceCapacity, sizeof(DrawInstance), instanceBytes)
         || instanceBytes > std::numeric_limits<std::uint32_t>::max()
         || !checkedMultiply(
@@ -482,6 +499,8 @@ bool D3D12Renderer::Implementation::initialize(
         return false;
     }
     statistics = {};
+    packetValidation = {};
+    packetValidation.semantics.reserve(configuration.batchCapacity);
     if (!createRootSignature() || !createPipelines(requested.pipelineLibrary) || !createDescriptorHeaps()
         || !createSubmissionBuffers() || !createTextureUploadBatches()) {
         shutdown();
@@ -820,6 +839,9 @@ bool D3D12Renderer::Implementation::createTextureUploadBatches() noexcept {
         return false;
     }
     for (TextureUploadBatch& batch : textureUploadBatches) {
+        const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
+        const D3D12_RESOURCE_DESC uploadDesc = bufferDescription(
+            configuration.textureUploadArenaBytes);
         if (FAILED(device->CreateCommandAllocator(
                 D3D12_COMMAND_LIST_TYPE_DIRECT,
                 IID_PPV_ARGS(&batch.allocator)))
@@ -829,10 +851,28 @@ bool D3D12Renderer::Implementation::createTextureUploadBatches() noexcept {
                 batch.allocator.Get(),
                 nullptr,
                 IID_PPV_ARGS(&batch.commandList)))
-            || FAILED(batch.commandList->Close())) {
+            || FAILED(batch.commandList->Close())
+            || FAILED(device->CreateCommittedResource(
+                &uploadHeap,
+                D3D12_HEAP_FLAG_NONE,
+                &uploadDesc,
+                D3D12_RESOURCE_STATE_GENERIC_READ,
+                nullptr,
+                IID_PPV_ARGS(&batch.uploadArena)))) {
             error = "D3D12 texture upload command objects could not be created";
             return false;
         }
+        const D3D12_RANGE noRead{0, 0};
+        if (FAILED(batch.uploadArena->Map(
+                0, &noRead, reinterpret_cast<void**>(&batch.mappedUploadArena)))
+            || batch.mappedUploadArena == nullptr) {
+            error = "D3D12 texture upload arena could not be persistently mapped";
+            return false;
+        }
+        batch.uploadArenaCapacity = configuration.textureUploadArenaBytes;
+        statistics.textureStagingArenaCapacity += batch.uploadArenaCapacity;
+        ++statistics.committedTextureUploadResources;
+        ++statistics.textureStagingMapOperations;
     }
     return true;
 }
@@ -955,6 +995,8 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
     }
     TextureUploadBatch& batch = *uploadBatch;
     batch.staged.clear();
+    batch.uploadArenaOffset = 0;
+    batch.stagingBytes = 0;
     if (FAILED(batch.allocator->Reset())
         || FAILED(batch.commandList->Reset(batch.allocator.Get(), nullptr))) {
         batch.transaction.abandon();
@@ -994,6 +1036,9 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
         staged.alphaMode = view.alphaMode;
         staged.colorSpace = view.colorSpace;
         staged.partial = partial;
+        staged.dirtyHistoryFallback = current.resource != nullptr && !current.external
+            && current.handle == handle.packed() && !view.fullUpdate
+            && view.revision > current.revision && view.revision - current.revision > 1U;
         if (partial) {
             staged.resource = current.resource;
         } else {
@@ -1039,28 +1084,50 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
         }
         staged.uploadedBytes = rowBytes * rowCount;
 
-        const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
-        const D3D12_RESOURCE_DESC uploadDesc = bufferDescription(uploadBytes);
-        if (FAILED(device->CreateCommittedResource(
-                &uploadHeap,
-                D3D12_HEAP_FLAG_NONE,
-                &uploadDesc,
-                D3D12_RESOURCE_STATE_GENERIC_READ,
-                nullptr,
-                IID_PPV_ARGS(&staged.upload)))) {
-            error = "D3D12 texture upload buffer creation failed";
-            rollbackTextureUpload(batch);
-            return false;
-        }
-
+        constexpr std::uint64_t placementAlignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+        const std::uint64_t alignedOffset = (batch.uploadArenaOffset + placementAlignment - 1U)
+            & ~(placementAlignment - 1U);
+        const bool useArena = alignedOffset <= batch.uploadArenaCapacity
+            && uploadBytes <= batch.uploadArenaCapacity - alignedOffset;
         std::byte* mapped = nullptr;
-        const D3D12_RANGE noRead{0, 0};
-        if (FAILED(staged.upload->Map(0, &noRead, reinterpret_cast<void**>(&mapped)))
-            || mapped == nullptr) {
-            error = "D3D12 texture upload mapping failed";
-            rollbackTextureUpload(batch);
-            return false;
+        ID3D12Resource* uploadResource = nullptr;
+        bool transientMapping = false;
+        if (useArena) {
+            footprint.Offset = alignedOffset;
+            mapped = batch.mappedUploadArena;
+            uploadResource = batch.uploadArena.Get();
+            batch.uploadArenaOffset = alignedOffset + uploadBytes;
+        } else {
+            footprint.Offset = 0;
+            const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
+            const D3D12_RESOURCE_DESC uploadDesc = bufferDescription(uploadBytes);
+            if (FAILED(device->CreateCommittedResource(
+                    &uploadHeap,
+                    D3D12_HEAP_FLAG_NONE,
+                    &uploadDesc,
+                    D3D12_RESOURCE_STATE_GENERIC_READ,
+                    nullptr,
+                    IID_PPV_ARGS(&staged.upload)))) {
+                error = "D3D12 texture upload buffer creation failed";
+                rollbackTextureUpload(batch);
+                return false;
+            }
+            const D3D12_RANGE noRead{0, 0};
+            if (FAILED(staged.upload->Map(0, &noRead, reinterpret_cast<void**>(&mapped)))
+                || mapped == nullptr) {
+                error = "D3D12 texture upload mapping failed";
+                rollbackTextureUpload(batch);
+                return false;
+            }
+            uploadResource = staged.upload.Get();
+            transientMapping = true;
+            ++statistics.textureStagingFallbackAllocations;
+            ++statistics.committedTextureUploadResources;
+            ++statistics.textureStagingMapOperations;
         }
+        batch.stagingBytes += uploadBytes;
+        statistics.peakTextureStagingBytes = std::max(
+            statistics.peakTextureStagingBytes, batch.stagingBytes);
         for (UINT row = 0; row < rowCount; ++row) {
             const std::size_t sourceOffset = partial
                 ? static_cast<std::size_t>(view.dirtyRegion.y + row) * view.rowPitch
@@ -1071,15 +1138,17 @@ bool D3D12Renderer::Implementation::synchronizeTextures(
                 view.pixels.data() + sourceOffset,
                 static_cast<std::size_t>(rowBytes));
         }
-        const D3D12_RANGE written{0, static_cast<SIZE_T>(uploadBytes)};
-        staged.upload->Unmap(0, &written);
+        if (transientMapping) {
+            const D3D12_RANGE written{0, static_cast<SIZE_T>(uploadBytes)};
+            staged.upload->Unmap(0, &written);
+        }
 
         D3D12_TEXTURE_COPY_LOCATION destination{};
         destination.pResource = staged.resource.Get();
         destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         destination.SubresourceIndex = 0;
         D3D12_TEXTURE_COPY_LOCATION source{};
-        source.pResource = staged.upload.Get();
+        source.pResource = uploadResource;
         source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         source.PlacedFootprint = footprint;
         if (partial) {
@@ -1171,6 +1240,8 @@ void D3D12Renderer::Implementation::rollbackTextureUpload(TextureUploadBatch& ba
     // until shutdown because the command-list state can no longer be trusted.
     if (SUCCEEDED(batch.commandList->Close())) {
         batch.staged.clear();
+        batch.uploadArenaOffset = 0;
+        batch.stagingBytes = 0;
         batch.transaction.rollback();
     } else {
         batch.transaction.abandon();
@@ -1210,6 +1281,9 @@ bool D3D12Renderer::Implementation::pollTextureUploads() noexcept {
                 ++statistics.partialTextureUploads;
             } else {
                 ++statistics.fullTextureUploads;
+                if (staged.dirtyHistoryFallback) {
+                    ++statistics.textureDirtyHistoryFallbacks;
+                }
             }
             GpuTexture& texture = textures[staged.value - 1U];
             const bool stillScheduled = scheduledTextureHandles[staged.value - 1U]
@@ -1249,6 +1323,8 @@ bool D3D12Renderer::Implementation::pollTextureUploads() noexcept {
             texture.descriptorRevision = nextDescriptorRevision++;
         }
         completedBatch->staged.clear();
+        completedBatch->uploadArenaOffset = 0;
+        completedBatch->stagingBytes = 0;
         static_cast<void>(completedBatch->transaction.release(completedFence));
     }
     statistics.gpuTextureBytes = 0;
@@ -1373,20 +1449,24 @@ bool D3D12Renderer::Implementation::record(
         error = "D3D12 render packet byte range exceeds the instance buffer";
         return false;
     }
+    const bool validationCacheHit = packetValidation.valid
+        && packetValidation.identity == packet.identity()
+        && packetValidation.revision == packet.revision()
+        && packetValidation.semantics.size() == packet.batches().size();
     bool usesTextures = false;
     bool hasVisibleBatches = false;
     for (const DrawBatch& batch : packet.batches()) {
         const std::size_t first = batch.firstInstance;
         const std::size_t count = batch.instanceCount;
-        if (batch.textureCount > DrawBatch::kTextureCapacity
-            || first > packet.instances().size() || count > packet.instances().size() - first) {
+        if (!validationCacheHit && (batch.textureCount > DrawBatch::kTextureCapacity
+            || first > packet.instances().size() || count > packet.instances().size() - first)) {
             ++statistics.rejectedFrames;
             ++statistics.invalidInputFrames;
             error = "Render packet batch instance/texture range is invalid";
             return false;
         }
         if (batch.clip.enabled) {
-            if (!validateRect(batch.clip.area, "clip.area").empty()) {
+            if (!validationCacheHit && !validateRect(batch.clip.area, "clip.area").empty()) {
                 ++statistics.rejectedFrames;
                 ++statistics.invalidInputFrames;
                 error = "clip.area is invalid";
@@ -1428,7 +1508,49 @@ bool D3D12Renderer::Implementation::record(
         error.clear();
         return true;
     }
-    for (const DrawBatch& batch : packet.batches()) {
+
+    constexpr std::uint8_t kImageSemantic = 1U << 0U;
+    constexpr std::uint8_t kMaskSemantic = 1U << 1U;
+    constexpr std::uint8_t kSdfSemantic = 1U << 2U;
+    if (!validationCacheHit) {
+        packetValidation.valid = false;
+        packetValidation.semantics.assign(packet.batches().size(), {});
+        for (std::size_t batchIndex = 0; batchIndex < packet.batches().size(); ++batchIndex) {
+            const DrawBatch& batch = packet.batches()[batchIndex];
+            for (std::size_t index = batch.firstInstance;
+                 index < static_cast<std::size_t>(batch.firstInstance) + batch.instanceCount;
+                 ++index) {
+                const DrawInstance& instance = packet.instances()[index];
+                std::uint8_t semantic = 0;
+                if (instance.kind == PrimitiveKind::Image
+                    || instance.kind == PrimitiveKind::NinePatch) {
+                    semantic = kImageSemantic;
+                } else if (instance.kind == PrimitiveKind::Glyph) {
+                    semantic = kMaskSemantic;
+                } else if (instance.kind == PrimitiveKind::SdfIcon) {
+                    semantic = kSdfSemantic;
+                }
+                if (semantic == 0) continue;
+                if (instance.textureSlot >= batch.textureCount) {
+                    ++statistics.rejectedFrames;
+                    ++statistics.invalidInputFrames;
+                    error = "Render packet textured instance has an invalid texture slot";
+                    return false;
+                }
+                packetValidation.semantics[batchIndex][instance.textureSlot] |= semantic;
+            }
+        }
+        packetValidation.identity = packet.identity();
+        packetValidation.revision = packet.revision();
+        packetValidation.valid = true;
+        ++statistics.packetValidationWalks;
+        statistics.validatedInstances += packet.instances().size();
+    } else {
+        ++statistics.packetValidationCacheHits;
+    }
+
+    for (std::size_t batchIndex = 0; batchIndex < packet.batches().size(); ++batchIndex) {
+        const DrawBatch& batch = packet.batches()[batchIndex];
         if (batch.clip.enabled) {
             ScissorRect scissor{};
             if (!makeScissorRect(batch.clip.area, viewport, scissor)) continue;
@@ -1443,27 +1565,14 @@ bool D3D12Renderer::Implementation::record(
                 error = "D3D12 render packet references an unsynchronized texture";
                 return false;
             }
-        }
-        for (std::size_t index = batch.firstInstance;
-             index < static_cast<std::size_t>(batch.firstInstance) + batch.instanceCount;
-             ++index) {
-            const DrawInstance& instance = packet.instances()[index];
-            const bool image = instance.kind == PrimitiveKind::Image
-                || instance.kind == PrimitiveKind::NinePatch;
-            const bool mask = instance.kind == PrimitiveKind::Glyph;
-            const bool sdf = instance.kind == PrimitiveKind::SdfIcon;
-            if (!image && !mask && !sdf) continue;
-            if (instance.textureSlot >= batch.textureCount) {
-                ++statistics.rejectedFrames;
-                ++statistics.invalidInputFrames;
-                error = "Render packet textured instance has an invalid texture slot";
-                return false;
-            }
             const GpuTexture& texture =
-                textures[batch.textures[instance.textureSlot].value() - 1U];
+                textures[handle.value() - 1U];
+            const std::uint8_t semantic = packetValidation.semantics[batchIndex][slot];
             const bool alphaMask = texture.alphaMode == TextureAlphaMode::AlphaMask;
-            if ((image && alphaMask) || (mask && !alphaMask)
-                || (sdf && (texture.alphaMode == TextureAlphaMode::Premultiplied
+            if (((semantic & kImageSemantic) != 0 && alphaMask)
+                || ((semantic & kMaskSemantic) != 0 && !alphaMask)
+                || ((semantic & kSdfSemantic) != 0
+                    && (texture.alphaMode == TextureAlphaMode::Premultiplied
                     || texture.colorSpace == TextureColorSpace::Srgb))) {
                 ++statistics.rejectedFrames;
                 ++statistics.invalidInputFrames;
@@ -1550,17 +1659,11 @@ bool D3D12Renderer::Implementation::record(
     if (usesTextures) {
         ID3D12DescriptorHeap* heaps[]{gpuBatchHeap.Get()};
         commandList.SetDescriptorHeaps(1, heaps);
-        commandList.SetGraphicsRootSignature(rootSignature.Get());
-        commandList.SetGraphicsRoot32BitConstants(
-            1, static_cast<UINT>(viewportConstants.size()), viewportConstants.data(), 0);
         ++statistics.descriptorHeapBindings;
     } else {
-        commandList.SetGraphicsRootSignature(textureFreeRootSignature.Get());
-        commandList.SetGraphicsRoot32BitConstants(
-            0, static_cast<UINT>(viewportConstants.size()), viewportConstants.data(), 0);
         ++statistics.textureFreeFrames;
     }
-    commandList.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 
     ID3D12Resource* vertexInstances = useGpuLocal
         ? submission.gpuLocalInstances.Get()
@@ -1582,6 +1685,7 @@ bool D3D12Renderer::Implementation::record(
     commandList.RSSetViewports(1, &nativeViewport);
 
     BlendMode activeBlend = static_cast<BlendMode>(0xFF);
+    std::optional<bool> activeTexturePath;
     for (std::size_t batchIndex = 0; batchIndex < packet.batches().size(); ++batchIndex) {
         const DrawBatch& batch = packet.batches()[batchIndex];
         if (batch.instanceCount == 0) {
@@ -1592,9 +1696,33 @@ bool D3D12Renderer::Implementation::record(
             && !makeScissorRect(batch.clip.area, viewport, converted)) {
             continue;
         }
+        const bool batchUsesTextures = batch.textureCount != 0;
+        if (!activeTexturePath.has_value() || *activeTexturePath != batchUsesTextures) {
+            if (batchUsesTextures) {
+                commandList.SetGraphicsRootSignature(rootSignature.Get());
+                commandList.SetGraphicsRoot32BitConstants(
+                    1,
+                    static_cast<UINT>(viewportConstants.size()),
+                    viewportConstants.data(),
+                    0);
+            } else {
+                commandList.SetGraphicsRootSignature(textureFreeRootSignature.Get());
+                commandList.SetGraphicsRoot32BitConstants(
+                    0,
+                    static_cast<UINT>(viewportConstants.size()),
+                    viewportConstants.data(),
+                    0);
+            }
+            activeTexturePath = batchUsesTextures;
+            activeBlend = static_cast<BlendMode>(0xFF);
+            ++statistics.texturePathRuns;
+            ++statistics.rootSignatureChanges;
+        }
+        if (batchUsesTextures) ++statistics.texturedBatches;
+        else ++statistics.textureFreeBatches;
         if (activeBlend != batch.blend) {
             ID3D12PipelineState* pipeline = nullptr;
-            if (usesTextures) {
+            if (batchUsesTextures) {
                 pipeline = batch.blend == BlendMode::Additive
                     ? additivePipeline.Get()
                     : alphaPipeline.Get();
@@ -1607,7 +1735,7 @@ bool D3D12Renderer::Implementation::record(
             activeBlend = batch.blend;
         }
 
-        if (usesTextures) {
+        if (batchUsesTextures) {
             const std::uint64_t tableIndexValue = (
                 static_cast<std::uint64_t>(submissionSlot) * configuration.batchCapacity + batchIndex)
                 * DrawBatch::kTextureCapacity;
@@ -1656,9 +1784,10 @@ bool D3D12Renderer::Implementation::record(
             scissor = {0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
         }
         commandList.RSSetScissorRects(1, &scissor);
-        commandList.DrawInstanced(6, batch.instanceCount, 0, batch.firstInstance);
+        commandList.DrawInstanced(4, batch.instanceCount, 0, batch.firstInstance);
         ++statistics.drawCalls;
         statistics.submittedInstances += batch.instanceCount;
+        statistics.generatedVertices += static_cast<std::uint64_t>(batch.instanceCount) * 4U;
         if (!useGpuLocal) {
             statistics.uploadHeapReadBytes +=
                 static_cast<std::uint64_t>(batch.instanceCount) * sizeof(DrawInstance);
@@ -1775,6 +1904,14 @@ void D3D12Renderer::Implementation::shutdown() noexcept {
     scheduledTextureHandles.clear();
     scheduledTextureRevisions.clear();
     dirtyTextures.clear();
+    for (TextureUploadBatch& batch : textureUploadBatches) {
+        if (batch.uploadArena != nullptr && batch.mappedUploadArena != nullptr) {
+            batch.uploadArena->Unmap(0, nullptr);
+        }
+        batch.mappedUploadArena = nullptr;
+        batch.uploadArenaOffset = 0;
+        batch.stagingBytes = 0;
+    }
     textureUploadBatches.clear();
     textureUploadFence.Reset();
     textureUploadQueue.Reset();

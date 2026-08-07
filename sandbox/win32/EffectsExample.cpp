@@ -534,6 +534,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         .ranges = ranges,
     });
     std::uint32_t selectedDpi = GetDpiForWindow(native.window);
+    const float initialDpiScale = static_cast<float>(selectedDpi) / 96.0F;
     FontHandle font = fontScaleCache.selectForDpi(selectedDpi);
     const TextureHandle imageTexture = createImageTexture(textures);
     const TextureHandle panelTexture = createNinePatchTexture(textures);
@@ -547,6 +548,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     TextRunCache textCache(fonts);
     textCache.reserve(192, 96);
     TextPainter text(textCache);
+    constexpr std::array textSizes{11.5F, 12.0F, 13.0F, 14.0F, 17.0F, 28.0F, 34.0F, 36.0F};
+    static_cast<void>(fontScaleCache.prewarmTextSizes(textSizes, initialDpiScale));
+    text.setFontRasterResolver(&fontScaleCache);
     Frame frame;
     frame.reserve(2048, 4096, 128, CapacityPolicy::Grow);
     frame.setFragmentAreaTracking(true);

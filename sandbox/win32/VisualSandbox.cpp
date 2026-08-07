@@ -557,6 +557,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         .ranges = ranges,
     });
     const std::uint32_t initialDpi = std::max(GetDpiForWindow(native.window), 1U);
+    const float initialDpiScale = static_cast<float>(initialDpi) / 96.0F;
     const FontHandle font = fontScaleCache.selectForDpi(initialDpi);
     if (!font.valid()) {
         MessageBoxW(nullptr, L"Unable to build the Segoe UI atlas.", L"HeniaUI", MB_ICONERROR);
@@ -566,6 +567,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     TextRunCache textCache(fonts);
     textCache.reserve(128, 64);
     TextPainter text(textCache);
+    constexpr std::array textSizes{
+        12.0F, 12.5F, 13.0F, 14.0F, 15.0F, 16.0F, 18.0F, 22.0F,
+        26.0F, 28.0F, 30.0F, 32.0F};
+    static_cast<void>(fontScaleCache.prewarmTextSizes(textSizes, initialDpiScale));
+    text.setFontRasterResolver(&fontScaleCache);
     SandboxControls controls;
     UiDocument document(text);
     document.reserve(4096, 128);

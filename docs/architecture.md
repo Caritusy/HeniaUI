@@ -176,16 +176,19 @@ fallback/layout and render entries lazily without changing a stable
 `DynamicGlyphAtlas` accepts host-rasterized Alpha8 glyphs and grows by allocating
 fixed-size pages. Pages never resize, so normalized UVs already present in an
 immutable packet remain valid; new pages still participate in the existing
-eight-texture batch table. Each insertion uses `TextureStore::updateRegion` and
-publishes the glyph plus a face revision. `Win32FontLoader::appendGlyphs`
+eight-texture batch table. Batch insertion plans page placement and groups all
+writes per texture into one staged revision; texture pixels, shelf state, and
+font metadata commit atomically or remain unchanged. `Win32FontLoader::appendGlyphs`
 provides the optional GDI rasterizer bridge; the platform-neutral core does not
 depend on it.
 
 `Win32AsyncFontSet` adds a bounded on-demand path without changing that ownership
-model. The owner thread routes Unicode scalars to locale-aware Latin, CJK,
-Japanese, Korean, symbol, and emoji faces and pushes deduplicated jobs through an
-SPSC queue. One private DirectWrite worker owns its font-face interfaces and
-produces self-contained Alpha8 bitmap results. A second bounded SPSC queue
+model. The owner thread walks the active locale-aware Latin, CJK, Japanese,
+Korean, symbol, and emoji chain until the first eligible face, and deduplicates
+jobs by face, physical raster-size variant, and scalar. Retryable raster/commit
+failures use bounded exponential backoff; confirmed missing glyphs advance to
+the next chain candidate. One private DirectWrite worker owns its font-face
+interfaces and produces intentionally grayscale Alpha8 bitmap results. A second bounded SPSC queue
 returns those results; a semaphore parks the worker when result storage is full
 instead of spinning. Neither worker operation accesses `FontStore`,
 `TextureStore`, `DynamicGlyphAtlas`, `TextPainter`, `UiDocument`, or a renderer.
@@ -199,6 +202,11 @@ entries; explicit document invalidation is still required because an otherwise
 stable retained tree has no reason to revisit typography. Atlas pages may be
 preallocated during font-set construction so interactive commits perform only
 region uploads and bounded font publication until those pages fill.
+`TextFontRasterResolver` selects bounded integer physical-pixel variants close
+to the final requested size, while glyph run origins are snapped in framebuffer
+space without rounding unrelated UI geometry. Explicit `releaseResources()`
+joins the worker before reclaiming owned dynamic glyphs, variant faces, and
+atlas textures.
 
 The built-in routing is scalar fallback, not a universal shaping engine.
 Locale-specific chains select the preferred Han forms. DirectWrite emoji
@@ -402,7 +410,9 @@ are lock-free, and backends consume page spans directly. Stable snapshots share
 the exact same directory/pages and allocate nothing. `copiedBoxCount()` makes
 producer data-copy amplification observable in tests and benchmarks.
 
-The box fast path uses twelve fixed edges. Each edge is represented by two triangles generated from the vertex ID; the vertex shader projects the endpoints and expands them in viewport space. Consequently:
+The box fast path uses twelve fixed edges. Each edge has four unique strip-order
+vertices and six reusable indices; the vertex shader projects the endpoints and
+expands the indexed quad in viewport space. Consequently:
 
 - N boxes do not produce N CPU meshes;
 - N boxes in one depth/material group produce one instanced draw;
@@ -411,10 +421,13 @@ The box fast path uses twelve fixed edges. Each edge is represented by two trian
 - camera and time changes do not upload the instance buffer.
 
 An optional `VisibilityList` derives a compact stream without mutating that
-source contract. It caches one conservative AABB/mask union per immutable page,
-rebuilds only dirty pages, and preserves ascending source indices plus complete
+source contract. It caches one conservative base AABB/mask union plus minimum
+and maximum motion delta per immutable page, rebuilds and validates only changed
+source revisions, and preserves ascending source indices plus complete
 `BoxInstance` values. Camera changes reuse page bounds; time-only changes reuse
-the entire result. Application masks, six-plane homogeneous frustum rejection,
+the entire result. A changing global motion scale evaluates each page envelope
+in O(1), including negative scales, and only surviving pages receive exact box
+tests. Application masks, six-plane homogeneous frustum rejection,
 and optional projected-size filtering are applied without frame-path allocation.
 Direct mode remains the default and bypasses this workspace. The full policy,
 conservative edge margin, statistics, and measured threshold are documented in
@@ -520,12 +533,14 @@ synchronization isolates the texture binding plus pixel-unpack buffer,
 alignment, and row length. Initialization also preserves the host VAO and
 array-buffer bindings.
 
-The OpenGL 3D device also accepts `OpenGlStatePolicy::DedicatedContext` for a
-context whose state is exclusively owned by the caller. In that mode it binds
-its complete required pipeline state but skips synchronous host-state queries
-and restoration during initialization and rendering. The default remains
-`Preserve`; using the dedicated policy on a shared context is a contract error
-because the caller must not expect prior bindings or enables to survive.
+Both OpenGL renderers accept a `DedicatedContext` state policy for a context
+whose state is exclusively owned by the caller. In that mode they bind their
+complete required pipeline state but skip synchronous host-state queries and
+restoration during rendering. The default remains `Preserve`; using the
+dedicated policy on a shared context is a contract error because the caller
+must not expect prior bindings or enables to survive. The 2D renderer also has
+an opt-in persistently mapped instance-upload ring when OpenGL 4.4 or
+`ARB_buffer_storage` is available; transient map/unmap remains the baseline.
 
 OpenGL error flags cannot be restored. Immediately before an isolated render or
 destruction boundary, HeniaUI drains pre-existing host errors, counts them in
@@ -542,11 +557,12 @@ error and resource or upload-slot identifier.
 
 Full texture synchronization never redefines a renderer-visible texture in
 place. Every full change is uploaded into a staged object; the whole call swaps
-objects and revisions only after all candidates succeed. A one-revision
-`updateRegion()` instead uses `glTexSubImage2D` for the exact rectangle. If a
-later upload in the same synchronization call fails, HeniaUI restores the
-region from the store's tight rollback copy before returning. Multiple unseen
-revisions fall back to a full staged object. Immutable one-level storage is used
+objects and revisions only after all candidates succeed. `updateRegions()`
+groups all writes per texture into one logical revision and retains a
+conservative dirty union plus rollback pixels; the corresponding one-revision
+GPU update uses `glTexSubImage2D` for that rectangle. If a later upload in the
+same synchronization call fails, HeniaUI restores the union before returning.
+A genuinely unseen revision gap falls back to a full staged object. Immutable one-level storage is used
 when `glTexStorage2D` is available; otherwise a new mutable object is populated
 with `glTexImage2D`. Retired owned objects are deleted only after commit, while
 borrowed external names are never deleted. OpenGL command ordering and deletion

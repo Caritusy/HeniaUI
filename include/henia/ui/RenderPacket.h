@@ -20,6 +20,9 @@ struct DrawInstance final {
     Rect bounds{};
     Rect uv{};
     Color color{};
+    // Glyph instances store their shared logical run origin here so backends
+    // can snap only bitmap text in framebuffer space. Other kinds retain the
+    // documented radius/thickness meanings.
     float radius = 0.0F;
     float thickness = 0.0F;
     PrimitiveKind kind = PrimitiveKind::SolidRect;

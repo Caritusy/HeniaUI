@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -438,6 +439,50 @@ int main() {
     TextureStore textures;
     FontStore fonts;
     constexpr std::array ranges{UnicodeRange{U' ', U'~'}};
+    const std::size_t texturesBeforeInvalidRequests = textures.size();
+    const std::size_t fontsBeforeInvalidRequests = fonts.size();
+    const std::array extremeSignedHeights{
+        static_cast<std::uint32_t>(std::numeric_limits<int>::max()) - 1U,
+        static_cast<std::uint32_t>(std::numeric_limits<int>::max()),
+    };
+    for (const std::uint32_t pixelHeight : extremeSignedHeights) {
+        if (Win32FontLoader::load(
+                textures,
+                fonts,
+                {
+                    .family = L"Segoe UI",
+                    .pixelHeight = pixelHeight,
+                    .atlasWidth = 1,
+                    .atlasHeight = 1,
+                    .ranges = ranges,
+                }).valid()) {
+            fail("Win32 font loader accepted an unusable INT_MAX-adjacent raster");
+        }
+    }
+    if (Win32FontLoader::load(
+            textures,
+            fonts,
+            {
+                .family = L"Segoe UI",
+                .pixelHeight = static_cast<std::uint32_t>(std::numeric_limits<int>::max()) + 1U,
+                .atlasWidth = 16,
+                .atlasHeight = 16,
+                .ranges = ranges,
+            }).valid()
+        || Win32FontLoader::load(
+            textures,
+            fonts,
+            {
+                .family = L"Segoe UI",
+                .pixelHeight = 16,
+                .atlasWidth = std::numeric_limits<std::uint32_t>::max(),
+                .atlasHeight = std::numeric_limits<std::uint32_t>::max(),
+                .ranges = ranges,
+            }).valid()
+        || textures.size() != texturesBeforeInvalidRequests
+        || fonts.size() != fontsBeforeInvalidRequests) {
+        fail("Win32 font dimension validation mutated stores or accepted overflow");
+    }
     const FontHandle font = Win32FontLoader::load(
         textures,
         fonts,
@@ -452,6 +497,48 @@ int main() {
         || atlas.pixels.empty()) {
         std::cerr << "Win32 font atlas texture is invalid\n";
         return EXIT_FAILURE;
+    }
+
+    TextureStore rollbackTextures;
+    const std::array<std::byte, 1> seedPixel{};
+    const TextureHandle seedAtlas = rollbackTextures.create(
+        TextureFormat::Alpha8, 1, 1, 1, seedPixel);
+    FontStore saturatedFonts;
+    const auto saturatedDefinition = [&] {
+        return FontDefinition{
+            .atlas = seedAtlas,
+            .pixelSize = 10.0F,
+            .ascent = 8.0F,
+            .descent = 2.0F,
+            .glyphs = {{
+                U'A',
+                {{0.0F, 0.0F}, {1.0F, 1.0F}},
+                {1.0F, 1.0F},
+                {},
+                1.0F,
+            }},
+        };
+    };
+    for (std::uint32_t index = 0; index < FontHandle::kMaxValue; ++index) {
+        if (!saturatedFonts.add(saturatedDefinition()).valid()) {
+            fail("FontStore saturation fixture failed");
+        }
+    }
+    const std::size_t rollbackTextureCount = rollbackTextures.size();
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        if (Win32FontLoader::load(
+                rollbackTextures,
+                saturatedFonts,
+                {
+                    .family = L"Segoe UI",
+                    .pixelHeight = 16,
+                    .atlasWidth = 64,
+                    .atlasHeight = 64,
+                    .ranges = ranges,
+                }).valid()
+            || rollbackTextures.size() != rollbackTextureCount) {
+            fail("Repeated Win32 font creation failure leaked or consumed its atlas slot");
+        }
     }
 
     Win32FontScaleCache scaleCache(
@@ -480,6 +567,22 @@ int main() {
         std::cerr << "Win32 scaled font variants churned or exposed physical metrics\n";
         return EXIT_FAILURE;
     }
+    const FontHandle text13 = scaleCache.selectTextSize(13.0F, 1.25F);
+    const FontHandle text13SameBucket = scaleCache.selectTextSize(13.1F, 1.25F);
+    constexpr std::array rasterSizes{12.0F, 14.0F, 16.0F, 22.0F};
+    if (!text13.valid() || text13SameBucket != text13
+        || std::abs(fonts.find(text13)->pixelSize() - 13.0F) > 0.0001F
+        || !scaleCache.prewarmTextSizes(rasterSizes, 1.25F)) {
+        fail("Win32 physical-size font buckets were not retained or prewarmed");
+    }
+    TextRunCache rasterCache(fonts);
+    TextPainter rasterPainter(rasterCache);
+    rasterPainter.setFontRasterResolver(&scaleCache);
+    const TextLayoutResult* rasterLayout = rasterPainter.layout(font100, 13.0F, "A");
+    if (rasterLayout == nullptr || rasterLayout->glyphs.empty()
+        || rasterLayout->glyphs.front().font != text13) {
+        fail("TextPainter did not select the final-size Win32 raster face");
+    }
 
     DynamicGlyphAtlas dynamic(textures, fonts, font, {
         .pageWidth = 64,
@@ -496,6 +599,39 @@ int main() {
         || dynamic.statistics().glyphsAdded != 1) {
         std::cerr << "Win32 dynamic glyph atlas growth failed\n";
         return EXIT_FAILURE;
+    }
+
+    const std::size_t fontsBeforeFailedAsyncInitialization = fonts.size();
+    const std::size_t texturesBeforeFailedAsyncInitialization = textures.size();
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        Win32AsyncFontSet failedInitialization(textures, fonts, {
+            .families = {
+                .primary = L"Segoe UI",
+                .simplifiedChinese = {},
+                .traditionalChinese = {},
+                .japanese = {},
+                .korean = {},
+                .symbols = {},
+                .emoji = {},
+            },
+            .logicalPixelHeight = 16.0F,
+            .initialAtlasWidth = 64,
+            .initialAtlasHeight = 64,
+            .dynamicAtlas = {
+                .pageWidth = 64,
+                .pageHeight = 64,
+                .padding = 1,
+                .maximumPages = 0,
+            },
+            .preallocatedPagesPerFace = 1,
+        });
+        if (failedInitialization.valid()) {
+            fail("Win32 asynchronous font accepted an impossible preallocation");
+        }
+    }
+    if (fonts.size() != fontsBeforeFailedAsyncInitialization
+        || textures.size() != texturesBeforeFailedAsyncInitialization) {
+        fail("Win32 asynchronous partial initialization leaked store resources");
     }
 
     Win32AsyncFontSet asyncFonts(textures, fonts, {
@@ -553,6 +689,162 @@ int main() {
         || asyncStatistics.readyResults != 0) {
         std::cerr << "Win32 asynchronous font publication statistics are invalid\n";
         return EXIT_FAILURE;
+    }
+    const std::size_t borrowedFontCount = fonts.size();
+    const std::size_t borrowedTextureCount = textures.size();
+    if (!asyncFonts.releaseResources()
+        || fonts.find(font) == nullptr
+        || fonts.size() != borrowedFontCount
+        || textures.size() + 1U != borrowedTextureCount) {
+        fail("Win32 async borrowed-primary cleanup did not retire only its dynamic page");
+    }
+
+    const auto drainAsync = [](Win32AsyncFontSet& set) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline && !set.idle()) {
+            static_cast<void>(set.commitReady(8));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        static_cast<void>(set.commitReady(8));
+        return set.idle();
+    };
+    const auto verifyRetry = [&](char32_t codepoint, bool failRasterization) {
+        Win32AsyncFontSet retrying(textures, fonts, {
+            .families = {
+                .primary = L"Segoe UI",
+                .simplifiedChinese = {},
+                .traditionalChinese = {},
+                .japanese = {},
+                .korean = {},
+                .symbols = {},
+                .emoji = {},
+            },
+            .primaryFont = font,
+            .logicalPixelHeight = 24.0F,
+            .dynamicAtlas = {
+                .pageWidth = 64,
+                .pageHeight = 64,
+                .padding = 1,
+                .maximumPages = 2,
+            },
+            .preallocatedPagesPerFace = 1,
+            .requestQueueCapacity = 8,
+            .resultQueueCapacity = 4,
+            .injectedRasterizationFailures = failRasterization ? 1U : 0U,
+            .injectedCommitFailures = failRasterization ? 0U : 1U,
+        });
+        const std::array requested{codepoint};
+        if (!retrying.valid() || retrying.request(requested) != 1 || !drainAsync(retrying)
+            || fonts.find(font)->glyph(codepoint) != nullptr
+            || retrying.request(requested) != 1 || !drainAsync(retrying)
+            || fonts.find(font)->glyph(codepoint) == nullptr) {
+            return false;
+        }
+        const Win32AsyncFontStatistics retryStatistics = retrying.statistics();
+        return retryStatistics.retryableFailures == 1
+            && retryStatistics.retriesQueued == 1
+            && retryStatistics.bakeJobsQueued == 2
+            && retrying.releaseResources()
+            && fonts.find(font)->glyph(codepoint) == nullptr;
+    };
+    if (!verifyRetry(U'\u0100', true) || !verifyRetry(U'\u0102', false)) {
+        fail("Win32 async transient raster/commit failure was permanently blacklisted");
+    }
+
+    const std::size_t chainFontCount = fonts.size();
+    const std::size_t chainTextureCount = textures.size();
+    {
+        Win32AsyncFontSet chainAware(textures, fonts, {
+            .families = {
+                .primary = L"Segoe UI",
+                .simplifiedChinese = L"Microsoft YaHei UI",
+                .traditionalChinese = L"Microsoft JhengHei UI",
+                .japanese = L"Yu Gothic UI",
+                .korean = L"Malgun Gothic",
+                .symbols = {},
+                .emoji = {},
+            },
+            .primaryFont = font125,
+            .primaryRasterResolver = &scaleCache,
+            .logicalPixelHeight = 18.0F,
+            .dpiScale = 1.25F,
+            .initialAtlasWidth = 256,
+            .initialAtlasHeight = 128,
+            .dynamicAtlas = {
+                .pageWidth = 64,
+                .pageHeight = 64,
+                .padding = 1,
+                .maximumPages = 2,
+            },
+            .preallocatedPagesPerFace = 1,
+            .requestQueueCapacity = 32,
+            .resultQueueCapacity = 8,
+            .maximumRasterSizeBuckets = 2,
+        });
+        constexpr std::array han{U'\u6F22'};
+        const auto simplified = chainAware.fontChain(Win32FontLocale::SimplifiedChinese);
+        const auto traditional = chainAware.fontChain(Win32FontLocale::TraditionalChinese);
+        std::vector<FontHandle> resolvedSimplified;
+        std::vector<FontHandle> resolvedTraditional;
+        for (FontHandle handle : simplified) {
+            resolvedSimplified.push_back(chainAware.resolveFont(handle, 13.0F));
+        }
+        for (FontHandle handle : traditional) {
+            resolvedTraditional.push_back(chainAware.resolveFont(handle, 13.0F));
+        }
+        const std::size_t firstHanRequest = chainAware.request(resolvedSimplified, han);
+        const std::size_t duplicateHanRequest = chainAware.request(resolvedSimplified, han);
+        const bool firstHanSettled = drainAsync(chainAware);
+        if (!chainAware.valid() || firstHanRequest != 1
+            || duplicateHanRequest != 0 || !firstHanSettled) {
+            const Win32AsyncFontStatistics failed = chainAware.statistics();
+            std::cerr << "valid=" << chainAware.valid()
+                      << " first=" << firstHanRequest
+                      << " duplicate=" << duplicateHanRequest
+                      << " settled=" << firstHanSettled
+                      << " faces=" << failed.faces
+                      << " jobs=" << failed.bakeJobsQueued
+                      << " pending=" << failed.pendingBakeJobs
+                      << " ready=" << failed.readyResults << '\n';
+            fail("Win32 async chain-aware preferred-face request failed");
+        }
+        const Win32AsyncFontStatistics simplifiedStatistics = chainAware.statistics();
+        if (simplifiedStatistics.bakeJobsQueued != 1
+            || simplifiedStatistics.deduplicatedInFlight != 1
+            || simplifiedStatistics.avoidedFanoutJobs < 3
+            || simplifiedStatistics.rasterSizeBuckets != 2
+            || simplifiedStatistics.rasterVariants < 4
+            || resolvedSimplified.size() < 2
+            || resolvedSimplified.front() != text13
+            || std::abs(fonts.find(resolvedSimplified[1])->pixelSize() - 13.0F) > 0.0001F
+            || fonts.find(resolvedSimplified[1])->glyph(han.front()) == nullptr
+            || chainAware.resolveFont(simplified[1], 14.0F) != resolvedSimplified[1]
+            || chainAware.statistics().rasterVariantLimitFallbacks == 0
+            || chainAware.request(resolvedTraditional, han) != 1
+            || !drainAsync(chainAware)
+            || chainAware.statistics().bakeJobsQueued != 2) {
+            const Win32AsyncFontStatistics failed = chainAware.statistics();
+            std::cerr << "jobs=" << failed.bakeJobsQueued
+                      << " inflightDedup=" << failed.deduplicatedInFlight
+                      << " avoided=" << failed.avoidedFanoutJobs
+                      << " buckets=" << failed.rasterSizeBuckets
+                      << " variants=" << failed.rasterVariants
+                      << " limit=" << failed.rasterVariantLimitFallbacks
+                      << " firstIs13=" << (!resolvedSimplified.empty()
+                          && resolvedSimplified.front() == text13)
+                      << " fallbackSize=" << (resolvedSimplified.size() > 1
+                          ? fonts.find(resolvedSimplified[1])->pixelSize() : 0.0F)
+                      << " fallbackGlyph=" << (resolvedSimplified.size() > 1
+                          && fonts.find(resolvedSimplified[1])->glyph(han.front()) != nullptr)
+                      << '\n';
+            fail("Win32 async Han request still broadcast to every CJK face");
+        }
+        if (!chainAware.releaseResources()) {
+            fail("Win32 async chain-aware resource release failed");
+        }
+    }
+    if (fonts.size() != chainFontCount || textures.size() != chainTextureCount) {
+        fail("Win32 async internally owned fonts or textures were not reclaimed");
     }
 
     TextRunCache cache(fonts);

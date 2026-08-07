@@ -3,6 +3,7 @@
 #include "henia/ui/resource/TextureStore.h"
 #include "henia/ui/text/DynamicGlyphAtlas.h"
 #include "henia/ui/text/FontStore.h"
+#include "henia/ui/text/TextLayout.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -35,12 +36,14 @@ struct Win32ScaledFontRequest final {
     std::uint32_t atlasWidth = 1024;
     std::uint32_t atlasHeight = 1024;
     std::span<const UnicodeRange> ranges{};
+    std::size_t maximumVariants = 32;
 };
 
 struct Win32FontScaleCacheStatistics final {
     std::size_t variants = 0;
     std::uint64_t cacheHits = 0;
     std::uint64_t cacheMisses = 0;
+    std::uint64_t variantLimitFallbacks = 0;
 };
 
 class Win32FontLoader final {
@@ -59,7 +62,7 @@ public:
 
 // Retains one physical raster per required pixel height. A window moving back
 // to a previously visited monitor reuses its stable FontHandle and atlas.
-class Win32FontScaleCache final {
+class Win32FontScaleCache final : public TextFontRasterResolver {
 public:
     Win32FontScaleCache(
         TextureStore& textures,
@@ -68,11 +71,21 @@ public:
 
     [[nodiscard]] FontHandle select(float dpiScale);
     [[nodiscard]] FontHandle selectForDpi(std::uint32_t dpi);
+    [[nodiscard]] FontHandle selectTextSize(float logicalPixelHeight, float dpiScale);
+    [[nodiscard]] FontHandle resolveFont(
+        FontHandle font,
+        float logicalPixelSize) override;
+    // Prewarms known UI typography sizes so later resolver calls stay on the
+    // retained fast path without GDI work during an interactive frame.
+    [[nodiscard]] bool prewarmTextSizes(
+        std::span<const float> logicalPixelSizes,
+        float dpiScale);
     [[nodiscard]] Win32FontScaleCacheStatistics statistics() const noexcept;
 
 private:
     struct Variant final {
         std::uint32_t pixelHeight = 0;
+        float logicalPixelHeight = 0.0F;
         FontHandle font{};
     };
 
@@ -84,8 +97,11 @@ private:
     std::uint32_t mAtlasHeight = 0;
     std::vector<UnicodeRange> mRanges;
     std::vector<Variant> mVariants;
+    std::size_t mMaximumVariants = 32;
     std::uint64_t mCacheHits = 0;
     std::uint64_t mCacheMisses = 0;
+    std::uint64_t mVariantLimitFallbacks = 0;
+    float mDpiScale = 1.0F;
 };
 
 } // namespace henia::ui

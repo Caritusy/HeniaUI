@@ -710,10 +710,15 @@ int main() {
     glPixelStorei(GL_UNPACK_ALIGNMENT, 8);
     glPixelStorei(kUnpackRowLength, 17);
     const TextureView atlasView = textures.view(TextureHandle{1});
-    const std::array<std::byte, 1> atlasPatch{atlasView.pixels[5]};
-    if (!textures.updateRegion(atlasView.handle, {1, 1, 1, 1}, 1, atlasPatch)
+    const std::array<std::byte, 1> firstAtlasPatch{atlasView.pixels[5]};
+    const std::array<std::byte, 1> secondAtlasPatch{atlasView.pixels[10]};
+    const std::array atlasUpdates{
+        TextureRegionUpdate{atlasView.handle, {1, 1, 1, 1}, 1, firstAtlasPatch},
+        TextureRegionUpdate{atlasView.handle, {2, 2, 1, 1}, 1, secondAtlasPatch},
+    };
+    if (!textures.updateRegions(atlasUpdates)
         || !renderer.synchronizeTextures(textures)) {
-        fail("OpenGL partial texture synchronization failed with a host unpack buffer");
+        fail("OpenGL batched partial texture synchronization failed with a host unpack buffer");
     }
     GLint restoredUnpackBuffer = 0;
     GLint restoredUnpackAlignment = 0;
@@ -953,9 +958,28 @@ int main() {
     const OpenGlRenderStatistics statistics = renderer.statistics();
     if (statistics.successfulFrames != 100 || statistics.frameAttempts != 102
         || statistics.instanceUploads != 67
+        || statistics.generatedVertices != statistics.submittedInstances * 4U
+        || statistics.attributeFormatConfigurations != 1
+        || (statistics.baseInstanceActive
+            ? statistics.baseInstanceDraws != statistics.drawCalls
+            : statistics.baseInstanceDraws != 0)
+        || (statistics.baseInstanceActive
+            && statistics.attributeOffsetUpdates > statistics.instanceUploads + 1U)
+        || statistics.instanceMapOperations != statistics.instanceUploads
+        || statistics.instanceUnmapOperations != statistics.instanceUploads
+        || statistics.persistentInstanceCopies != 0
+        || statistics.persistentUploadActive
+        || statistics.textureAlphaModeUploads > statistics.texturedBatches
+        || statistics.textureBindingChanges > statistics.texturedBatches * 8U
+        || statistics.stateCaptures == 0
+        || statistics.stateRestorations == 0
+        || statistics.dedicatedContextFrames != 0
+        || statistics.packetValidationWalks == 0
+        || statistics.packetValidationCacheHits < 32
+        || statistics.validatedInstances < packet.instances().size()
         || statistics.textureUploads != 4
         || statistics.fullTextureUploads != 3 || statistics.partialTextureUploads != 1
-        || statistics.uploadedTextureBytes != 97 || statistics.gpuTextureBytes != 80
+        || statistics.uploadedTextureBytes != 100 || statistics.gpuTextureBytes != 80
         || statistics.uploadFenceFailures != 0 || statistics.rejectedFrames != 2
         || statistics.invalidInputFrames != 1 || statistics.capacityRejectedFrames != 0
         || statistics.wrongContextCalls != 3 || statistics.ignoredHostErrors == 0
@@ -979,6 +1003,125 @@ int main() {
                   << " profileSamples=" << statistics.profile.cumulative.samples
                   << '\n';
         fail("OpenGL multi-slot stress statistics are incorrect");
+    }
+
+    Frame policyFrame;
+    policyFrame.begin().fillRect(
+        {{4.0F, 4.0F}, {20.0F, 20.0F}},
+        {0.2F, 0.4F, 0.8F, 1.0F});
+    const RenderPacket policyPacket = policyFrame.finish();
+
+    glViewport(0, 0, henia::test::kVisualWidth, henia::test::kVisualHeight);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(kRasterizerDiscard);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (!renderer.render(
+            policyPacket,
+            henia::test::kVisualWidth,
+            henia::test::kVisualHeight)) {
+        fail("OpenGL preserve-policy reference could not render");
+    }
+    glFinish();
+    const std::vector<henia::test::Rgba8> policyReferencePixels = readCurrentPixels();
+
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(kRasterizerDiscard);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(0, 0, 0, 0);
+    glEnable(kRasterizerDiscard);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_STENCIL_TEST);
+
+    OpenGlRenderer dedicatedRenderer;
+    if (!dedicatedRenderer.initialize(
+            4,
+            1,
+            1,
+            OpenGlUiStatePolicy::DedicatedContext)
+        || !dedicatedRenderer.render(
+            policyPacket,
+            henia::test::kVisualWidth,
+            henia::test::kVisualHeight)) {
+        fail("OpenGL dedicated-context policy could not render");
+    }
+    glFinish();
+    const std::vector<henia::test::Rgba8> dedicatedPixels = readCurrentPixels();
+    const bool samePolicyPixels = dedicatedPixels.size() == policyReferencePixels.size()
+        && std::equal(
+            dedicatedPixels.begin(),
+            dedicatedPixels.end(),
+            policyReferencePixels.begin(),
+            [](const henia::test::Rgba8& left, const henia::test::Rgba8& right) noexcept {
+                return left.red == right.red && left.green == right.green
+                    && left.blue == right.blue && left.alpha == right.alpha;
+            });
+    const OpenGlRenderStatistics uiDedicatedStatistics = dedicatedRenderer.statistics();
+    if (uiDedicatedStatistics.dedicatedContextFrames != 1
+        || uiDedicatedStatistics.stateCaptures != 0
+        || uiDedicatedStatistics.stateRestorations != 0
+        || uiDedicatedStatistics.generatedVertices != 4
+        || !samePolicyPixels
+        || !dedicatedRenderer.shutdown()) {
+        fail("OpenGL dedicated-context policy did not establish its complete pipeline state");
+    }
+
+    OpenGlRenderer persistentRenderer;
+    if (persistentRenderer.initialize(
+            4,
+            1,
+            2,
+            OpenGlUiStatePolicy::Preserve,
+            OpenGlUploadStrategy::PersistentMap)) {
+        if (!persistentRenderer.render(
+                policyPacket,
+                henia::test::kVisualWidth,
+                henia::test::kVisualHeight)
+            || !persistentRenderer.render(
+                policyPacket,
+                henia::test::kVisualWidth,
+                henia::test::kVisualHeight)) {
+            fail("OpenGL persistent upload strategy could not render");
+        }
+        const OpenGlRenderStatistics persistentStatistics = persistentRenderer.statistics();
+        if (!persistentStatistics.persistentUploadActive
+            || persistentStatistics.instanceMapOperations != 2
+            || persistentStatistics.instanceUnmapOperations != 0
+            || persistentStatistics.persistentInstanceCopies != 1
+            || persistentStatistics.instanceUploads != 1
+            || !persistentRenderer.shutdown()
+            || persistentRenderer.statistics().instanceUnmapOperations != 2) {
+            fail("OpenGL persistent upload strategy did not keep its slots mapped");
+        }
+    } else if (persistentRenderer.lastError().find("Persistent") == std::string_view::npos) {
+        fail("OpenGL persistent upload strategy failed without a capability diagnostic");
+    }
+
+    TextureStore historyTextures;
+    const std::array<std::byte, 16> historyPixels{};
+    const TextureHandle historyTexture = historyTextures.create(
+        TextureFormat::Alpha8, 4, 4, 4, historyPixels);
+    OpenGlRenderer historyRenderer;
+    const std::array<std::byte, 1> historyPatch{std::byte{0x7F}};
+    if (!historyTexture.valid() || !historyRenderer.initialize(1, 1, 1)
+        || !historyRenderer.synchronizeTextures(historyTextures)
+        || !historyTextures.updateRegion(historyTexture, {0, 0, 1, 1}, 1, historyPatch)
+        || !historyTextures.updateRegion(historyTexture, {3, 3, 1, 1}, 1, historyPatch)
+        || !historyRenderer.synchronizeTextures(historyTextures)) {
+        fail("OpenGL dirty-history fallback fixture failed");
+    }
+    const OpenGlRenderStatistics historyStatistics = historyRenderer.statistics();
+    if (historyStatistics.fullTextureUploads != 2
+        || historyStatistics.partialTextureUploads != 0
+        || historyStatistics.textureDirtyHistoryFallbacks != 1
+        || historyStatistics.uploadedTextureBytes != 32
+        || !historyRenderer.shutdown()) {
+        fail("OpenGL did not report a deterministic full upload for lost dirty history");
     }
 
     using namespace henia::gfx;
@@ -1123,6 +1266,8 @@ int main() {
     const OpenGlGfxStatistics gfxStatistics = gfx.statistics();
     if (gfxStatistics.invalidInputFrames != 1 || gfxStatistics.capacityRejectedFrames != 0
         || gfxStatistics.drawCalls != 103 || gfxStatistics.fullInstanceUploads != 1
+        || gfxStatistics.generatedVertices != gfxStatistics.submittedInstances * 48U
+        || gfxStatistics.submittedIndices != gfxStatistics.submittedInstances * 72U
         || gfxStatistics.partialInstanceUploads != 2
         || gfxStatistics.uploadedInstanceBytes != 514U * sizeof(BoxInstance)
         || gfxStatistics.wrongContextCalls != 2 || gfxStatistics.ignoredHostErrors == 0

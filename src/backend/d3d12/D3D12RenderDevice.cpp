@@ -31,6 +31,17 @@ static_assert(std::is_standard_layout_v<BoxInstance>);
 static_assert(sizeof(BoxInstance) == 64);
 
 constexpr std::size_t kDepthPipelineCount = 15;
+constexpr auto kEdgeIndices = [] {
+    std::array<std::uint16_t, 72> result{};
+    constexpr std::array<std::uint16_t, 6> pattern{0, 1, 2, 2, 3, 0};
+    for (std::uint16_t edge = 0; edge < 12; ++edge) {
+        for (std::size_t index = 0; index < pattern.size(); ++index) {
+            result[static_cast<std::size_t>(edge) * pattern.size() + index] =
+                static_cast<std::uint16_t>(edge * 4U + pattern[index]);
+        }
+    }
+    return result;
+}();
 
 struct FrameConstants final {
     std::array<float, 16> viewProjection{};
@@ -220,7 +231,7 @@ struct D3D12RenderDevice::Implementation final {
         ComPtr<ID3D12Resource> gpuLocalInstances;
         ComPtr<ID3D12Resource> indirectArguments;
         std::byte* mapped = nullptr;
-        D3D12_DRAW_ARGUMENTS* mappedIndirectArguments = nullptr;
+        D3D12_DRAW_INDEXED_ARGUMENTS* mappedIndirectArguments = nullptr;
         std::uint64_t directUploadedIdentity = 0;
         std::uint64_t directUploadedRevision = 0;
         std::uint64_t gpuLocalUploadedIdentity = 0;
@@ -230,6 +241,7 @@ struct D3D12RenderDevice::Implementation final {
     ComPtr<ID3D12Device> ownerDevice;
     ComPtr<ID3D12RootSignature> rootSignature;
     ComPtr<ID3D12CommandSignature> drawCommandSignature;
+    ComPtr<ID3D12Resource> indexBuffer;
     std::array<ComPtr<ID3D12PipelineState>, kDepthPipelineCount> pipelines;
     std::vector<Submission> submissions;
     D3D12GfxConfiguration configuration{};
@@ -421,10 +433,10 @@ bool D3D12RenderDevice::Implementation::initialize(
         return false;
     }
     const D3D12_INDIRECT_ARGUMENT_DESC drawArgument{
-        .Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW,
+        .Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED,
     };
     const D3D12_COMMAND_SIGNATURE_DESC commandSignatureDescription{
-        .ByteStride = sizeof(D3D12_DRAW_ARGUMENTS),
+        .ByteStride = sizeof(D3D12_DRAW_INDEXED_ARGUMENTS),
         .NumArgumentDescs = 1,
         .pArgumentDescs = &drawArgument,
     };
@@ -453,7 +465,28 @@ bool D3D12RenderDevice::Implementation::initialize(
     const D3D12_HEAP_PROPERTIES uploadHeap = heapProperties(D3D12_HEAP_TYPE_UPLOAD);
     const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
     const D3D12_RESOURCE_DESC buffer = bufferDescription(bufferBytes);
-    const D3D12_RESOURCE_DESC indirectBuffer = bufferDescription(sizeof(D3D12_DRAW_ARGUMENTS));
+    const D3D12_RESOURCE_DESC indirectBuffer = bufferDescription(sizeof(D3D12_DRAW_INDEXED_ARGUMENTS));
+    const D3D12_RESOURCE_DESC indexDescription = bufferDescription(sizeof(kEdgeIndices));
+    if (FAILED(device.CreateCommittedResource(
+            &uploadHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &indexDescription,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(&indexBuffer)))) {
+        error = "D3D12 failed to allocate the gfx edge index buffer";
+        shutdown();
+        return false;
+    }
+    void* mappedIndices = nullptr;
+    const D3D12_RANGE noIndexRead{0, 0};
+    if (FAILED(indexBuffer->Map(0, &noIndexRead, &mappedIndices)) || mappedIndices == nullptr) {
+        error = "D3D12 failed to map the gfx edge index buffer";
+        shutdown();
+        return false;
+    }
+    std::memcpy(mappedIndices, kEdgeIndices.data(), sizeof(kEdgeIndices));
+    indexBuffer->Unmap(0, nullptr);
     for (Submission& submission : submissions) {
         if (FAILED(device.CreateCommittedResource(
                 &uploadHeap,
@@ -494,7 +527,7 @@ bool D3D12RenderDevice::Implementation::initialize(
             return false;
         }
         submission.mappedIndirectArguments =
-            static_cast<D3D12_DRAW_ARGUMENTS*>(mappedIndirectArguments);
+            static_cast<D3D12_DRAW_INDEXED_ARGUMENTS*>(mappedIndirectArguments);
         if (gpuLocalResourcesEnabled
             && FAILED(device.CreateCommittedResource(
                 &defaultHeap,
@@ -531,7 +564,7 @@ bool D3D12RenderDevice::Implementation::createPipeline(
         {"INSTANCE_MAXIMUM_HUE", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
         {"INSTANCE_COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
         {"INSTANCE_EFFECTS", 0, DXGI_FORMAT_R32_UINT, 0, 48, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
-        {"INSTANCE_MOTION_DELTA", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 52, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
+        {"INSTANCE_RESERVED", 0, DXGI_FORMAT_R32G32B32_UINT, 0, 52, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1},
     }};
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
     description.pRootSignature = rootSignature.Get();
@@ -797,9 +830,10 @@ bool D3D12RenderDevice::Implementation::record(
 
     if (cpuCulling) {
         *submission.mappedIndirectArguments = {
-            .VertexCountPerInstance = 72,
+            .IndexCountPerInstance = 72,
             .InstanceCount = static_cast<UINT>(submittedCount),
-            .StartVertexLocation = 0,
+            .StartIndexLocation = 0,
+            .BaseVertexLocation = 0,
             .StartInstanceLocation = 0,
         };
         ++statistics.indirectArgumentUpdates;
@@ -847,6 +881,12 @@ bool D3D12RenderDevice::Implementation::record(
         static_cast<UINT>(sizeof(BoxInstance)),
     };
     commandList.IASetVertexBuffers(0, 1, &bufferView);
+    const D3D12_INDEX_BUFFER_VIEW indexView{
+        .BufferLocation = indexBuffer->GetGPUVirtualAddress(),
+        .SizeInBytes = static_cast<UINT>(sizeof(kEdgeIndices)),
+        .Format = DXGI_FORMAT_R16_UINT,
+    };
+    commandList.IASetIndexBuffer(&indexView);
     ++statistics.viewUpdates;
     if (submittedCount != 0) {
         if (cpuCulling) {
@@ -859,10 +899,17 @@ bool D3D12RenderDevice::Implementation::record(
                 0);
             ++statistics.indirectDrawCalls;
         } else {
-            commandList.DrawInstanced(72, static_cast<UINT>(submittedCount), 0, 0);
+            commandList.DrawIndexedInstanced(
+                72,
+                static_cast<UINT>(submittedCount),
+                0,
+                0,
+                0);
         }
         ++statistics.drawCalls;
         statistics.submittedInstances += submittedCount;
+        statistics.generatedVertices += submittedCount * 48U;
+        statistics.submittedIndices += submittedCount * 72U;
         if (!useGpuLocal) statistics.uploadHeapReadBytes += submittedBytes;
     }
     const std::uint64_t cpuDrawSubmitNanoseconds = elapsedNanoseconds(submitStarted);
@@ -987,6 +1034,7 @@ void D3D12RenderDevice::Implementation::shutdown() noexcept {
     submissions.clear();
     for (ComPtr<ID3D12PipelineState>& pipeline : pipelines) pipeline.Reset();
     drawCommandSignature.Reset();
+    indexBuffer.Reset();
     rootSignature.Reset();
     ownerDevice.Reset();
     instanceBufferBytes = 0;

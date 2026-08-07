@@ -85,7 +85,7 @@ void testMixedUiUsesOneBatch() {
         const float y = 30.0F + static_cast<float>(index / 64) * 12.0F;
         glyphs[index] = {{{x, y}, {x + 5.0F, y + 10.0F}}, {{0.0F, 0.0F}, {0.1F, 0.1F}}};
     }
-    canvas.glyphs(TextureHandle{1}, glyphs, {0.92F, 0.96F, 1.0F, 1.0F});
+    canvas.glyphs(TextureHandle{1}, {-0.25F, 0.5F}, glyphs, {0.92F, 0.96F, 1.0F, 1.0F});
     canvas.fillRect({{20.0F, 270.0F}, {200.0F, 290.0F}}, {0.20F, 0.75F, 0.55F, 1.0F}, 5.0F);
 
     const RenderPacket packet = frame.finish();
@@ -93,6 +93,12 @@ void testMixedUiUsesOneBatch() {
     require(packet.instances().size() == 1034, "unexpected tight-geometry instance count");
     require(packet.batches().size() == 1, "shape and glyph work did not merge into one UI batch");
     require(packet.batches().front().textureCount == 1, "font atlas was not assigned to the batch texture table");
+    const auto glyph = std::find_if(
+        packet.instances().begin(), packet.instances().end(),
+        [](const DrawInstance& instance) { return instance.kind == PrimitiveKind::Glyph; });
+    require(glyph != packet.instances().end()
+            && glyph->radius == -0.25F && glyph->thickness == 0.5F,
+        "glyph run origin was not retained for physical-pixel phase snapping");
 }
 
 void testClipAndBlendPreserveOrdering() {
@@ -858,6 +864,92 @@ void testUtf8Validation() {
     require(!invalid.valid && invalid.bytes == 1, "overlong UTF-8 was accepted");
 }
 
+void testFontDefinitionValidationAndGlyphIdIndex() {
+    TextureStore textures;
+    const std::array<std::byte, 16> pixels{};
+    const TextureHandle atlas = textures.create(TextureFormat::Alpha8, 4, 4, 4, pixels);
+    require(atlas.valid(), "font validation atlas creation failed");
+
+    const GlyphMetrics validGlyph{
+        .codepoint = U'A',
+        .uv = {{0.0F, 0.0F}, {0.25F, 0.25F}},
+        .size = {5.0F, 8.0F},
+        .advance = 6.0F,
+        .glyphId = 1,
+    };
+    const auto definition = [&]() {
+        return FontDefinition{
+            .atlas = atlas,
+            .pixelSize = 10.0F,
+            .ascent = 8.0F,
+            .descent = 2.0F,
+            .glyphs = {validGlyph},
+        };
+    };
+    FontStore invalidFonts;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float infinity = std::numeric_limits<float>::infinity();
+    FontDefinition invalid = definition();
+    invalid.pixelSize = nan;
+    require(!invalidFonts.add(std::move(invalid)).valid(), "NaN font pixel size was accepted");
+    invalid = definition();
+    invalid.ascent = infinity;
+    require(!invalidFonts.add(std::move(invalid)).valid(), "non-finite face metrics were accepted");
+    invalid = definition();
+    invalid.glyphs.push_back(validGlyph);
+    invalid.glyphs.back().codepoint = 0xD800U;
+    require(!invalidFonts.add(std::move(invalid)).valid(), "invalid Unicode glyph was accepted");
+    invalid = definition();
+    invalid.glyphs.front().size.x = -1.0F;
+    require(!invalidFonts.add(std::move(invalid)).valid(), "negative glyph size was accepted");
+    invalid = definition();
+    invalid.glyphs.front().uv.max.x = nan;
+    require(!invalidFonts.add(std::move(invalid)).valid(), "non-finite glyph UV was accepted");
+    invalid = definition();
+    invalid.glyphs.front().size = {};
+    invalid.glyphs.front().uv.min.y = infinity;
+    require(!invalidFonts.add(std::move(invalid)).valid(),
+        "advance-only glyph bypassed malformed UV validation");
+    invalid = definition();
+    invalid.glyphs.front().advance = -1.0F;
+    require(!invalidFonts.add(std::move(invalid)).valid(), "negative glyph advance was accepted");
+    invalid = definition();
+    invalid.kerning = {{U'A', U'V', infinity}};
+    require(!invalidFonts.add(std::move(invalid)).valid(), "invalid kerning was accepted");
+    require(invalidFonts.size() == 0, "invalid font definitions mutated FontStore");
+
+    constexpr std::size_t residentGlyphCount = 20000;
+    FontDefinition indexedDefinition = definition();
+    indexedDefinition.glyphs.clear();
+    indexedDefinition.glyphs.reserve(residentGlyphCount);
+    for (std::size_t index = 0; index < residentGlyphCount; ++index) {
+        GlyphMetrics glyph = validGlyph;
+        glyph.codepoint = static_cast<char32_t>(0x1000U + index);
+        glyph.glyphId = static_cast<std::uint32_t>(index + 1U);
+        indexedDefinition.glyphs.push_back(glyph);
+    }
+    FontStore indexedFonts;
+    const FontHandle indexed = indexedFonts.add(std::move(indexedDefinition));
+    const FontFace* face = indexedFonts.find(indexed);
+    require(face != nullptr && face->glyphById(1)->codepoint == 0x1000U
+            && face->glyphById(10000)->codepoint == 0x1000U + 9999U
+            && face->glyphById(20000)->codepoint == 0x1000U + 19999U,
+        "glyph-ID index did not resolve a large resident set");
+    GlyphMetrics replacement = *face->glyph(static_cast<char32_t>(0x1000U));
+    replacement.glyphId = 30000U;
+    require(indexedFonts.addGlyphs(indexed, std::span<const GlyphMetrics>(&replacement, 1)),
+        "glyph-ID replacement failed");
+    face = indexedFonts.find(indexed);
+    require(face != nullptr && face->glyphById(1) == nullptr
+            && face->glyphById(30000U)->codepoint == 0x1000U,
+        "glyph-ID replacement left a stale mapping");
+    GlyphMetrics duplicate = *face->glyph(static_cast<char32_t>(0x1001U));
+    duplicate.glyphId = 30000U;
+    require(indexedFonts.addGlyphs(indexed, std::span<const GlyphMetrics>(&duplicate, 1))
+            && indexedFonts.find(indexed)->glyphById(30000U)->codepoint == 0x1000U,
+        "duplicate glyph-ID lookup did not choose the smallest codepoint");
+}
+
 void testTextRunsAreCachedAndBatched() {
     TextureStore textures;
     const std::array<std::byte, 16> pixels{};
@@ -1105,6 +1197,112 @@ void testFallbackShapingAndDynamicGlyphPages() {
         "font revision did not invalidate fallback layout for a new atlas glyph");
 }
 
+void testTransactionalGlyphAndRegionBatches() {
+    TextureStore regionTextures;
+    const std::array<std::byte, 64> emptyPixels{};
+    const TextureHandle regionTexture = regionTextures.create(
+        TextureFormat::Alpha8, 8, 8, 8, emptyPixels);
+    const std::array<std::byte, 4> firstPixels{
+        std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    const std::array<std::byte, 4> secondPixels{
+        std::byte{5}, std::byte{6}, std::byte{7}, std::byte{8}};
+    const std::array regionUpdates{
+        TextureRegionUpdate{regionTexture, {1, 1, 2, 2}, 2, firstPixels},
+        TextureRegionUpdate{regionTexture, {4, 1, 2, 2}, 2, secondPixels},
+    };
+    PreparedTextureUpdate prepared = regionTextures.prepareRegionUpdates(regionUpdates);
+    require(prepared.valid() && regionTextures.view(regionTexture).revision == 1,
+        "prepared texture regions mutated the live texture");
+    require(regionTextures.commit(std::move(prepared)),
+        "prepared texture regions did not commit");
+    const TextureView updated = regionTextures.view(regionTexture);
+    require(updated.revision == 2
+            && updated.dirtyRegion == TextureRegion{1, 1, 5, 2}
+            && updated.rollbackPixels.size() == 10
+            && regionTextures.statistics().regionUpdates == 2
+            && regionTextures.statistics().coalescedDirtyArea == 10,
+        "batched texture regions did not retain one revision and rollback union");
+
+    const std::array<std::byte, 4> overlapFirst{
+        std::byte{9}, std::byte{9}, std::byte{9}, std::byte{9}};
+    const std::array<std::byte, 4> overlapSecond{
+        std::byte{10}, std::byte{10}, std::byte{10}, std::byte{10}};
+    const std::array overlapUpdates{
+        TextureRegionUpdate{regionTexture, {2, 2, 2, 2}, 2, overlapFirst},
+        TextureRegionUpdate{regionTexture, {3, 3, 2, 2}, 2, overlapSecond},
+    };
+    require(regionTextures.updateRegions(overlapUpdates),
+        "overlapping texture regions did not commit");
+    const TextureView overlapped = regionTextures.view(regionTexture);
+    require(overlapped.revision == 3
+            && overlapped.dirtyRegion == TextureRegion{2, 2, 3, 3}
+            && overlapped.rollbackPixels.size() == 9
+            && overlapped.pixels[3U * overlapped.rowPitch + 3U] == std::byte{10}
+            && regionTextures.statistics().regionUpdates == 4
+            && regionTextures.statistics().coalescedDirtyArea == 19,
+        "overlapping region order, dirty union, or rollback coverage was incorrect");
+
+    TextureStore atlasTextures;
+    const std::array<std::byte, 1> atlasPixel{};
+    const TextureHandle baseAtlas = atlasTextures.create(
+        TextureFormat::Alpha8, 1, 1, 1, atlasPixel);
+    FontStore fonts;
+    const FontHandle font = fonts.add({
+        .atlas = baseAtlas,
+        .pixelSize = 10.0F,
+        .ascent = 8.0F,
+        .descent = 2.0F,
+        .glyphs = {{
+            U'A',
+            {{0.0F, 0.0F}, {1.0F, 1.0F}},
+            {1.0F, 1.0F},
+            {},
+            1.0F,
+        }},
+    });
+    DynamicGlyphAtlas atlas(atlasTextures, fonts, font, {
+        .pageWidth = 4,
+        .pageHeight = 4,
+        .padding = 0,
+        .maximumPages = 1,
+    });
+    const std::array<std::byte, 9> largePixels{};
+    const std::array<std::byte, 4> smallPixels{};
+    const std::array failedBatch{
+        RasterizedGlyph{
+            .codepoint = U'B',
+            .width = 3,
+            .height = 3,
+            .rowPitch = 3,
+            .advance = 3.0F,
+            .pixels = largePixels,
+        },
+        RasterizedGlyph{
+            .codepoint = U'C',
+            .width = 2,
+            .height = 2,
+            .rowPitch = 2,
+            .advance = 2.0F,
+            .pixels = smallPixels,
+        },
+    };
+    const std::uint64_t fontRevision = fonts.find(font)->revision();
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        require(!atlas.add(failedBatch)
+                && atlas.pages().empty()
+                && atlasTextures.size() == 1
+                && fonts.find(font)->revision() == fontRevision
+                && fonts.find(font)->glyph(U'B') == nullptr
+                && fonts.find(font)->glyph(U'C') == nullptr,
+            "failed glyph batch leaked placement, page, pixels, or font metadata");
+    }
+    require(atlas.add(std::span<const RasterizedGlyph>(&failedBatch[0], 1))
+            && atlas.pages().size() == 1
+            && atlasTextures.size() == 2
+            && fonts.find(font)->glyph(U'B') != nullptr,
+        "valid glyph retry failed after transactional batch rollback");
+}
+
 void testUtf8EditorCompositionClipboardAndHistory() {
     TextEditorState editor("A\xE4\xB8\xAD");
     require(editor.selection().caret == 4 && editor.moveLeft()
@@ -1293,7 +1491,7 @@ void testResourceLifetimeAndTextureBackingPolicies() {
             .pixelSize = 10.0F,
             .ascent = 8.0F,
             .descent = 2.0F,
-            .glyphs = {{U'A', {}, {5.0F, 8.0F}, {}, 6.0F}},
+            .glyphs = {{U'A', {{0.0F, 0.0F}, {0.25F, 0.25F}}, {5.0F, 8.0F}, {}, 6.0F}},
         };
     };
     const FontHandle firstFont = fonts.add(definition());
@@ -1339,8 +1537,10 @@ int main() {
     testFixedSnapshotPoolRejectsExhaustion();
     testPacketSnapshotsSupportConcurrentConsumption();
     testUtf8Validation();
+    testFontDefinitionValidationAndGlyphIdIndex();
     testTextRunsAreCachedAndBatched();
     testFallbackShapingAndDynamicGlyphPages();
+    testTransactionalGlyphAndRegionBatches();
     testUtf8EditorCompositionClipboardAndHistory();
     testResourceLifetimeAndTextureBackingPolicies();
     std::cout << "HeniaUI core tests passed\n";

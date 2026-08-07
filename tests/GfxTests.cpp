@@ -5,6 +5,7 @@
 #include "henia/gfx/backend/opengl/OpenGlRenderDevice.h"
 
 #include <array>
+#include <bit>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -47,14 +48,38 @@ int main() {
         fail("BoxInstance motion payload was not round-tripped");
     }
     compatibilityBox.setVisibilityMask(7U);
-    if (compatibilityBox.motionDelta() != Vec3{}
+    if (compatibilityBox.motionDelta() != Vec3{1.25F, -2.5F, 3.75F}
         || compatibilityBox.visibilityMask() != 7U) {
-        fail("BoxInstance visibility mask did not replace motion payload");
+        fail("BoxInstance visibility mask altered motion payload");
     }
-    compatibilityBox.setMotionDelta({0.0F, 0.0F, 0.0F});
+    compatibilityBox.setMotionDelta({-4.0F, 5.0F, -6.0F});
+    if (compatibilityBox.visibilityMask() != 7U
+        || compatibilityBox.motionDelta() != Vec3{-4.0F, 5.0F, -6.0F}) {
+        fail("BoxInstance motion update altered visibility payload");
+    }
     compatibilityBox.clearMotionDelta();
-    if (compatibilityBox.visibilityMask() != std::numeric_limits<std::uint32_t>::max()) {
-        fail("Clearing BoxInstance motion did not restore compatibility visibility");
+    if (compatibilityBox.visibilityMask() != 7U || compatibilityBox.motionDelta() != Vec3{}) {
+        fail("Clearing BoxInstance motion altered visibility payload");
+    }
+    compatibilityBox.clearVisibilityMask();
+    compatibilityBox.setMotionDelta({1.25F, -2.5F, 3.75F});
+    compatibilityBox.setVisibilityMask(0U);
+    const BoxInstance copiedCompatibilityBox = compatibilityBox;
+    if (copiedCompatibilityBox.visibilityMask() != 0U
+        || copiedCompatibilityBox.motionDelta() != Vec3{1.25F, -2.5F, 3.75F}) {
+        fail("BoxInstance copy lost combined visibility and motion state");
+    }
+    BoxInstance legacyMotion;
+    legacyMotion.effects = BoxEffect::MotionTranslation;
+    legacyMotion.reserved = {
+        std::bit_cast<std::uint32_t>(1.25F),
+        std::bit_cast<std::uint32_t>(-2.5F),
+        std::bit_cast<std::uint32_t>(3.75F),
+    };
+    legacyMotion.clearVisibilityMask();
+    if (legacyMotion.visibilityMask() != std::numeric_limits<std::uint32_t>::max()
+        || legacyMotion.motionDelta() != Vec3{1.25F, -2.5F, 3.75F}) {
+        fail("Clearing visibility corrupted a legacy motion payload");
     }
 
     ShapeBatch3D shapes;
@@ -320,6 +345,44 @@ int main() {
     if (!usesCpuVisibility({.mode = VisibilityMode::Automatic, .automaticThreshold = 2}, 2)
         || usesCpuVisibility({}, 100000)) {
         fail("Automatic or default direct visibility selection is incorrect");
+    }
+
+    std::vector<BoxInstance> animatedBoxes(InstanceBatch::kBoxesPerPage * 2U);
+    for (std::size_t index = 0; index < animatedBoxes.size(); ++index) {
+        BoxInstance& box = animatedBoxes[index];
+        const bool culledPage = index < InstanceBatch::kBoxesPerPage;
+        box.minimum = culledPage
+            ? Vec3{4.0F, 4.0F, 0.25F} : Vec3{-0.25F, -0.25F, 0.25F};
+        box.maximum = culledPage
+            ? Vec3{4.25F, 4.25F, 0.5F} : Vec3{0.25F, 0.25F, 0.5F};
+        const float direction = (index & 1U) == 0U ? -1.0F : 1.0F;
+        box.setMotionDelta({direction * (culledPage ? 0.5F : 0.1F), 0.0F, 0.0F});
+    }
+    ShapeBatch3D animatedShapes;
+    if (!animatedShapes.replaceBoxes(animatedBoxes)) {
+        fail("Animated visibility fixture was rejected");
+    }
+    VisibilityList animatedVisibility;
+    if (!animatedVisibility.reserve(animatedBoxes.size())) {
+        fail("Animated visibility workspace could not reserve");
+    }
+    ViewParameters animatedView{.viewport = {100.0F, 100.0F}, .motionScale = 0.0F};
+    const InstanceBatch animatedBatch = animatedShapes.snapshot();
+    if (!animatedVisibility.update(animatedBatch, animatedView)
+        || animatedVisibility.statistics().rebuiltChunks != 2U) {
+        fail("Animated visibility envelopes were not built once");
+    }
+    for (const float scale : {1.0F, -1.0F}) {
+        animatedView.motionScale = scale;
+        if (!animatedVisibility.update(animatedBatch, animatedView)
+            || animatedVisibility.statistics().rebuiltChunks != 0U
+            || animatedVisibility.statistics().reusedChunks != 2U
+            || animatedVisibility.statistics().pageEnvelopeEvaluations != 2U
+            || animatedVisibility.statistics().exactInstanceTests
+                != InstanceBatch::kBoxesPerPage
+            || animatedVisibility.indices().size() != InstanceBatch::kBoxesPerPage) {
+            fail("motionScale change rescanned source pages or produced incorrect visibility");
+        }
     }
 
     std::cout << "HeniaUI gfx lifecycle tests passed\n";

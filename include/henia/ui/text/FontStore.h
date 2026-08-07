@@ -8,6 +8,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace henia::ui {
@@ -41,6 +42,20 @@ struct FontDefinition final {
     std::vector<KerningPair> kerning;
 };
 
+class PreparedGlyphUpdate final {
+public:
+    PreparedGlyphUpdate() = default;
+    [[nodiscard]] bool valid() const noexcept { return mReady; }
+
+private:
+    friend class FontStore;
+    FontHandle mHandle{};
+    std::uint64_t mExpectedRevision = 0;
+    std::vector<GlyphMetrics> mGlyphs;
+    std::vector<std::pair<std::uint32_t, std::size_t>> mGlyphIdIndex;
+    bool mReady = false;
+};
+
 class FontFace final {
 public:
     FontFace() = default;
@@ -63,6 +78,8 @@ private:
     friend class FontStore;
 
     [[nodiscard]] static std::uint64_t kerningKey(char32_t left, char32_t right) noexcept;
+    [[nodiscard]] static std::vector<std::pair<std::uint32_t, std::size_t>> buildGlyphIdIndex(
+        std::span<const GlyphMetrics> glyphs);
     [[nodiscard]] bool appendGlyphs(std::span<const GlyphMetrics> glyphs);
 
     TextureHandle mAtlas{};
@@ -72,6 +89,9 @@ private:
     float mLineGap = 0.0F;
     std::uint64_t mRevision = 1;
     std::vector<GlyphMetrics> mGlyphs;
+    // Sorted by (glyphId, codepoint-sorted glyph index). Duplicate non-zero
+    // IDs resolve to the smallest codepoint, matching deterministic lookup.
+    std::vector<std::pair<std::uint32_t, std::size_t>> mGlyphIdIndex;
     std::vector<KerningPair> mKerning;
 };
 
@@ -81,6 +101,15 @@ public:
     // Adds or replaces glyph records without invalidating the stable handle.
     // Layout/render caches observe the face revision and rebuild lazily.
     [[nodiscard]] bool addGlyphs(FontHandle handle, std::span<const GlyphMetrics> glyphs);
+    [[nodiscard]] PreparedGlyphUpdate prepareGlyphs(
+        FontHandle handle,
+        std::span<const GlyphMetrics> glyphs) const;
+    [[nodiscard]] bool commit(PreparedGlyphUpdate&& update) noexcept;
+    // Removes dynamic glyphs owned by a retiring helper while preserving the
+    // stable face handle and all unrelated glyphs.
+    [[nodiscard]] bool removeGlyphs(
+        FontHandle handle,
+        std::span<const char32_t> codepoints);
     [[nodiscard]] bool destroy(FontHandle handle) noexcept;
     [[nodiscard]] const FontFace* find(FontHandle handle) const noexcept;
     [[nodiscard]] FontHandle handleAt(std::size_t slotIndex) const noexcept;

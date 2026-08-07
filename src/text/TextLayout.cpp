@@ -526,6 +526,16 @@ TextGlyphRequestBackend* TextPainter::glyphRequestBackend() const noexcept {
     return mGlyphRequests;
 }
 
+void TextPainter::setFontRasterResolver(TextFontRasterResolver* resolver) noexcept {
+    if (mFontRasterResolver == resolver) return;
+    mFontRasterResolver = resolver;
+    mCache->clear();
+}
+
+TextFontRasterResolver* TextPainter::fontRasterResolver() const noexcept {
+    return mFontRasterResolver;
+}
+
 std::span<const FontHandle> TextPainter::resolvedFonts(FontHandle primary) {
     if (mFallbackFonts.empty()) {
         mResolvedPrimary = primary;
@@ -541,6 +551,24 @@ std::span<const FontHandle> TextPainter::resolvedFonts(FontHandle primary) {
     return mResolvedFonts;
 }
 
+std::span<const FontHandle> TextPainter::resolvedRasterFonts(
+    std::span<const FontHandle> fonts,
+    float logicalPixelSize) {
+    if (mFontRasterResolver == nullptr || fonts.empty()) return fonts;
+    mRasterFonts.clear();
+    mRasterFonts.reserve(fonts.size());
+    for (FontHandle font : fonts) {
+        const FontHandle resolved = mFontRasterResolver->resolveFont(font, logicalPixelSize);
+        const FontHandle selected = resolved.valid() ? resolved : font;
+        if (selected.valid()
+            && std::find(mRasterFonts.begin(), mRasterFonts.end(), selected)
+                == mRasterFonts.end()) {
+            mRasterFonts.push_back(selected);
+        }
+    }
+    return mRasterFonts;
+}
+
 TextMetrics TextPainter::measure(FontHandle font, float size, std::string_view text) {
     if (text.empty()) return {};
     return measure(resolvedFonts(font), size, text);
@@ -551,7 +579,8 @@ TextMetrics TextPainter::measure(
     float size,
     std::string_view text) {
     if (text.empty()) return {};
-    if (mGlyphRequests != nullptr) mGlyphRequests->requestText(text);
+    fontChain = resolvedRasterFonts(fontChain, size);
+    if (mGlyphRequests != nullptr) mGlyphRequests->requestText(fontChain, size, text);
     const TextLayoutResult* result = mCache->layoutResult(fontChain, size, text);
     return result == nullptr ? TextMetrics{} : result->metrics;
 }
@@ -567,7 +596,10 @@ const TextLayoutResult* TextPainter::layout(
     std::span<const FontHandle> fontChain,
     float size,
     std::string_view text) {
-    if (!text.empty() && mGlyphRequests != nullptr) mGlyphRequests->requestText(text);
+    fontChain = resolvedRasterFonts(fontChain, size);
+    if (!text.empty() && mGlyphRequests != nullptr) {
+        mGlyphRequests->requestText(fontChain, size, text);
+    }
     return mCache->layoutResult(fontChain, size, text);
 }
 
@@ -589,7 +621,8 @@ void TextPainter::draw(
     Color color,
     std::string_view text) {
     if (text.empty()) return;
-    if (mGlyphRequests != nullptr) mGlyphRequests->requestText(text);
+    fontChain = resolvedRasterFonts(fontChain, size);
+    if (mGlyphRequests != nullptr) mGlyphRequests->requestText(fontChain, size, text);
     const TextLayoutResult* result = mCache->layoutResult(fontChain, size, text);
     if (result != nullptr) drawLayout(canvas, *result, origin, color);
 }

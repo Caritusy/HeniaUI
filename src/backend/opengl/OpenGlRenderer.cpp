@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -58,6 +59,8 @@ constexpr GLenum kRgba8 = 0x8058;
 constexpr GLenum kSrgb8Alpha8 = 0x8C43;
 constexpr GLenum kMapWriteBit = 0x0002;
 constexpr GLenum kMapUnsynchronizedBit = 0x0020;
+constexpr GLenum kMapPersistentBit = 0x0040;
+constexpr GLenum kMapCoherentBit = 0x0080;
 constexpr GLenum kSyncGpuCommandsComplete = 0x9117;
 constexpr GLenum kAlreadySignaled = 0x911A;
 constexpr GLenum kTimeoutExpired = 0x911B;
@@ -78,6 +81,9 @@ constexpr GLenum kSampleAlphaToCoverage = 0x809E;
 constexpr GLenum kSampleAlphaToOne = 0x809F;
 constexpr GLenum kSampleCoverage = 0x80A0;
 constexpr GLenum kUnpackRowLength = 0x0CF2;
+constexpr GLenum kMajorVersion = 0x821B;
+constexpr GLenum kMinorVersion = 0x821C;
+constexpr GLenum kNumberOfExtensions = 0x821D;
 
 static_assert(std::is_standard_layout_v<DrawInstance>);
 static_assert(offsetof(DrawInstance, uv) == offsetof(DrawInstance, bounds) + sizeof(Rect));
@@ -104,6 +110,7 @@ using DeleteVertexArraysFn = void(APIENTRYP)(GLsizei, const GLuint*);
 using GenBuffersFn = void(APIENTRYP)(GLsizei, GLuint*);
 using BindBufferFn = void(APIENTRYP)(GLenum, GLuint);
 using BufferDataFn = void(APIENTRYP)(GLenum, GlSize, const void*, GLenum);
+using BufferStorageFn = void(APIENTRYP)(GLenum, GlSize, const void*, GLbitfield);
 using MapBufferRangeFn = void*(APIENTRYP)(GLenum, GlIntPtr, GlSize, GLbitfield);
 using UnmapBufferFn = GLboolean(APIENTRYP)(GLenum);
 using DeleteBuffersFn = void(APIENTRYP)(GLsizei, const GLuint*);
@@ -120,6 +127,8 @@ using Uniform1fFn = void(APIENTRYP)(GLint, GLfloat);
 using Uniform1ivFn = void(APIENTRYP)(GLint, GLsizei, const GLint*);
 using ActiveTextureFn = void(APIENTRYP)(GLenum);
 using DrawArraysInstancedFn = void(APIENTRYP)(GLenum, GLint, GLsizei, GLsizei);
+using DrawArraysInstancedBaseInstanceFn = void(APIENTRYP)(
+    GLenum, GLint, GLsizei, GLsizei, GLuint);
 using BlendFuncSeparateFn = void(APIENTRYP)(GLenum, GLenum, GLenum, GLenum);
 using BlendEquationSeparateFn = void(APIENTRYP)(GLenum, GLenum);
 using BindSamplerFn = void(APIENTRYP)(GLuint, GLuint);
@@ -127,6 +136,7 @@ using IsProgramFn = GLboolean(APIENTRYP)(GLuint);
 using GetBooleanIndexedFn = void(APIENTRYP)(GLenum, GLuint, GLboolean*);
 using ColorMaskIndexedFn = void(APIENTRYP)(GLuint, GLboolean, GLboolean, GLboolean, GLboolean);
 using TexStorage2DFn = void(APIENTRYP)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
+using GetStringIndexedFn = const GLubyte*(APIENTRYP)(GLenum, GLuint);
 
 struct GlFunctions final {
     CreateShaderFn createShader = nullptr;
@@ -148,6 +158,7 @@ struct GlFunctions final {
     GenBuffersFn genBuffers = nullptr;
     BindBufferFn bindBuffer = nullptr;
     BufferDataFn bufferData = nullptr;
+    BufferStorageFn bufferStorage = nullptr;
     MapBufferRangeFn mapBufferRange = nullptr;
     UnmapBufferFn unmapBuffer = nullptr;
     DeleteBuffersFn deleteBuffers = nullptr;
@@ -164,6 +175,7 @@ struct GlFunctions final {
     Uniform1ivFn uniform1iv = nullptr;
     ActiveTextureFn activeTexture = nullptr;
     DrawArraysInstancedFn drawArraysInstanced = nullptr;
+    DrawArraysInstancedBaseInstanceFn drawArraysInstancedBaseInstance = nullptr;
     BlendFuncSeparateFn blendFuncSeparate = nullptr;
     BlendEquationSeparateFn blendEquationSeparate = nullptr;
     BindSamplerFn bindSampler = nullptr;
@@ -171,6 +183,7 @@ struct GlFunctions final {
     GetBooleanIndexedFn getBooleanIndexed = nullptr;
     ColorMaskIndexedFn colorMaskIndexed = nullptr;
     TexStorage2DFn texStorage2D = nullptr;
+    GetStringIndexedFn getStringIndexed = nullptr;
 };
 
 [[nodiscard]] void* loadOpenGlFunction(const char* name) noexcept {
@@ -231,11 +244,43 @@ template <typename Function>
         && load(gl.bindSampler, "glBindSampler")
         && load(gl.isProgram, "glIsProgram")
         && load(gl.getBooleanIndexed, "glGetBooleani_v")
-        && load(gl.colorMaskIndexed, "glColorMaski");
+        && load(gl.colorMaskIndexed, "glColorMaski")
+        && load(gl.getStringIndexed, "glGetStringi");
     if (loaded) {
         gl.texStorage2D = reinterpret_cast<TexStorage2DFn>(loadOpenGlFunction("glTexStorage2D"));
+        gl.bufferStorage = reinterpret_cast<BufferStorageFn>(
+            loadOpenGlFunction("glBufferStorage"));
+        gl.drawArraysInstancedBaseInstance = reinterpret_cast<DrawArraysInstancedBaseInstanceFn>(
+            loadOpenGlFunction("glDrawArraysInstancedBaseInstance"));
     }
     return loaded;
+}
+
+[[nodiscard]] bool supportsCapability(
+    const GlFunctions& gl,
+    GLint requiredMajor,
+    GLint requiredMinor,
+    std::string_view extension) noexcept {
+    GLint major = 0;
+    GLint minor = 0;
+    glGetIntegerv(kMajorVersion, &major);
+    glGetIntegerv(kMinorVersion, &minor);
+    if (glGetError() != GL_NO_ERROR) return false;
+    if (major > requiredMajor || (major == requiredMajor && minor >= requiredMinor)) {
+        return true;
+    }
+    GLint extensionCount = 0;
+    glGetIntegerv(kNumberOfExtensions, &extensionCount);
+    if (glGetError() != GL_NO_ERROR || extensionCount < 0) return false;
+    for (GLint index = 0; index < extensionCount; ++index) {
+        const GLubyte* name = gl.getStringIndexed(GL_EXTENSIONS, static_cast<GLuint>(index));
+        if (name != nullptr
+            && std::string_view(reinterpret_cast<const char*>(name)) == extension) {
+            return true;
+        }
+    }
+    while (glGetError() != GL_NO_ERROR) {}
+    return false;
 }
 
 [[nodiscard]] GLenum consumeOperationErrors() noexcept {
@@ -271,9 +316,9 @@ flat out uint lineJoin;
 flat out uint lineFlags;
 flat out uint shaderParameter;
 
-const vec2 corners[6] = vec2[6](
-    vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
-    vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0));
+const vec2 corners[4] = vec2[4](
+    vec2(0.0, 0.0), vec2(1.0, 0.0),
+    vec2(0.0, 1.0), vec2(1.0, 1.0));
 
 void main() {
     vec2 corner = corners[gl_VertexID];
@@ -318,6 +363,11 @@ void main() {
     }
     vec2 framebufferPixel = pixel * logicalToFramebufferScale
         + logicalToFramebufferTranslation;
+    if (kind == 4u) {
+        vec2 runOrigin = instanceMetrics * logicalToFramebufferScale
+            + logicalToFramebufferTranslation;
+        framebufferPixel += round(runOrigin) - runOrigin;
+    }
     vec2 normalized = framebufferPixel / viewportSize;
     gl_Position = vec4(normalized.x * 2.0 - 1.0, 1.0 - normalized.y * 2.0, 0.0, 1.0);
 
@@ -742,6 +792,14 @@ struct OpenGlRenderer::Implementation final {
     struct UploadSlot final {
         GLuint buffer = 0;
         GlSync fence = nullptr;
+        std::byte* mapped = nullptr;
+    };
+
+    struct PacketValidationCache final {
+        std::uint64_t identity = 0;
+        std::uint64_t revision = 0;
+        std::vector<std::array<std::uint8_t, DrawBatch::kTextureCapacity>> semantics;
+        bool valid = false;
     };
 
     GlFunctions gl{};
@@ -760,17 +818,24 @@ struct OpenGlRenderer::Implementation final {
     henia::detail::OpenGlUploadRing uploadRing;
     std::vector<detail::OpenGlTextureState> textures;
     std::vector<std::uint32_t> partialTextureUpdates;
+    PacketValidationCache packetValidation;
     OpenGlRenderStatistics statistics{};
     henia::detail::ProfileTimeline profileTimeline;
     henia::detail::FixedError error;
     HGLRC ownerContext = nullptr;
+    OpenGlUiStatePolicy statePolicy = OpenGlUiStatePolicy::Preserve;
+    OpenGlUploadStrategy uploadStrategy = OpenGlUploadStrategy::TransientMap;
+    GLuint configuredAttributeBuffer = 0;
+    bool baseInstanceAvailable = false;
     bool immutableTextureStorage = false;
     bool ready = false;
 
     [[nodiscard]] bool initialize(
         std::size_t requestedCapacity,
         std::size_t requestedTextureCapacity,
-        std::size_t requestedUploadSlots);
+        std::size_t requestedUploadSlots,
+        OpenGlUiStatePolicy requestedStatePolicy,
+        OpenGlUploadStrategy requestedUploadStrategy);
     [[nodiscard]] bool synchronizeTextures(TextureStore& store) noexcept;
     [[nodiscard]] bool bindExternalTexture(
         const TextureStore& store,
@@ -785,7 +850,7 @@ struct OpenGlRenderer::Implementation final {
     void abandon() noexcept;
     [[nodiscard]] henia::detail::UploadFenceStatus pollUploadSlot(std::size_t index) noexcept;
     [[nodiscard]] bool fenceUploadSlot(std::size_t index) noexcept;
-    void configureAttributes(std::size_t firstInstance) const noexcept;
+    void configureAttributes(std::size_t firstInstance, bool configureInvariant) noexcept;
     [[nodiscard]] GlState captureState() const noexcept;
     [[nodiscard]] bool restoreState(const GlState& state) noexcept;
     [[nodiscard]] bool validateOwnerContext(const char* operation) noexcept;
@@ -795,7 +860,9 @@ struct OpenGlRenderer::Implementation final {
 bool OpenGlRenderer::Implementation::initialize(
     std::size_t requestedCapacity,
     std::size_t requestedTextureCapacity,
-    std::size_t requestedUploadSlots) {
+    std::size_t requestedUploadSlots,
+    OpenGlUiStatePolicy requestedStatePolicy,
+    OpenGlUploadStrategy requestedUploadStrategy) {
     if (ready) {
         if (!validateOwnerContext("initialize")) {
             ++statistics.lifecycleRejections;
@@ -803,7 +870,9 @@ bool OpenGlRenderer::Implementation::initialize(
         }
         if (requestedCapacity != capacity
             || requestedTextureCapacity != textures.size()
-            || requestedUploadSlots != uploadSlots.size()) {
+            || requestedUploadSlots != uploadSlots.size()
+            || requestedStatePolicy != statePolicy
+            || requestedUploadStrategy != uploadStrategy) {
             ++statistics.lifecycleRejections;
             error = "OpenGL renderer is already initialized with a different configuration";
             return false;
@@ -815,6 +884,10 @@ bool OpenGlRenderer::Implementation::initialize(
     const HGLRC currentContext = wglGetCurrentContext();
     if (currentContext == nullptr || requestedCapacity == 0 || requestedTextureCapacity == 0
         || requestedUploadSlots == 0
+        || (requestedStatePolicy != OpenGlUiStatePolicy::Preserve
+            && requestedStatePolicy != OpenGlUiStatePolicy::DedicatedContext)
+        || (requestedUploadStrategy != OpenGlUploadStrategy::TransientMap
+            && requestedUploadStrategy != OpenGlUploadStrategy::PersistentMap)
         || requestedCapacity > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())
         || requestedTextureCapacity > std::numeric_limits<std::uint32_t>::max()
         || requestedUploadSlots > static_cast<std::size_t>(std::numeric_limits<GLsizei>::max())
@@ -824,7 +897,11 @@ bool OpenGlRenderer::Implementation::initialize(
         return false;
     }
     ownerContext = currentContext;
+    statePolicy = requestedStatePolicy;
+    uploadStrategy = requestedUploadStrategy;
     statistics = {};
+    packetValidation = {};
+    packetValidation.semantics.reserve(requestedCapacity);
     profileTimeline.reset();
     textures.resize(requestedTextureCapacity);
     partialTextureUpdates.reserve(requestedTextureCapacity);
@@ -834,8 +911,21 @@ bool OpenGlRenderer::Implementation::initialize(
         error = "OpenGL 3.3 entry points are unavailable";
         return false;
     }
-    immutableTextureStorage = gl.texStorage2D != nullptr;
     discardHostErrors();
+    const bool persistentMappingAvailable = gl.bufferStorage != nullptr
+        && supportsCapability(gl, 4, 4, "GL_ARB_buffer_storage");
+    if (uploadStrategy == OpenGlUploadStrategy::PersistentMap
+        && !persistentMappingAvailable) {
+        error = "Persistent OpenGL uploads require OpenGL 4.4 or ARB_buffer_storage";
+        return false;
+    }
+    baseInstanceAvailable = gl.drawArraysInstancedBaseInstance != nullptr
+        && supportsCapability(gl, 4, 2, "GL_ARB_base_instance");
+    statistics.persistentUploadActive =
+        uploadStrategy == OpenGlUploadStrategy::PersistentMap;
+    statistics.baseInstanceActive = baseInstanceAvailable;
+    immutableTextureStorage = gl.texStorage2D != nullptr
+        && supportsCapability(gl, 4, 2, "GL_ARB_texture_storage");
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximumTextureSize);
     if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR || maximumTextureSize <= 0) {
         assignGlFailure(
@@ -943,13 +1033,28 @@ bool OpenGlRenderer::Implementation::initialize(
         gl.bindVertexArray(static_cast<GLuint>(previousVertexArray));
     };
     for (std::size_t index = 0; index < uploadSlots.size(); ++index) {
-        const UploadSlot& slot = uploadSlots[index];
+        UploadSlot& slot = uploadSlots[index];
         gl.bindBuffer(kArrayBuffer, slot.buffer);
-        gl.bufferData(
-            kArrayBuffer,
-            static_cast<GlSize>(instanceBytes),
-            nullptr,
-            kDynamicDraw);
+        if (uploadStrategy == OpenGlUploadStrategy::PersistentMap) {
+            constexpr GLbitfield flags = kMapWriteBit | kMapPersistentBit | kMapCoherentBit;
+            gl.bufferStorage(
+                kArrayBuffer,
+                static_cast<GlSize>(instanceBytes),
+                nullptr,
+                flags);
+            slot.mapped = static_cast<std::byte*>(gl.mapBufferRange(
+                kArrayBuffer,
+                0,
+                static_cast<GlSize>(instanceBytes),
+                flags));
+            ++statistics.instanceMapOperations;
+        } else {
+            gl.bufferData(
+                kArrayBuffer,
+                static_cast<GlSize>(instanceBytes),
+                nullptr,
+                kDynamicDraw);
+        }
         if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
             restoreInitializationState();
             assignGlFailure(
@@ -960,9 +1065,15 @@ bool OpenGlRenderer::Implementation::initialize(
                 index);
             return false;
         }
+        if (uploadStrategy == OpenGlUploadStrategy::PersistentMap && slot.mapped == nullptr) {
+            restoreInitializationState();
+            error = "OpenGL persistent instance-buffer mapping returned null";
+            return false;
+        }
     }
     gl.bindBuffer(kArrayBuffer, uploadSlots.front().buffer);
-    configureAttributes(0);
+    configureAttributes(0, true);
+    configuredAttributeBuffer = uploadSlots.front().buffer;
     if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
         restoreInitializationState();
         assignGlFailure(error, "OpenGL UI vertex-layout setup failed", glError, "object", vertexArray);
@@ -1097,6 +1208,7 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(TextureStore& store) no
     partialTextureUpdates.clear();
     std::uint64_t pendingFullBytes = 0;
     std::uint64_t pendingPartialBytes = 0;
+    std::uint64_t pendingDirtyHistoryFallbacks = 0;
     std::uint64_t replacedTextures = 0;
     const auto rollbackPartials = [&]() noexcept {
         GLenum rollbackError = GL_NO_ERROR;
@@ -1186,6 +1298,11 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(TextureStore& store) no
             pendingPartialBytes += static_cast<std::uint64_t>(view.dirtyRegion.width)
                 * view.dirtyRegion.height * pixelBytes;
             continue;
+        }
+        if (texture.object != 0 && texture.handle == handle.packed()
+            && !view.fullUpdate && view.revision > texture.revision
+            && view.revision - texture.revision > 1U) {
+            ++pendingDirtyHistoryFallbacks;
         }
         const bool staged = transaction.stage(
             index,
@@ -1348,6 +1465,7 @@ bool OpenGlRenderer::Implementation::synchronizeTextures(TextureStore& store) no
     statistics.textureUploads += committed + partialTextureUpdates.size();
     statistics.fullTextureUploads += committed;
     statistics.partialTextureUploads += partialTextureUpdates.size();
+    statistics.textureDirtyHistoryFallbacks += pendingDirtyHistoryFallbacks;
     statistics.uploadedTextureBytes += pendingFullBytes + pendingPartialBytes;
     statistics.retiredTextures += replacedTextures + directlyRetired;
     statistics.gpuTextureBytes = 0;
@@ -1536,31 +1654,35 @@ bool OpenGlRenderer::Implementation::render(
         error = "Render packet byte range exceeds the OpenGL instance buffer";
         return false;
     }
+    const bool validationCacheHit = packetValidation.valid
+        && packetValidation.identity == packet.identity()
+        && packetValidation.revision == packet.revision()
+        && packetValidation.semantics.size() == packet.batches().size();
     bool hasVisibleBatches = false;
+    bool usesTextures = false;
     for (const DrawBatch& batch : packet.batches()) {
         const std::size_t first = batch.firstInstance;
         const std::size_t count = batch.instanceCount;
-        if (batch.textureCount > DrawBatch::kTextureCapacity
-            || first > packet.instances().size() || count > packet.instances().size() - first) {
+        if (!validationCacheHit && (batch.textureCount > DrawBatch::kTextureCapacity
+            || first > packet.instances().size() || count > packet.instances().size() - first)) {
             ++statistics.rejectedFrames;
             ++statistics.invalidInputFrames;
             error = "Render packet batch instance/texture range is invalid";
             return false;
         }
+        bool visible = batch.instanceCount != 0;
         if (batch.clip.enabled) {
-            if (!validateRect(batch.clip.area, "clip.area").empty()) {
+            if (!validationCacheHit && !validateRect(batch.clip.area, "clip.area").empty()) {
                 ++statistics.rejectedFrames;
                 ++statistics.invalidInputFrames;
                 error = "clip.area is invalid";
                 return false;
             }
             ScissorRect scissor{};
-            hasVisibleBatches = hasVisibleBatches
-                || (batch.instanceCount != 0
-                    && makeScissorRect(batch.clip.area, viewport, scissor));
-        } else {
-            hasVisibleBatches = hasVisibleBatches || batch.instanceCount != 0;
+            visible = visible && makeScissorRect(batch.clip.area, viewport, scissor);
         }
+        hasVisibleBatches = hasVisibleBatches || visible;
+        usesTextures = usesTextures || (visible && batch.textureCount != 0);
     }
     if (packet.instances().empty() || packet.batches().empty() || !hasVisibleBatches) {
         ++statistics.successfulFrames;
@@ -1576,7 +1698,48 @@ bool OpenGlRenderer::Implementation::render(
         return true;
     }
 
-    for (const DrawBatch& batch : packet.batches()) {
+    constexpr std::uint8_t kImageSemantic = 1U << 0U;
+    constexpr std::uint8_t kMaskSemantic = 1U << 1U;
+    constexpr std::uint8_t kSdfSemantic = 1U << 2U;
+    if (!validationCacheHit) {
+        packetValidation.valid = false;
+        packetValidation.semantics.assign(packet.batches().size(), {});
+        for (std::size_t batchIndex = 0; batchIndex < packet.batches().size(); ++batchIndex) {
+            const DrawBatch& batch = packet.batches()[batchIndex];
+            for (std::size_t index = batch.firstInstance;
+                 index < static_cast<std::size_t>(batch.firstInstance) + batch.instanceCount;
+                 ++index) {
+                const DrawInstance& instance = packet.instances()[index];
+                std::uint8_t semantic = 0;
+                if (instance.kind == PrimitiveKind::Image
+                    || instance.kind == PrimitiveKind::NinePatch) {
+                    semantic = kImageSemantic;
+                } else if (instance.kind == PrimitiveKind::Glyph) {
+                    semantic = kMaskSemantic;
+                } else if (instance.kind == PrimitiveKind::SdfIcon) {
+                    semantic = kSdfSemantic;
+                }
+                if (semantic == 0) continue;
+                if (instance.textureSlot >= batch.textureCount) {
+                    ++statistics.rejectedFrames;
+                    ++statistics.invalidInputFrames;
+                    error = "Render packet textured instance has an invalid texture slot";
+                    return false;
+                }
+                packetValidation.semantics[batchIndex][instance.textureSlot] |= semantic;
+            }
+        }
+        packetValidation.identity = packet.identity();
+        packetValidation.revision = packet.revision();
+        packetValidation.valid = true;
+        ++statistics.packetValidationWalks;
+        statistics.validatedInstances += packet.instances().size();
+    } else {
+        ++statistics.packetValidationCacheHits;
+    }
+
+    for (std::size_t batchIndex = 0; batchIndex < packet.batches().size(); ++batchIndex) {
+        const DrawBatch& batch = packet.batches()[batchIndex];
         if (batch.clip.enabled) {
             ScissorRect scissor{};
             if (!makeScissorRect(batch.clip.area, viewport, scissor)) continue;
@@ -1590,32 +1753,18 @@ bool OpenGlRenderer::Implementation::render(
                 error = "Render packet references an unsynchronized texture";
                 return false;
             }
-        }
-        for (std::size_t index = batch.firstInstance;
-             index < static_cast<std::size_t>(batch.firstInstance) + batch.instanceCount;
-             ++index) {
-            const DrawInstance& instance = packet.instances()[index];
-            const bool image = instance.kind == PrimitiveKind::Image
-                || instance.kind == PrimitiveKind::NinePatch;
-            const bool mask = instance.kind == PrimitiveKind::Glyph;
-            const bool sdf = instance.kind == PrimitiveKind::SdfIcon;
-            if (!image && !mask && !sdf) continue;
-            if (instance.textureSlot >= batch.textureCount) {
-                ++statistics.rejectedFrames;
-                ++statistics.invalidInputFrames;
-                error = "Render packet textured instance has an invalid texture slot";
-                return false;
-            }
             const detail::OpenGlTextureState& texture =
-                textures[batch.textures[instance.textureSlot].value() - 1U];
+                textures[handle.value() - 1U];
+            const std::uint8_t semantic = packetValidation.semantics[batchIndex][slot];
             const bool alphaMask = texture.alphaMode
                 == static_cast<std::uint8_t>(TextureAlphaMode::AlphaMask);
             const bool premultiplied = texture.alphaMode
                 == static_cast<std::uint8_t>(TextureAlphaMode::Premultiplied);
             const bool srgb = texture.colorSpace
                 == static_cast<std::uint8_t>(TextureColorSpace::Srgb);
-            if ((image && alphaMask) || (mask && !alphaMask)
-                || (sdf && (premultiplied || srgb))) {
+            if (((semantic & kImageSemantic) != 0 && alphaMask)
+                || ((semantic & kMaskSemantic) != 0 && !alphaMask)
+                || ((semantic & kSdfSemantic) != 0 && (premultiplied || srgb))) {
                 ++statistics.rejectedFrames;
                 ++statistics.invalidInputFrames;
                 error = "Render packet primitive is incompatible with its texture semantics";
@@ -1637,13 +1786,25 @@ bool OpenGlRenderer::Implementation::render(
     }
     UploadSlot& uploadSlot = uploadSlots[upload.slot];
 
+    const bool preserveState = statePolicy == OpenGlUiStatePolicy::Preserve;
     discardHostErrors();
-    const GlState previous = captureState();
-    if (consumeOperationErrors() != GL_NO_ERROR) {
-        ++statistics.rejectedFrames;
-        error = "OpenGL UI state capture failed";
-        return false;
+    GlState previous{};
+    if (preserveState) {
+        previous = captureState();
+        ++statistics.stateCaptures;
+        if (consumeOperationErrors() != GL_NO_ERROR) {
+            ++statistics.rejectedFrames;
+            error = "OpenGL UI state capture failed";
+            return false;
+        }
+    } else {
+        ++statistics.dedicatedContextFrames;
     }
+    const auto restoreIfNeeded = [&]() noexcept {
+        if (!preserveState) return true;
+        ++statistics.stateRestorations;
+        return restoreState(previous);
+    };
     glViewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -1677,15 +1838,24 @@ bool OpenGlRenderer::Implementation::render(
         0.75F / std::max(
             viewport.logicalToFramebuffer.scale.x,
             viewport.logicalToFramebuffer.scale.y));
-    constexpr std::array<GLint, DrawBatch::kTextureCapacity> textureUnits{0, 1, 2, 3, 4, 5, 6, 7};
-    gl.uniform1iv(texturesLocation, static_cast<GLsizei>(textureUnits.size()), textureUnits.data());
-    for (std::uint32_t slot = 0; slot < DrawBatch::kTextureCapacity; ++slot) {
-        gl.bindSampler(slot, 0);
+    if (usesTextures) {
+        constexpr std::array<GLint, DrawBatch::kTextureCapacity> textureUnits{0, 1, 2, 3, 4, 5, 6, 7};
+        gl.uniform1iv(
+            texturesLocation,
+            static_cast<GLsizei>(textureUnits.size()),
+            textureUnits.data());
+        for (std::uint32_t slot = 0; slot < DrawBatch::kTextureCapacity; ++slot) {
+            gl.bindSampler(slot, 0);
+        }
     }
     gl.bindVertexArray(vertexArray);
     gl.bindBuffer(kArrayBuffer, uploadSlot.buffer);
+    if (baseInstanceAvailable && configuredAttributeBuffer != uploadSlot.buffer) {
+        configureAttributes(0, false);
+        configuredAttributeBuffer = uploadSlot.buffer;
+    }
     if (const GLenum setupError = consumeOperationErrors(); setupError != GL_NO_ERROR) {
-        const bool restored = restoreState(previous);
+        const bool restored = restoreIfNeeded();
         ++statistics.rejectedFrames;
         if (restored) {
             assignGlFailure(
@@ -1701,45 +1871,59 @@ bool OpenGlRenderer::Implementation::render(
     std::uint64_t cpuUploadNanoseconds = 0;
     if (upload.requiresUpload()) {
         const auto uploadStarted = std::chrono::steady_clock::now();
-        void* mapped = gl.mapBufferRange(
-            kArrayBuffer,
-            0,
-            static_cast<GlSize>(packetBytes),
-            kMapWriteBit | kMapUnsynchronizedBit);
-        const GLenum mapError = consumeOperationErrors();
-        if (mapped == nullptr || mapError != GL_NO_ERROR) {
-            if (mapped != nullptr) {
-                static_cast<void>(gl.unmapBuffer(kArrayBuffer));
-                static_cast<void>(consumeOperationErrors());
+        if (uploadStrategy == OpenGlUploadStrategy::PersistentMap) {
+            if (uploadSlot.mapped == nullptr) {
+                const bool restored = restoreIfNeeded();
+                ++statistics.rejectedFrames;
+                if (restored) error = "OpenGL persistent instance mapping is unavailable";
+                return false;
             }
-            const bool restored = restoreState(previous);
-            ++statistics.rejectedFrames;
-            if (restored) {
-                assignGlFailure(
-                    error,
-                    "OpenGL UI instance-buffer mapping failed",
-                    mapError,
-                    "uploadSlot",
-                    upload.slot);
+            std::memcpy(uploadSlot.mapped, packet.instances().data(), packetBytes);
+            ++statistics.persistentInstanceCopies;
+        } else {
+            void* mapped = gl.mapBufferRange(
+                kArrayBuffer,
+                0,
+                static_cast<GlSize>(packetBytes),
+                kMapWriteBit | kMapUnsynchronizedBit);
+            ++statistics.instanceMapOperations;
+            const GLenum mapError = consumeOperationErrors();
+            if (mapped == nullptr || mapError != GL_NO_ERROR) {
+                if (mapped != nullptr) {
+                    static_cast<void>(gl.unmapBuffer(kArrayBuffer));
+                    ++statistics.instanceUnmapOperations;
+                    static_cast<void>(consumeOperationErrors());
+                }
+                const bool restored = restoreIfNeeded();
+                ++statistics.rejectedFrames;
+                if (restored) {
+                    assignGlFailure(
+                        error,
+                        "OpenGL UI instance-buffer mapping failed",
+                        mapError,
+                        "uploadSlot",
+                        upload.slot);
+                }
+                return false;
             }
-            return false;
-        }
-        std::memcpy(mapped, packet.instances().data(), packetBytes);
-        const GLboolean unmapped = gl.unmapBuffer(kArrayBuffer);
-        const GLenum unmapError = consumeOperationErrors();
-        if (unmapped != GL_TRUE || unmapError != GL_NO_ERROR) {
-            uploadRing.invalidate(upload.slot);
-            const bool restored = restoreState(previous);
-            ++statistics.rejectedFrames;
-            if (restored) {
-                assignGlFailure(
-                    error,
-                    "OpenGL UI instance-buffer unmap failed",
-                    unmapError,
-                    "uploadSlot",
-                    upload.slot);
+            std::memcpy(mapped, packet.instances().data(), packetBytes);
+            const GLboolean unmapped = gl.unmapBuffer(kArrayBuffer);
+            ++statistics.instanceUnmapOperations;
+            const GLenum unmapError = consumeOperationErrors();
+            if (unmapped != GL_TRUE || unmapError != GL_NO_ERROR) {
+                uploadRing.invalidate(upload.slot);
+                const bool restored = restoreIfNeeded();
+                ++statistics.rejectedFrames;
+                if (restored) {
+                    assignGlFailure(
+                        error,
+                        "OpenGL UI instance-buffer unmap failed",
+                        unmapError,
+                        "uploadSlot",
+                        upload.slot);
+                }
+                return false;
             }
-            return false;
         }
         uploadRing.markUploaded(upload.slot, packet.identity(), packet.revision());
         ++statistics.instanceUploads;
@@ -1751,6 +1935,11 @@ bool OpenGlRenderer::Implementation::render(
 
     const auto submitStarted = std::chrono::steady_clock::now();
     bool submitted = false;
+    std::array<GLuint, DrawBatch::kTextureCapacity> boundTextureObjects{};
+    boundTextureObjects.fill(std::numeric_limits<GLuint>::max());
+    std::array<GLint, DrawBatch::kTextureCapacity> boundAlphaModes{};
+    boundAlphaModes.fill(-1);
+    std::optional<bool> activeTexturePath;
     for (const DrawBatch& batch : packet.batches()) {
         if (batch.instanceCount == 0) {
             continue;
@@ -1760,6 +1949,13 @@ bool OpenGlRenderer::Implementation::render(
             && !makeScissorRect(batch.clip.area, viewport, scissor)) {
             continue;
         }
+        const bool batchUsesTextures = batch.textureCount != 0;
+        if (!activeTexturePath.has_value() || *activeTexturePath != batchUsesTextures) {
+            activeTexturePath = batchUsesTextures;
+            ++statistics.texturePathRuns;
+        }
+        if (batchUsesTextures) ++statistics.texturedBatches;
+        else ++statistics.textureFreeBatches;
         if (batch.blend == BlendMode::Additive) {
             gl.blendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE);
         } else {
@@ -1776,36 +1972,58 @@ bool OpenGlRenderer::Implementation::render(
             glScissor(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
         }
 
-        for (std::uint32_t slot = 0; slot < DrawBatch::kTextureCapacity; ++slot) {
-            gl.activeTexture(kTexture0 + slot);
-            const GLuint object = slot < batch.textureCount
-                ? textures[batch.textures[slot].value() - 1U].object
-                : 0;
-            glBindTexture(GL_TEXTURE_2D, object);
+        if (batchUsesTextures) {
+            std::array<GLint, DrawBatch::kTextureCapacity> alphaModes{};
+            for (std::uint32_t slot = 0; slot < DrawBatch::kTextureCapacity; ++slot) {
+                const GLuint object = slot < batch.textureCount
+                    ? textures[batch.textures[slot].value() - 1U].object
+                    : 0;
+                if (boundTextureObjects[slot] != object) {
+                    gl.activeTexture(kTexture0 + slot);
+                    glBindTexture(GL_TEXTURE_2D, object);
+                    boundTextureObjects[slot] = object;
+                    ++statistics.textureBindingChanges;
+                }
+                if (slot < batch.textureCount) {
+                    alphaModes[slot] = static_cast<GLint>(
+                        textures[batch.textures[slot].value() - 1U].alphaMode);
+                }
+            }
+            if (boundAlphaModes != alphaModes) {
+                gl.uniform1iv(
+                    textureAlphaModesLocation,
+                    static_cast<GLsizei>(alphaModes.size()),
+                    alphaModes.data());
+                boundAlphaModes = alphaModes;
+                ++statistics.textureAlphaModeUploads;
+            }
         }
-        std::array<GLint, DrawBatch::kTextureCapacity> alphaModes{};
-        for (std::uint32_t slot = 0; slot < batch.textureCount; ++slot) {
-            alphaModes[slot] = static_cast<GLint>(
-                textures[batch.textures[slot].value() - 1U].alphaMode);
-        }
-        gl.uniform1iv(
-            textureAlphaModesLocation,
-            static_cast<GLsizei>(alphaModes.size()),
-            alphaModes.data());
 
-        configureAttributes(batch.firstInstance);
-        gl.drawArraysInstanced(
-            GL_TRIANGLES,
-            0,
-            6,
-            static_cast<GLsizei>(batch.instanceCount));
+        if (baseInstanceAvailable) {
+            gl.drawArraysInstancedBaseInstance(
+                GL_TRIANGLE_STRIP,
+                0,
+                4,
+                static_cast<GLsizei>(batch.instanceCount),
+                batch.firstInstance);
+            ++statistics.baseInstanceDraws;
+        } else {
+            configureAttributes(batch.firstInstance, false);
+            configuredAttributeBuffer = uploadSlot.buffer;
+            gl.drawArraysInstanced(
+                GL_TRIANGLE_STRIP,
+                0,
+                4,
+                static_cast<GLsizei>(batch.instanceCount));
+        }
         submitted = true;
         ++statistics.drawCalls;
         statistics.submittedInstances += batch.instanceCount;
+        statistics.generatedVertices += static_cast<std::uint64_t>(batch.instanceCount) * 4U;
     }
 
     if (const GLenum submissionError = consumeOperationErrors(); submissionError != GL_NO_ERROR) {
-        const bool restored = restoreState(previous);
+        const bool restored = restoreIfNeeded();
         ++statistics.rejectedFrames;
         if (restored) {
             assignGlFailure(
@@ -1819,12 +2037,12 @@ bool OpenGlRenderer::Implementation::render(
     }
 
     if (submitted && !fenceUploadSlot(upload.slot)) {
-        static_cast<void>(restoreState(previous));
+        static_cast<void>(restoreIfNeeded());
         ++statistics.rejectedFrames;
         return false;
     }
 
-    if (!restoreState(previous)) {
+    if (!restoreIfNeeded()) {
         ++statistics.rejectedFrames;
         return false;
     }
@@ -1923,6 +2141,12 @@ bool OpenGlRenderer::Implementation::shutdown() noexcept {
                 gl.deleteSync(slot.fence);
                 slot.fence = nullptr;
             }
+            if (slot.buffer != 0 && slot.mapped != nullptr && gl.unmapBuffer != nullptr) {
+                gl.bindBuffer(kArrayBuffer, slot.buffer);
+                static_cast<void>(gl.unmapBuffer(kArrayBuffer));
+                slot.mapped = nullptr;
+                ++statistics.instanceUnmapOperations;
+            }
             if (slot.buffer != 0 && gl.deleteBuffers != nullptr) {
                 gl.deleteBuffers(1, &slot.buffer);
             }
@@ -1950,6 +2174,11 @@ bool OpenGlRenderer::Implementation::shutdown() noexcept {
     capacity = 0;
     instanceBufferBytes = 0;
     ownerContext = nullptr;
+    statePolicy = OpenGlUiStatePolicy::Preserve;
+    uploadStrategy = OpenGlUploadStrategy::TransientMap;
+    configuredAttributeBuffer = 0;
+    baseInstanceAvailable = false;
+    packetValidation = {};
     immutableTextureStorage = false;
     ready = false;
     statistics.gpuTextureBytes = 0;
@@ -1980,6 +2209,11 @@ void OpenGlRenderer::Implementation::abandon() noexcept {
     capacity = 0;
     instanceBufferBytes = 0;
     ownerContext = nullptr;
+    statePolicy = OpenGlUiStatePolicy::Preserve;
+    uploadStrategy = OpenGlUploadStrategy::TransientMap;
+    configuredAttributeBuffer = 0;
+    baseInstanceAvailable = false;
+    packetValidation = {};
     immutableTextureStorage = false;
     ready = false;
     statistics.gpuTextureBytes = 0;
@@ -2008,7 +2242,9 @@ void OpenGlRenderer::Implementation::discardHostErrors() noexcept {
     statistics.ignoredHostErrors += discarded;
 }
 
-void OpenGlRenderer::Implementation::configureAttributes(std::size_t firstInstance) const noexcept {
+void OpenGlRenderer::Implementation::configureAttributes(
+    std::size_t firstInstance,
+    bool configureInvariant) noexcept {
     std::size_t base = 0;
     static_cast<void>(checkedMultiply(firstInstance, sizeof(DrawInstance), base));
     const auto pointer = [base](std::size_t memberOffset) {
@@ -2021,9 +2257,13 @@ void OpenGlRenderer::Implementation::configureAttributes(std::size_t firstInstan
     gl.vertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, pointer(offsetof(DrawInstance, color)));
     gl.vertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, pointer(offsetof(DrawInstance, radius)));
     gl.vertexAttribIPointer(4, 4, GL_UNSIGNED_BYTE, stride, pointer(offsetof(DrawInstance, kind)));
-    for (GLuint index = 0; index <= 4; ++index) {
-        gl.enableVertexAttribArray(index);
-        gl.vertexAttribDivisor(index, 1);
+    ++statistics.attributeOffsetUpdates;
+    if (configureInvariant) {
+        for (GLuint index = 0; index <= 4; ++index) {
+            gl.enableVertexAttribArray(index);
+            gl.vertexAttribDivisor(index, 1);
+        }
+        ++statistics.attributeFormatConfigurations;
     }
 }
 
@@ -2122,13 +2362,17 @@ OpenGlRenderer::~OpenGlRenderer() { static_cast<void>(mImplementation->shutdown(
 bool OpenGlRenderer::initialize(
     std::size_t instanceCapacity,
     std::size_t textureCapacityValue,
-    std::size_t uploadSlotCountValue) noexcept {
+    std::size_t uploadSlotCountValue,
+    OpenGlUiStatePolicy statePolicy,
+    OpenGlUploadStrategy uploadStrategy) noexcept {
     try {
         const bool wasReady = mImplementation->ready;
         const bool initialized = mImplementation->initialize(
             instanceCapacity,
             textureCapacityValue,
-            uploadSlotCountValue);
+            uploadSlotCountValue,
+            statePolicy,
+            uploadStrategy);
         if (!initialized && !wasReady) {
             ++mImplementation->statistics.initializationFailures;
             const henia::detail::FixedError diagnostic = mImplementation->error;

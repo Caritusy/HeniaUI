@@ -56,6 +56,10 @@ public:
     [[nodiscard]] bool reservePages(std::size_t count);
     [[nodiscard]] bool add(const RasterizedGlyph& glyph);
     [[nodiscard]] bool add(std::span<const RasterizedGlyph> glyphs);
+    // Explicitly removes glyph records published by this atlas and retires all
+    // of its page textures. The destructor intentionally does not do this so a
+    // host can choose whether published resources outlive the packing helper.
+    [[nodiscard]] bool releaseResources();
 
     [[nodiscard]] FontHandle font() const noexcept;
     [[nodiscard]] std::span<const TextureHandle> pages() const noexcept;
@@ -76,10 +80,6 @@ private:
     };
 
     [[nodiscard]] bool valid(const RasterizedGlyph& glyph) const noexcept;
-    [[nodiscard]] bool place(
-        std::uint32_t width,
-        std::uint32_t height,
-        Placement& placement);
     [[nodiscard]] bool allocatePage();
 
     TextureStore* mTextures = nullptr;
@@ -88,6 +88,7 @@ private:
     DynamicGlyphAtlasOptions mOptions{};
     std::vector<Page> mPageState;
     std::vector<TextureHandle> mPageHandles;
+    std::vector<char32_t> mPublishedCodepoints;
     DynamicGlyphAtlasStatistics mStatistics{};
 };
 

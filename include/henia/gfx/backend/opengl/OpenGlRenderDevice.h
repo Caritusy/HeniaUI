@@ -19,6 +19,8 @@ struct OpenGlGfxStatistics final {
     std::uint64_t successfulFrames = 0;
     std::uint64_t drawCalls = 0;
     std::uint64_t submittedInstances = 0;
+    std::uint64_t generatedVertices = 0;
+    std::uint64_t submittedIndices = 0;
     std::uint64_t fullInstanceUploads = 0;
     std::uint64_t partialInstanceUploads = 0;
     std::uint64_t zeroWorkInstanceRevisions = 0;
