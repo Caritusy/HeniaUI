@@ -81,11 +81,11 @@ from immutable content revisions.
 
 OpenGL is the portable fallback. A changed compact stream is copied into the
 existing fence-owned upload ring and submitted with the normal
-`glDrawArraysInstanced` call. It requires no compute or indirect-draw extension;
+`glDrawElementsInstanced` call. It requires no compute or indirect-draw extension;
 the default direct path and partial immutable uploads are unchanged.
 
 D3D12 gives every fence-owned submission slot a persistently mapped
-`D3D12_DRAW_ARGUMENTS` upload resource. After slot-reuse validation, the CPU
+`D3D12_DRAW_INDEXED_ARGUMENTS` upload resource. After slot-reuse validation, the CPU
 visibility result writes one argument and the command list records
 `ExecuteIndirect`. The same slot fence protects the argument resource, staging
 instances, and optional GPU-local instances. Direct mode still records

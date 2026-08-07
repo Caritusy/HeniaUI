@@ -76,6 +76,44 @@ static_assert(offsetof(BoxInstance, maximum) == 16);
 static_assert(offsetof(BoxInstance, color) == 32);
 static_assert(offsetof(BoxInstance, effects) == 48);
 
+constexpr std::size_t kFaceIndexCount = 36;
+constexpr std::size_t kEdgeIndexCount = 72;
+constexpr auto kBoxIndices = [] {
+    std::array<std::uint16_t, kFaceIndexCount + kEdgeIndexCount> result{};
+    constexpr std::array<std::uint16_t, 6> pattern{0, 1, 2, 2, 3, 0};
+    for (std::uint16_t face = 0; face < 6; ++face) {
+        for (std::size_t index = 0; index < pattern.size(); ++index) {
+            result[static_cast<std::size_t>(face) * pattern.size() + index] =
+                static_cast<std::uint16_t>(48U + face * 4U + pattern[index]);
+        }
+    }
+    for (std::uint16_t edge = 0; edge < 12; ++edge) {
+        for (std::size_t index = 0; index < pattern.size(); ++index) {
+            result[kFaceIndexCount + static_cast<std::size_t>(edge) * pattern.size() + index] =
+                static_cast<std::uint16_t>(edge * 4U + pattern[index]);
+        }
+    }
+    return result;
+}();
+
+struct PrimitiveSelection final {
+    std::size_t firstIndex{};
+    std::size_t indexCount{};
+    std::size_t vertexCount{};
+};
+
+[[nodiscard]] PrimitiveSelection selectPrimitives(
+    bool anyFill,
+    bool anyOutline) noexcept {
+    if (anyFill && anyOutline) {
+        return {0, kBoxIndices.size(), 72};
+    }
+    if (anyFill) {
+        return {0, kFaceIndexCount, 24};
+    }
+    return {kFaceIndexCount, anyOutline ? kEdgeIndexCount : 0U, anyOutline ? 48U : 0U};
+}
+
 using CreateShaderFn = GLuint(APIENTRYP)(GLenum);
 using ShaderSourceFn = void(APIENTRYP)(GLuint, GLsizei, const GlChar* const*, const GLint*);
 using CompileShaderFn = void(APIENTRYP)(GLuint);
@@ -238,6 +276,7 @@ flat out float halfWidth;
 flat out float hueOffset;
 flat out uint effects;
 flat out float validEdge;
+flat out uint primitiveKind;
 
 const ivec2 edges[12] = ivec2[12](
     ivec2(0, 1), ivec2(2, 3), ivec2(0, 2), ivec2(1, 3),
@@ -246,6 +285,10 @@ const ivec2 edges[12] = ivec2[12](
 const vec2 quad[4] = vec2[4](
     vec2(0.0, -1.0), vec2(1.0, -1.0),
     vec2(1.0, 1.0), vec2(0.0, 1.0));
+const ivec4 faces[6] = ivec4[6](
+    ivec4(0, 2, 3, 1), ivec4(4, 5, 7, 6),
+    ivec4(0, 4, 6, 2), ivec4(1, 3, 7, 5),
+    ivec4(0, 1, 5, 4), ivec4(2, 6, 7, 3));
 
 vec3 corner(int code) {
     return vec3(float(code & 1), float((code >> 1) & 1), float((code >> 2) & 1));
@@ -334,29 +377,53 @@ bool clipSegment(inout vec4 startClip, inout vec4 finishClip, bool zeroToOne) {
 }
 
 void main() {
-    int edgeIndex = gl_VertexID / 4;
-    vec2 vertex = quad[gl_VertexID % 4];
     vec3 motionOffset = (instanceEffects & 2u) != 0u
         ? motionDelta() * motionScale
         : vec3(0.0);
     vec3 minimumValue = instanceMinimumAndWidth.xyz + motionOffset;
     vec3 maximumValue = instanceMaximumAndHue.xyz + motionOffset;
+    lineColor = instanceColor;
+    hueOffset = instanceMaximumAndHue.w;
+    effects = instanceEffects;
+    primitiveKind = gl_VertexID >= 48 ? 1u : 0u;
+    edgeAcross = 0.0;
+    edgeAlong = 0.0;
+    segmentLength = 0.0;
+    halfWidth = max(instanceMinimumAndWidth.w, 0.5) * 0.5;
+    validEdge = 0.0;
+    bool zeroToOne = zeroToOneDepth != 0;
+
+    if (primitiveKind != 0u) {
+        int faceVertex = gl_VertexID - 48;
+        int face = faceVertex / 4;
+        int localVertex = faceVertex % 4;
+        int cornerCode = faces[face][localVertex];
+        vec3 position = mix(minimumValue, maximumValue, corner(cornerCode));
+        vec4 clipPosition = viewProjection * vec4(position, 1.0);
+        validEdge = (instanceEffects & 16u) != 0u && finiteClip(clipPosition)
+            ? 1.0 : 0.0;
+        if (validEdge < 0.5) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
+        if (zeroToOne) {
+            clipPosition.z = clipPosition.z * 2.0 - clipPosition.w;
+        }
+        gl_Position = clipPosition;
+        return;
+    }
+
+    int edgeIndex = gl_VertexID / 4;
+    vec2 vertex = quad[gl_VertexID % 4];
     vec3 start = mix(minimumValue, maximumValue, corner(edges[edgeIndex].x));
     vec3 finish = mix(minimumValue, maximumValue, corner(edges[edgeIndex].y));
     vec4 startClip = viewProjection * vec4(start, 1.0);
     vec4 finishClip = viewProjection * vec4(finish, 1.0);
-    bool zeroToOne = zeroToOneDepth != 0;
-    validEdge = clipSegment(startClip, finishClip, zeroToOne) ? 1.0 : 0.0;
+    validEdge = (instanceEffects & 32u) == 0u
+        && clipSegment(startClip, finishClip, zeroToOne) ? 1.0 : 0.0;
 
-    halfWidth = max(instanceMinimumAndWidth.w, 0.5) * 0.5;
     float fringe = 1.25;
     float expandedWidth = halfWidth + fringe;
-    edgeAcross = 0.0;
-    edgeAlong = 0.0;
-    segmentLength = 0.0;
-    lineColor = instanceColor;
-    hueOffset = instanceMaximumAndHue.w;
-    effects = instanceEffects;
     if (validEdge < 0.5) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
@@ -396,6 +463,7 @@ flat in float halfWidth;
 flat in float hueOffset;
 flat in uint effects;
 flat in float validEdge;
+flat in uint primitiveKind;
 uniform float timeSeconds;
 out vec4 outputColor;
 
@@ -406,16 +474,22 @@ vec3 hue(float value) {
 
 void main() {
     if (validEdge < 0.5) discard;
+    vec4 color = lineColor;
+    if ((effects & 1u) != 0u) {
+        color.rgb *= hue(fract(timeSeconds * 0.08 + hueOffset));
+    }
+    if (primitiveKind != 0u) {
+        color.a *= float((effects >> 8u) & 255u) / 255.0;
+        if (color.a <= 0.001) discard;
+        outputColor = vec4(color.rgb * color.a, color.a);
+        return;
+    }
     vec2 centered = vec2(edgeAlong - segmentLength * 0.5, edgeAcross);
     vec2 outside = abs(centered) - vec2(segmentLength * 0.5, halfWidth);
     float distanceToEdge = length(max(outside, vec2(0.0)))
         + min(max(outside.x, outside.y), 0.0);
     float antiAlias = max(fwidth(distanceToEdge), 0.75);
     float coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
-    vec4 color = lineColor;
-    if ((effects & 1u) != 0u) {
-        color.rgb *= hue(fract(timeSeconds * 0.08 + hueOffset));
-    }
     color.a *= coverage;
     if (color.a <= 0.001) discard;
     outputColor = vec4(color.rgb * color.a, color.a);
@@ -686,22 +760,11 @@ bool OpenGlRenderDevice::Implementation::initialize(
         gl.bindBuffer(kArrayBuffer, static_cast<GLuint>(previousArrayBuffer));
         gl.bindVertexArray(static_cast<GLuint>(previousVertexArray));
     };
-    constexpr auto edgeIndices = [] {
-        std::array<std::uint16_t, 72> result{};
-        constexpr std::array<std::uint16_t, 6> pattern{0, 1, 2, 2, 3, 0};
-        for (std::uint16_t edge = 0; edge < 12; ++edge) {
-            for (std::size_t index = 0; index < pattern.size(); ++index) {
-                result[static_cast<std::size_t>(edge) * pattern.size() + index] =
-                    static_cast<std::uint16_t>(edge * 4U + pattern[index]);
-            }
-        }
-        return result;
-    }();
     gl.bindBuffer(kElementArrayBuffer, indexBuffer);
     gl.bufferData(
         kElementArrayBuffer,
-        static_cast<GlSize>(sizeof(edgeIndices)),
-        edgeIndices.data(),
+        static_cast<GlSize>(sizeof(kBoxIndices)),
+        kBoxIndices.data(),
         kStaticDraw);
     if (const GLenum glError = consumeOperationErrors(); glError != GL_NO_ERROR) {
         restoreInitializationState();
@@ -816,6 +879,18 @@ bool OpenGlRenderDevice::Implementation::render(
         visibilityStatistics = visibilityList.statistics();
     }
     const std::size_t submittedCount = cpuCulling ? culledBoxes.size() : sourceBoxes.size();
+    bool anyFill = false;
+    bool anyOutline = false;
+    const auto inspectBox = [&](const BoxInstance& box) noexcept {
+        anyFill = anyFill || box.fillEnabled();
+        anyOutline = anyOutline || box.outlineEnabled();
+    };
+    if (cpuCulling) {
+        for (const BoxInstance& box : culledBoxes) inspectBox(box);
+    } else {
+        for (const BoxInstance& box : sourceBoxes) inspectBox(box);
+    }
+    const PrimitiveSelection primitives = selectPrimitives(anyFill, anyOutline);
     const std::uint64_t producerIdentity = cpuCulling
         ? visibilityList.identity() : batch.identity();
     const std::uint64_t producerRevision = cpuCulling
@@ -1024,20 +1099,21 @@ bool OpenGlRenderDevice::Implementation::render(
         if (restored) error = "OpenGL gfx pipeline state failed";
         return false;
     }
-    if (submittedCount != 0) {
+    if (submittedCount != 0 && primitives.indexCount != 0) {
         gl.drawElementsInstanced(
             GL_TRIANGLES,
-            72,
+            static_cast<GLsizei>(primitives.indexCount),
             GL_UNSIGNED_SHORT,
-            nullptr,
+            reinterpret_cast<const void*>(primitives.firstIndex * sizeof(std::uint16_t)),
             static_cast<GLsizei>(submittedCount));
         ++statistics.drawCalls;
         statistics.submittedInstances += submittedCount;
-        statistics.generatedVertices += submittedCount * 48U;
-        statistics.submittedIndices += submittedCount * 72U;
+        statistics.generatedVertices += submittedCount * primitives.vertexCount;
+        statistics.submittedIndices += submittedCount * primitives.indexCount;
     }
     const GLenum drawError = consumeOperationErrors();
-    const bool fenced = submittedCount == 0 || fenceUploadSlot(upload.slot);
+    const bool fenced = submittedCount == 0 || primitives.indexCount == 0
+        || fenceUploadSlot(upload.slot);
     if (drawError != GL_NO_ERROR) {
         const bool restored = restoreCapturedState();
         ++statistics.rejectedFrames;

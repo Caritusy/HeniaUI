@@ -384,6 +384,10 @@ bidirectional text, ligatures, and emoji sequences still require an appropriate
 
 ```cpp
 henia::gfx::ShapeBatch3D shapes;
+henia::gfx::BoxInstance box;
+box.setFillOpacity(0.25F);       // optional face fill, encoded in the 64-byte instance
+box.setOutlineEnabled(true);
+const std::array boxes{box};
 shapes.replaceBoxes(boxes);       // only when object content changes
 auto snapshot = shapes.snapshot();
 
@@ -396,11 +400,13 @@ henia::gfx::ViewParameters view{
 renderDevice.render(snapshot, view, hasDepthAttachment);
 ```
 
-Each box stores bounds, color, pixel line width, hue offset, and generic effect
-parameters. The GPU expands twelve fixed edges into indexed four-vertex quads. Camera and
-time changes update frame constants without rebuilding or re-uploading stable
-instance content. Optional visibility reuses immutable page bounds and keeps
-direct submission as the default path.
+Each box stores bounds, color, pixel line width, hue offset, optional fill opacity,
+outline state, and generic effect parameters. The GPU expands six faces and/or
+twelve fixed edges from one unchanged 64-byte instance. Fill-only, outline-only,
+and combined batches remain one instanced draw. Camera and time changes update
+frame constants without rebuilding or re-uploading stable instance content.
+Optional visibility reuses immutable page bounds and keeps direct submission as
+the default path.
 
 ### Host ownership
 

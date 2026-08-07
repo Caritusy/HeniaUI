@@ -410,12 +410,17 @@ are lock-free, and backends consume page spans directly. Stable snapshots share
 the exact same directory/pages and allocate nothing. `copiedBoxCount()` makes
 producer data-copy amplification observable in tests and benchmarks.
 
-The box fast path uses twelve fixed edges. Each edge has four unique strip-order
-vertices and six reusable indices; the vertex shader projects the endpoints and
-expands the indexed quad in viewport space. Consequently:
+The box fast path uses six fixed faces and twelve fixed edges. A quantized fill
+opacity plus fill/outline flags live in unused bits of `BoxInstance::effects`, so
+the public/GPU instance remains 64 bytes. Each face has four projected corner
+vertices and six reusable indices. Each edge has four unique strip-order vertices
+and six reusable indices; the vertex shader projects the endpoints and expands
+the indexed quad in viewport space. Face indices precede edge indices so a combined
+source-over draw lays the translucent fill down before its outline. Consequently:
 
 - N boxes do not produce N CPU meshes;
 - N boxes in one depth/material group produce one instanced draw;
+- fill-only, outline-only, and mixed boxes share the same batch and instance layout;
 - line width is consistent without `GL_LINES`, D3D line primitives, or geometry shaders;
 - hue cycling is driven by a frame constant and per-instance offset;
 - camera and time changes do not upload the instance buffer.

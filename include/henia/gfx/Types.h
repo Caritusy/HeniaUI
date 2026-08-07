@@ -80,6 +80,8 @@ enum class BoxEffect : std::uint32_t {
     // instances and custom backends can decode the same 64-byte layout.
     PackedMotionTranslation = 1U << 2U,
     ExplicitVisibilityMask = 1U << 3U,
+    Filled = 1U << 4U,
+    OutlineDisabled = 1U << 5U,
 };
 
 [[nodiscard]] constexpr BoxEffect operator|(BoxEffect left, BoxEffect right) noexcept {
@@ -91,6 +93,8 @@ struct BoxInstance final {
     static constexpr std::uint32_t kPackedMantissaBits = 12U;
     static constexpr std::uint32_t kPackedComponentMask =
         (std::uint32_t{1} << kPackedComponentBits) - 1U;
+    static constexpr std::uint32_t kFillOpacityShift = 8U;
+    static constexpr std::uint32_t kFillOpacityMask = 0xFFU << kFillOpacityShift;
 
     Vec3 minimum{};
     float lineWidth = 1.5F;
@@ -151,6 +155,37 @@ struct BoxInstance final {
             std::bit_cast<float>(reserved[1]),
             std::bit_cast<float>(reserved[2]),
         };
+    }
+    constexpr void setFillOpacity(float opacity) noexcept {
+        const float finiteOpacity = opacity == opacity ? opacity : 0.0F;
+        const float clamped = finiteOpacity < 0.0F
+            ? 0.0F : finiteOpacity > 1.0F ? 1.0F : finiteOpacity;
+        const std::uint32_t quantized = static_cast<std::uint32_t>(clamped * 255.0F + 0.5F);
+        std::uint32_t raw = static_cast<std::uint32_t>(effects) & ~kFillOpacityMask;
+        raw |= quantized << kFillOpacityShift;
+        if (quantized != 0U) raw |= static_cast<std::uint32_t>(BoxEffect::Filled);
+        else raw &= ~static_cast<std::uint32_t>(BoxEffect::Filled);
+        effects = static_cast<BoxEffect>(raw);
+    }
+    constexpr void clearFill() noexcept {
+        effects = static_cast<BoxEffect>(static_cast<std::uint32_t>(effects)
+            & ~(kFillOpacityMask | static_cast<std::uint32_t>(BoxEffect::Filled)));
+    }
+    [[nodiscard]] constexpr float fillOpacity() const noexcept {
+        const std::uint32_t quantized =
+            (static_cast<std::uint32_t>(effects) & kFillOpacityMask)
+            >> kFillOpacityShift;
+        return static_cast<float>(quantized) / 255.0F;
+    }
+    [[nodiscard]] constexpr bool fillEnabled() const noexcept {
+        return hasEffect(BoxEffect::Filled);
+    }
+    constexpr void setOutlineEnabled(bool enabled) noexcept {
+        if (enabled) removeEffect(BoxEffect::OutlineDisabled);
+        else addEffect(BoxEffect::OutlineDisabled);
+    }
+    [[nodiscard]] constexpr bool outlineEnabled() const noexcept {
+        return !hasEffect(BoxEffect::OutlineDisabled);
     }
     [[nodiscard]] constexpr bool operator==(const BoxInstance&) const noexcept = default;
 

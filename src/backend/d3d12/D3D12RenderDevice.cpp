@@ -31,17 +31,47 @@ static_assert(std::is_standard_layout_v<BoxInstance>);
 static_assert(sizeof(BoxInstance) == 64);
 
 constexpr std::size_t kDepthPipelineCount = 15;
-constexpr auto kEdgeIndices = [] {
-    std::array<std::uint16_t, 72> result{};
+constexpr std::size_t kFaceIndexCount = 36;
+constexpr std::size_t kEdgeIndexCount = 72;
+constexpr auto kBoxIndices = [] {
+    std::array<std::uint16_t, kFaceIndexCount + kEdgeIndexCount> result{};
     constexpr std::array<std::uint16_t, 6> pattern{0, 1, 2, 2, 3, 0};
+    for (std::uint16_t face = 0; face < 6; ++face) {
+        for (std::size_t index = 0; index < pattern.size(); ++index) {
+            result[static_cast<std::size_t>(face) * pattern.size() + index] =
+                static_cast<std::uint16_t>(48U + face * 4U + pattern[index]);
+        }
+    }
     for (std::uint16_t edge = 0; edge < 12; ++edge) {
         for (std::size_t index = 0; index < pattern.size(); ++index) {
-            result[static_cast<std::size_t>(edge) * pattern.size() + index] =
+            result[kFaceIndexCount + static_cast<std::size_t>(edge) * pattern.size() + index] =
                 static_cast<std::uint16_t>(edge * 4U + pattern[index]);
         }
     }
     return result;
 }();
+
+struct PrimitiveSelection final {
+    std::uint32_t firstIndex{};
+    std::uint32_t indexCount{};
+    std::size_t vertexCount{};
+};
+
+[[nodiscard]] PrimitiveSelection selectPrimitives(
+    bool anyFill,
+    bool anyOutline) noexcept {
+    if (anyFill && anyOutline) {
+        return {0, static_cast<std::uint32_t>(kBoxIndices.size()), 72};
+    }
+    if (anyFill) {
+        return {0, static_cast<std::uint32_t>(kFaceIndexCount), 24};
+    }
+    return {
+        static_cast<std::uint32_t>(kFaceIndexCount),
+        static_cast<std::uint32_t>(anyOutline ? kEdgeIndexCount : 0U),
+        anyOutline ? 48U : 0U,
+    };
+}
 
 struct FrameConstants final {
     std::array<float, 16> viewProjection{};
@@ -466,7 +496,7 @@ bool D3D12RenderDevice::Implementation::initialize(
     const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
     const D3D12_RESOURCE_DESC buffer = bufferDescription(bufferBytes);
     const D3D12_RESOURCE_DESC indirectBuffer = bufferDescription(sizeof(D3D12_DRAW_INDEXED_ARGUMENTS));
-    const D3D12_RESOURCE_DESC indexDescription = bufferDescription(sizeof(kEdgeIndices));
+    const D3D12_RESOURCE_DESC indexDescription = bufferDescription(sizeof(kBoxIndices));
     if (FAILED(device.CreateCommittedResource(
             &uploadHeap,
             D3D12_HEAP_FLAG_NONE,
@@ -485,7 +515,7 @@ bool D3D12RenderDevice::Implementation::initialize(
         shutdown();
         return false;
     }
-    std::memcpy(mappedIndices, kEdgeIndices.data(), sizeof(kEdgeIndices));
+    std::memcpy(mappedIndices, kBoxIndices.data(), sizeof(kBoxIndices));
     indexBuffer->Unmap(0, nullptr);
     for (Submission& submission : submissions) {
         if (FAILED(device.CreateCommittedResource(
@@ -677,6 +707,18 @@ bool D3D12RenderDevice::Implementation::record(
         visibilityStatistics = visibilityList.statistics();
     }
     const std::size_t submittedCount = cpuCulling ? culledBoxes.size() : sourceBoxes.size();
+    bool anyFill = false;
+    bool anyOutline = false;
+    const auto inspectBox = [&](const BoxInstance& box) noexcept {
+        anyFill = anyFill || box.fillEnabled();
+        anyOutline = anyOutline || box.outlineEnabled();
+    };
+    if (cpuCulling) {
+        for (const BoxInstance& box : culledBoxes) inspectBox(box);
+    } else {
+        for (const BoxInstance& box : sourceBoxes) inspectBox(box);
+    }
+    const PrimitiveSelection primitives = selectPrimitives(anyFill, anyOutline);
     const std::uint64_t producerIdentity = cpuCulling
         ? visibilityList.identity() : batch.identity();
     const std::uint64_t producerRevision = cpuCulling
@@ -830,9 +872,9 @@ bool D3D12RenderDevice::Implementation::record(
 
     if (cpuCulling) {
         *submission.mappedIndirectArguments = {
-            .IndexCountPerInstance = 72,
+            .IndexCountPerInstance = primitives.indexCount,
             .InstanceCount = static_cast<UINT>(submittedCount),
-            .StartIndexLocation = 0,
+            .StartIndexLocation = primitives.firstIndex,
             .BaseVertexLocation = 0,
             .StartInstanceLocation = 0,
         };
@@ -883,12 +925,12 @@ bool D3D12RenderDevice::Implementation::record(
     commandList.IASetVertexBuffers(0, 1, &bufferView);
     const D3D12_INDEX_BUFFER_VIEW indexView{
         .BufferLocation = indexBuffer->GetGPUVirtualAddress(),
-        .SizeInBytes = static_cast<UINT>(sizeof(kEdgeIndices)),
+        .SizeInBytes = static_cast<UINT>(sizeof(kBoxIndices)),
         .Format = DXGI_FORMAT_R16_UINT,
     };
     commandList.IASetIndexBuffer(&indexView);
     ++statistics.viewUpdates;
-    if (submittedCount != 0) {
+    if (submittedCount != 0 && primitives.indexCount != 0) {
         if (cpuCulling) {
             commandList.ExecuteIndirect(
                 drawCommandSignature.Get(),
@@ -900,16 +942,16 @@ bool D3D12RenderDevice::Implementation::record(
             ++statistics.indirectDrawCalls;
         } else {
             commandList.DrawIndexedInstanced(
-                72,
+                primitives.indexCount,
                 static_cast<UINT>(submittedCount),
-                0,
+                primitives.firstIndex,
                 0,
                 0);
         }
         ++statistics.drawCalls;
         statistics.submittedInstances += submittedCount;
-        statistics.generatedVertices += submittedCount * 48U;
-        statistics.submittedIndices += submittedCount * 72U;
+        statistics.generatedVertices += submittedCount * primitives.vertexCount;
+        statistics.submittedIndices += submittedCount * primitives.indexCount;
         if (!useGpuLocal) statistics.uploadHeapReadBytes += submittedBytes;
     }
     const std::uint64_t cpuDrawSubmitNanoseconds = elapsedNanoseconds(submitStarted);

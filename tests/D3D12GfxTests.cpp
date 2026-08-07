@@ -546,6 +546,22 @@ int main() {
             return EXIT_FAILURE;
         }
     }
+    BoxInstance filledVisual{
+        .minimum = {-0.4F, -0.4F, 1.0F},
+        .maximum = {0.4F, 0.4F, 1.4F},
+        .color = {0.9F, 0.1F, 0.8F, 1.0F},
+    };
+    filledVisual.setFillOpacity(1.0F);
+    filledVisual.setOutlineEnabled(false);
+    const std::vector<henia::test::Rgba8> filledPixels = renderGfxFrame(
+        henia::test::gfxClipBatch(filledVisual),
+        henia::test::gfxAaView());
+    const henia::test::Rgba8 filledCenter = filledPixels[
+        static_cast<std::size_t>(height / 2U) * width + width / 2U];
+    if (filledCenter.red < 180U || filledCenter.green > 80U
+        || filledCenter.blue < 160U) {
+        fail("D3D12 filled box did not shade its projected faces");
+    }
     const D3D12GfxStatistics automaticStatistics = clipRenderer.statistics();
     if (automaticStatistics.instanceCopyOperations != 0
         || automaticStatistics.copiedInstanceBytes != 0

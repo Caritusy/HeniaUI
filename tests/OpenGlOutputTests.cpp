@@ -1383,6 +1383,58 @@ int main() {
         glFinish();
         return readCurrentPixels();
     };
+    OpenGlRenderDevice fillGfx;
+    if (!fillGfx.initialize(2, 1)) {
+        fail("OpenGL filled-box renderer did not initialize");
+    }
+    ShapeBatch3D fillShapes;
+    BoxInstance leftFill{
+        .minimum = {-0.8F, -0.3F, 0.25F},
+        .maximum = {-0.2F, 0.3F, 0.75F},
+        .color = {0.1F, 0.9F, 0.2F, 1.0F},
+    };
+    leftFill.setFillOpacity(1.0F);
+    leftFill.setOutlineEnabled(false);
+    static_cast<void>(fillShapes.addBox(leftFill));
+    const ViewParameters fillView = henia::test::gfxClipView(ClipDepthRange::ZeroToOne);
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (!fillGfx.render(fillShapes.snapshot(), fillView)) {
+        fail("OpenGL initial filled-box render failed");
+    }
+    glFinish();
+    const std::vector<henia::test::Rgba8> initialFillPixels = readCurrentPixels();
+    BoxInstance rightFill{
+        .minimum = {0.2F, -0.3F, 0.25F},
+        .maximum = {0.8F, 0.3F, 0.75F},
+        .color = {0.9F, 0.1F, 0.8F, 1.0F},
+    };
+    rightFill.setFillOpacity(1.0F);
+    rightFill.setOutlineEnabled(false);
+    const std::array expandedFills{leftFill, rightFill};
+    if (!fillShapes.replaceBoxes(expandedFills)) {
+        fail("OpenGL filled-box expansion fixture was rejected");
+    }
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (!fillGfx.render(fillShapes.snapshot(), fillView)) {
+        fail("OpenGL first frame after filled-box expansion failed");
+    }
+    glFinish();
+    const std::vector<henia::test::Rgba8> expandedFillPixels = readCurrentPixels();
+    const std::size_t rightProbe = static_cast<std::size_t>(henia::test::kVisualHeight / 2U)
+        * henia::test::kVisualWidth + henia::test::kVisualWidth * 3U / 4U;
+    const henia::test::Rgba8 beforeExpansion = initialFillPixels[rightProbe];
+    const henia::test::Rgba8 afterExpansion = expandedFillPixels[rightProbe];
+    const OpenGlGfxStatistics fillStatistics = fillGfx.statistics();
+    if (beforeExpansion.red > 8U || beforeExpansion.green > 8U || beforeExpansion.blue > 8U
+        || afterExpansion.red < 180U || afterExpansion.green > 80U
+        || afterExpansion.blue < 160U
+        || fillStatistics.fullInstanceUploads != 2U
+        || fillStatistics.uploadedInstanceBytes != 3U * sizeof(BoxInstance)
+        || fillStatistics.generatedVertices != 72U
+        || fillStatistics.submittedIndices != 108U
+        || !fillGfx.shutdown()) {
+        fail("OpenGL new filled instance did not use its final color on the first frame");
+    }
     ShapeBatch3D motionShapes;
     BoxInstance motionBox{
         .minimum = {-0.25F, -0.25F, 0.25F},

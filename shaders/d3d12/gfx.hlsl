@@ -27,6 +27,7 @@ struct PixelInput {
     nointerpolation float hueOffset : HUE_OFFSET;
     nointerpolation uint effects : EFFECTS;
     nointerpolation float validEdge : VALID_EDGE;
+    nointerpolation uint primitiveKind : PRIMITIVE_KIND;
 };
 
 static const int2 edges[12] = {
@@ -37,6 +38,11 @@ static const int2 edges[12] = {
 static const float2 quad[4] = {
     float2(0.0, -1.0), float2(1.0, -1.0),
     float2(1.0, 1.0), float2(0.0, 1.0)
+};
+static const int4 faces[6] = {
+    int4(0, 2, 3, 1), int4(4, 5, 7, 6),
+    int4(0, 4, 6, 2), int4(1, 3, 7, 5),
+    int4(0, 1, 5, 4), int4(2, 6, 7, 3)
 };
 
 float3 corner(int code) {
@@ -119,29 +125,53 @@ uint clipSegment(inout float4 startClip, inout float4 finishClip, bool zeroToOne
 
 PixelInput vertexMain(VertexInput input) {
     PixelInput output;
-    int edgeIndex = input.vertexId / 4;
-    float2 vertex = quad[input.vertexId % 4];
     float3 motionOffset = (input.effects & 2u) != 0u
         ? decodeMotionDelta(input) * motionScale
         : 0.0;
     float3 minimumValue = input.minimumAndWidth.xyz + motionOffset;
     float3 maximumValue = input.maximumAndHue.xyz + motionOffset;
-    float3 start = lerp(minimumValue, maximumValue, corner(edges[edgeIndex].x));
-    float3 finish = lerp(minimumValue, maximumValue, corner(edges[edgeIndex].y));
-    float4 startClip = mul(viewProjection, float4(start, 1.0));
-    float4 finishClip = mul(viewProjection, float4(finish, 1.0));
     bool zeroToOne = (frameFlags & 1u) == 0u;
-    output.validEdge = clipSegment(startClip, finishClip, zeroToOne) != 0u ? 1.0 : 0.0;
-
-    output.halfWidth = max(input.minimumAndWidth.w, 0.5) * 0.5;
-    float fringe = 1.25;
-    float expandedWidth = output.halfWidth + fringe;
     output.color = input.color;
     output.edgeAcross = 0.0;
     output.edgeAlong = 0.0;
     output.segmentLength = 0.0;
+    output.halfWidth = max(input.minimumAndWidth.w, 0.5) * 0.5;
     output.hueOffset = input.maximumAndHue.w;
     output.effects = input.effects;
+    output.validEdge = 0.0;
+    output.primitiveKind = input.vertexId >= 48u ? 1u : 0u;
+
+    if (output.primitiveKind != 0u) {
+        uint faceVertex = input.vertexId - 48u;
+        uint face = faceVertex / 4u;
+        uint localVertex = faceVertex % 4u;
+        int cornerCode = faces[face][localVertex];
+        float3 position = lerp(minimumValue, maximumValue, corner(cornerCode));
+        float4 clipPosition = mul(viewProjection, float4(position, 1.0));
+        output.validEdge = (input.effects & 16u) != 0u
+            && all(isfinite(clipPosition)) ? 1.0 : 0.0;
+        if (output.validEdge < 0.5) {
+            output.position = float4(2.0, 2.0, 2.0, 1.0);
+            return output;
+        }
+        if (!zeroToOne) {
+            clipPosition.z = clipPosition.z * 0.5 + clipPosition.w * 0.5;
+        }
+        output.position = clipPosition;
+        return output;
+    }
+
+    int edgeIndex = input.vertexId / 4;
+    float2 vertex = quad[input.vertexId % 4];
+    float3 start = lerp(minimumValue, maximumValue, corner(edges[edgeIndex].x));
+    float3 finish = lerp(minimumValue, maximumValue, corner(edges[edgeIndex].y));
+    float4 startClip = mul(viewProjection, float4(start, 1.0));
+    float4 finishClip = mul(viewProjection, float4(finish, 1.0));
+    output.validEdge = (input.effects & 32u) == 0u
+        && clipSegment(startClip, finishClip, zeroToOne) != 0u ? 1.0 : 0.0;
+
+    float fringe = 1.25;
+    float expandedWidth = output.halfWidth + fringe;
     if (output.validEdge < 0.5) {
         output.position = float4(2.0, 2.0, 2.0, 1.0);
         return output;
@@ -178,6 +208,15 @@ float3 hue(float value) {
 
 float4 pixelMain(PixelInput input) : SV_Target {
     clip(input.validEdge - 0.5);
+    float4 color = input.color;
+    if ((input.effects & 1u) != 0u) {
+        color.rgb *= hue(frac(timeSeconds * 0.08 + input.hueOffset));
+    }
+    if (input.primitiveKind != 0u) {
+        color.a *= float((input.effects >> 8u) & 255u) / 255.0;
+        clip(color.a - 0.001);
+        return float4(color.rgb * color.a, color.a);
+    }
     float2 centered = float2(
         input.edgeAlong - input.segmentLength * 0.5,
         input.edgeAcross);
@@ -186,10 +225,6 @@ float4 pixelMain(PixelInput input) : SV_Target {
         + min(max(outside.x, outside.y), 0.0);
     float antiAlias = max(fwidth(distanceToEdge), 0.75);
     float coverage = 1.0 - smoothstep(-antiAlias, antiAlias, distanceToEdge);
-    float4 color = input.color;
-    if ((input.effects & 1u) != 0u) {
-        color.rgb *= hue(frac(timeSeconds * 0.08 + input.hueOffset));
-    }
     color.a *= coverage;
     clip(color.a - 0.001);
     return float4(color.rgb * color.a, color.a);

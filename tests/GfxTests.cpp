@@ -81,6 +81,20 @@ int main() {
         || legacyMotion.motionDelta() != Vec3{1.25F, -2.5F, 3.75F}) {
         fail("Clearing visibility corrupted a legacy motion payload");
     }
+    BoxInstance filledBox;
+    filledBox.setFillOpacity(0.25F);
+    filledBox.setOutlineEnabled(false);
+    if (!filledBox.fillEnabled() || filledBox.outlineEnabled()
+        || filledBox.fillOpacity() < 0.245F || filledBox.fillOpacity() > 0.255F
+        || !validate(filledBox).empty()) {
+        fail("BoxInstance fill and outline state was not encoded in the stable layout");
+    }
+    filledBox.setOutlineEnabled(true);
+    filledBox.clearFill();
+    if (filledBox.fillEnabled() || filledBox.fillOpacity() != 0.0F
+        || !filledBox.outlineEnabled() || !validate(filledBox).empty()) {
+        fail("BoxInstance fill state did not clear without changing outline state");
+    }
 
     ShapeBatch3D shapes;
     shapes.reserve(1024);
