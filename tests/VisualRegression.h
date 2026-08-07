@@ -387,7 +387,8 @@ inline constexpr std::array kUiGolden{
     GoldenProbe{114, 32, {32, 161, 204, 255}, 12},
     GoldenProbe{96, 20, {208, 150, 21, 255}, 12},
     GoldenProbe{96, 32, {0, 0, 0, 255}, 2},
-    GoldenProbe{40, 70, {145, 145, 153, 255}, 12},
+    GoldenProbe{40, 70, {0, 0, 0, 255}, 3},
+    GoldenProbe{41, 70, {0, 0, 0, 255}, 3},
     GoldenProbe{86, 64, {51, 179, 230, 255}, 10},
     GoldenProbe{99, 64, {0, 0, 0, 255}, 2},
     GoldenProbe{97, 74, {157, 44, 122, 255}, 15},
@@ -563,9 +564,14 @@ inline constexpr std::array kTextureContractGolden{
         {1.0F, 0.72F, 0.10F, 1.0F},
         3.0F);
     FontStore fonts;
-    std::vector<GlyphMetrics> glyphs{
-        {U'A', {{0.0F, 0.0F}, {1.0F, 1.0F}}, {32.0F, 16.0F}, {0.0F, 16.0F}, 32.0F},
-    };
+    std::vector<GlyphMetrics> glyphs{{
+        .codepoint = U'A',
+        .uv = {{0.0F, 0.0F}, {1.0F, 1.0F}},
+        .size = {16.0F, 16.0F},
+        .bearing = {0.0F, 16.0F},
+        .advance = 17.3F,
+        .rasterPlacement = GlyphRasterPlacement::PixelAligned,
+    }};
     const FontHandle font = fonts.add({
         .atlas = atlas,
         .pixelSize = 16.0F,
@@ -574,7 +580,7 @@ inline constexpr std::array kTextureContractGolden{
     });
     TextRunCache cache(fonts);
     TextPainter text(cache);
-    text.draw(canvas, font, 16.0F, {24.0F, 64.0F}, {0.95F, 0.95F, 1.0F, 0.6F}, "A");
+    text.draw(canvas, font, 16.0F, {24.25F, 64.5F}, {0.95F, 0.95F, 1.0F, 0.6F}, "AA");
     const std::array iconEffects{
         EffectLayer{
             .kind = EffectLayerKind::Glow,

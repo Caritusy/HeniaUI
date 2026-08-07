@@ -6,6 +6,11 @@
 
 namespace henia::ui {
 
+enum class GlyphRasterPlacement : std::uint8_t {
+    Smooth,
+    PixelAligned,
+};
+
 struct Vec2 final {
     float x = 0.0F;
     float y = 0.0F;

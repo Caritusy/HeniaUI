@@ -85,6 +85,7 @@ void testMixedUiUsesOneBatch() {
         const float y = 30.0F + static_cast<float>(index / 64) * 12.0F;
         glyphs[index] = {{{x, y}, {x + 5.0F, y + 10.0F}}, {{0.0F, 0.0F}, {0.1F, 0.1F}}};
     }
+    glyphs.front().rasterPlacement = GlyphRasterPlacement::PixelAligned;
     canvas.glyphs(TextureHandle{1}, {-0.25F, 0.5F}, glyphs, {0.92F, 0.96F, 1.0F, 1.0F});
     canvas.fillRect({{20.0F, 270.0F}, {200.0F, 290.0F}}, {0.20F, 0.75F, 0.55F, 1.0F}, 5.0F);
 
@@ -97,8 +98,39 @@ void testMixedUiUsesOneBatch() {
         packet.instances().begin(), packet.instances().end(),
         [](const DrawInstance& instance) { return instance.kind == PrimitiveKind::Glyph; });
     require(glyph != packet.instances().end()
-            && glyph->radius == -0.25F && glyph->thickness == 0.5F,
-        "glyph run origin was not retained for physical-pixel phase snapping");
+            && glyph->radius == -0.25F && glyph->thickness == 0.5F
+            && glyph->shaderParameter() == 1U
+            && (glyph + 1)->shaderParameter() == 0U,
+        "glyph run origin or explicit per-glyph pixel-alignment flag was lost");
+}
+
+void testPixelAlignedGlyphPhaseMatrix() {
+    Frame frame;
+    Canvas& canvas = frame.begin();
+    constexpr std::array phases{0.0F, 0.25F, 0.5F, 0.75F};
+    constexpr std::array glyphs{GlyphQuad{
+        .bounds = {{2.2F, 3.4F}, {7.2F, 12.4F}},
+        .uv = {{0.0F, 0.0F}, {1.0F, 1.0F}},
+        .rasterPlacement = GlyphRasterPlacement::PixelAligned,
+    }};
+    for (float y : phases) {
+        for (float x : phases) {
+            canvas.glyphs(TextureHandle{1}, {x, y}, glyphs, {1.0F, 1.0F, 1.0F, 1.0F});
+        }
+    }
+    const RenderPacket packet = frame.finish();
+    require(packet.instances().size() == phases.size() * phases.size(),
+        "pixel-aligned glyph phase matrix lost instances");
+    for (std::size_t index = 0; index < packet.instances().size(); ++index) {
+        const float expectedX = phases[index % phases.size()];
+        const float expectedY = phases[index / phases.size()];
+        const DrawInstance& instance = packet.instances()[index];
+        require(instance.kind == PrimitiveKind::Glyph
+                && instance.shaderParameter() == 1U
+                && instance.radius == expectedX
+                && instance.thickness == expectedY,
+            "pixel-aligned glyph phase metadata changed before the raster boundary");
+    }
 }
 
 void testClipAndBlendPreserveOrdering() {
@@ -914,6 +946,10 @@ void testFontDefinitionValidationAndGlyphIdIndex() {
     invalid.glyphs.front().advance = -1.0F;
     require(!invalidFonts.add(std::move(invalid)).valid(), "negative glyph advance was accepted");
     invalid = definition();
+    invalid.glyphs.front().rasterPlacement = static_cast<GlyphRasterPlacement>(0xFFU);
+    require(!invalidFonts.add(std::move(invalid)).valid(),
+        "invalid glyph raster placement was accepted");
+    invalid = definition();
     invalid.kerning = {{U'A', U'V', infinity}};
     require(!invalidFonts.add(std::move(invalid)).valid(), "invalid kerning was accepted");
     require(invalidFonts.size() == 0, "invalid font definitions mutated FontStore");
@@ -1195,6 +1231,27 @@ void testFallbackShapingAndDynamicGlyphPages() {
             && dynamicGlyph->size == Vec2{1.0F, 1.0F}
             && fonts.find(latin)->atlasFor(*dynamicGlyph) == dynamic.pages()[0],
         "font revision did not invalidate fallback layout for a new atlas glyph");
+
+    const GlyphMetrics originalA = *fonts.find(latin)->glyph(U'A');
+    require(dynamic.add({.codepoint = U'A', .advance = 17.0F})
+            && dynamic.add({.codepoint = U'A', .advance = 18.0F})
+            && fonts.find(latin)->glyph(U'A')->advance == 18.0F
+            && dynamic.releaseResources(),
+        "dynamic atlas did not release repeated glyph replacement publications");
+    const GlyphMetrics* restoredA = fonts.find(latin)->glyph(U'A');
+    require(restoredA != nullptr
+            && restoredA->uv == originalA.uv
+            && restoredA->size == originalA.size
+            && restoredA->bearing == originalA.bearing
+            && restoredA->advance == originalA.advance
+            && restoredA->glyphId == originalA.glyphId
+            && restoredA->atlas == originalA.atlas
+            && restoredA->rasterPlacement == originalA.rasterPlacement
+            && fonts.find(latin)->glyph(U'\u4E2D') == nullptr
+            && fonts.find(latin)->glyph(U'\u3042') == nullptr
+            && fonts.find(latin)->glyph(U'\u3000') == nullptr
+            && dynamic.pages().empty(),
+        "dynamic atlas teardown did not restore prior glyph metrics exactly");
 }
 
 void testTransactionalGlyphAndRegionBatches() {
@@ -1241,6 +1298,87 @@ void testTransactionalGlyphAndRegionBatches() {
             && regionTextures.statistics().regionUpdates == 4
             && regionTextures.statistics().coalescedDirtyArea == 19,
         "overlapping region order, dirty union, or rollback coverage was incorrect");
+
+    TextureStore preparationTextures;
+    const std::array<std::byte, 4> preparationBase{
+        std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    std::uint32_t preparationRegenerations = 0;
+    const TextureHandle preparationTarget = preparationTextures.create(
+        TextureFormat::Alpha8,
+        2,
+        2,
+        2,
+        preparationBase,
+        {
+            .backingPolicy = TextureBackingPolicy::Regenerable,
+            .regenerator = [&]() {
+                ++preparationRegenerations;
+                return std::vector<std::byte>(
+                    preparationBase.begin(), preparationBase.end());
+            },
+        });
+    require(preparationTextures.discardCpuBacking(preparationTarget),
+        "transactional regeneration fixture did not discard its backing");
+    const TextureView discardedPreparation = preparationTextures.view(preparationTarget);
+    const TextureStoreStatistics discardedStatistics = preparationTextures.statistics();
+    const std::array<std::byte, 1> preparationPatch{std::byte{0x7F}};
+    const std::array invalidPreparationUpdates{
+        TextureRegionUpdate{preparationTarget, {0, 0, 1, 1}, 1, preparationPatch},
+        TextureRegionUpdate{preparationTarget, {2, 2, 1, 1}, 1, preparationPatch},
+    };
+    const PreparedTextureUpdate invalidPreparation =
+        preparationTextures.prepareRegionUpdates(invalidPreparationUpdates);
+    const TextureView afterInvalidPreparation = preparationTextures.view(preparationTarget);
+    const TextureStoreStatistics afterInvalidStatistics = preparationTextures.statistics();
+    require(!invalidPreparation.valid()
+            && !afterInvalidPreparation.backingAvailable
+            && afterInvalidPreparation.revision == discardedPreparation.revision
+            && afterInvalidPreparation.dirtyRegion == discardedPreparation.dirtyRegion
+            && afterInvalidStatistics.cpuBackingBytes == discardedStatistics.cpuBackingBytes
+            && afterInvalidStatistics.discardedBackings == discardedStatistics.discardedBackings
+            && afterInvalidStatistics.backingRestorations
+                == discardedStatistics.backingRestorations
+            && afterInvalidStatistics.backingRestorationFailures
+                == discardedStatistics.backingRestorationFailures
+            && preparationRegenerations == 1,
+        "failed texture preparation published regenerated live state");
+
+    const std::array validPreparationUpdates{
+        TextureRegionUpdate{preparationTarget, {0, 0, 1, 1}, 1, preparationPatch},
+    };
+    {
+        const PreparedTextureUpdate abandonedPreparation =
+            preparationTextures.prepareRegionUpdates(validPreparationUpdates);
+        require(abandonedPreparation.valid()
+                && !preparationTextures.view(preparationTarget).backingAvailable
+                && preparationTextures.statistics().backingRestorations
+                    == discardedStatistics.backingRestorations,
+            "abandoned texture preparation mutated live backing or statistics");
+    }
+    require(!preparationTextures.view(preparationTarget).backingAvailable
+            && preparationRegenerations == 2,
+        "dropping a prepared texture transaction published regenerated backing");
+
+    PreparedTextureUpdate committedPreparation =
+        preparationTextures.prepareRegionUpdates(validPreparationUpdates);
+    require(committedPreparation.valid()
+            && !preparationTextures.view(preparationTarget).backingAvailable
+            && preparationTextures.commit(std::move(committedPreparation)),
+        "regenerated texture transaction did not remain staged until commit");
+    const TextureView committedPreparationView = preparationTextures.view(preparationTarget);
+    const TextureStoreStatistics committedPreparationStatistics =
+        preparationTextures.statistics();
+    require(committedPreparationView.backingAvailable
+            && committedPreparationView.revision == discardedPreparation.revision + 1U
+            && committedPreparationView.pixels[0] == preparationPatch.front()
+            && committedPreparationView.rollbackPixels.size() == 1
+            && committedPreparationView.rollbackPixels[0] == preparationBase.front()
+            && committedPreparationStatistics.backingRestorations
+                == discardedStatistics.backingRestorations + 1U
+            && committedPreparationStatistics.regionUpdates
+                == discardedStatistics.regionUpdates + 1U
+            && preparationRegenerations == 3,
+        "committed regenerated texture transaction lost pixels, rollback, or statistics");
 
     TextureStore atlasTextures;
     const std::array<std::byte, 1> atlasPixel{};
@@ -1476,6 +1614,100 @@ void testResourceLifetimeAndTextureBackingPolicies() {
     require(textures.statistics().backingRestorations == 1,
         "texture backing restoration statistics are incorrect");
 
+    TextureStore reentrantGrowthTextures;
+    const std::array<std::byte, 4> regeneratedPixels{
+        std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    const std::array<std::byte, 1> growthPixel{std::byte{9}};
+    std::vector<TextureHandle> growthHandles;
+    growthHandles.reserve(64);
+    std::uint32_t reentrantGrowthCalls = 0;
+    const TextureHandle growthTarget = reentrantGrowthTextures.create(
+        TextureFormat::Alpha8,
+        2,
+        2,
+        2,
+        regeneratedPixels,
+        {
+            .backingPolicy = TextureBackingPolicy::Regenerable,
+            .regenerator = [&]() {
+                ++reentrantGrowthCalls;
+                for (std::size_t index = 0; index < growthHandles.capacity(); ++index) {
+                    growthHandles.push_back(reentrantGrowthTextures.create(
+                        TextureFormat::Alpha8, 1, 1, 1, growthPixel));
+                }
+                return std::vector<std::byte>(
+                    regeneratedPixels.begin(), regeneratedPixels.end());
+            },
+        });
+    const std::array<std::byte, 1> growthPatch{std::byte{0x7F}};
+    require(reentrantGrowthTextures.discardCpuBacking(growthTarget)
+            && reentrantGrowthTextures.updateRegion(
+                growthTarget, {1, 1, 1, 1}, 1, growthPatch),
+        "reentrant texture-store growth invalidated prepared region restoration");
+    const TextureView growthView = reentrantGrowthTextures.view(growthTarget);
+    require(growthView.handle == growthTarget && growthView.backingAvailable
+            && growthView.pixels.size() == regeneratedPixels.size()
+            && growthView.pixels[3] == growthPatch.front()
+            && reentrantGrowthCalls == 1
+            && reentrantGrowthTextures.slotCount() == growthHandles.size() + 1U,
+        "reentrant texture-store growth corrupted regenerated backing");
+
+    TextureStore reentrantUpdateTextures;
+    const std::array<std::byte, 4> callbackPixels{
+        std::byte{4}, std::byte{4}, std::byte{4}, std::byte{4}};
+    const std::array<std::byte, 4> liveUpdatePixels{
+        std::byte{8}, std::byte{8}, std::byte{8}, std::byte{8}};
+    TextureHandle updateTarget{};
+    bool reentrantUpdateSucceeded = false;
+    updateTarget = reentrantUpdateTextures.create(
+        TextureFormat::Alpha8,
+        2,
+        2,
+        2,
+        regeneratedPixels,
+        {
+            .backingPolicy = TextureBackingPolicy::Regenerable,
+            .regenerator = [&]() {
+                reentrantUpdateSucceeded = reentrantUpdateTextures.update(
+                    updateTarget, 2, liveUpdatePixels);
+                return std::vector<std::byte>(callbackPixels.begin(), callbackPixels.end());
+            },
+        });
+    require(reentrantUpdateTextures.discardCpuBacking(updateTarget)
+            && reentrantUpdateTextures.ensureCpuBacking(updateTarget),
+        "reentrant texture update did not satisfy backing restoration");
+    const TextureView reentrantUpdateView = reentrantUpdateTextures.view(updateTarget);
+    require(reentrantUpdateSucceeded && reentrantUpdateView.revision == 2
+            && std::equal(
+                reentrantUpdateView.pixels.begin(),
+                reentrantUpdateView.pixels.end(),
+                liveUpdatePixels.begin()),
+        "outer regeneration overwrote newer reentrant texture backing");
+
+    TextureStore reentrantDestroyTextures;
+    TextureHandle destroyTarget{};
+    bool reentrantDestroySucceeded = false;
+    destroyTarget = reentrantDestroyTextures.create(
+        TextureFormat::Alpha8,
+        2,
+        2,
+        2,
+        regeneratedPixels,
+        {
+            .backingPolicy = TextureBackingPolicy::Regenerable,
+            .regenerator = [&]() {
+                reentrantDestroySucceeded = reentrantDestroyTextures.destroy(destroyTarget);
+                return std::vector<std::byte>(
+                    regeneratedPixels.begin(), regeneratedPixels.end());
+            },
+        });
+    require(reentrantDestroyTextures.discardCpuBacking(destroyTarget)
+            && !reentrantDestroyTextures.ensureCpuBacking(destroyTarget)
+            && reentrantDestroySucceeded
+            && !reentrantDestroyTextures.view(destroyTarget).handle.valid()
+            && reentrantDestroyTextures.statistics().backingRestorationFailures == 1,
+        "reentrant texture destruction published into a stale resource slot");
+
     const TextureHandle external = textures.createExternal(TextureFormat::Rgba8, 4, 4);
     const TextureView externalView = textures.view(external);
     require(externalView.handle == external
@@ -1521,6 +1753,7 @@ void testResourceLifetimeAndTextureBackingPolicies() {
 
 int main() {
     testMixedUiUsesOneBatch();
+    testPixelAlignedGlyphPhaseMatrix();
     testColorSpaceAndAlphaConversions();
     testClipAndBlendPreserveOrdering();
     testTextureTableOverflowStartsOneNewBatch();

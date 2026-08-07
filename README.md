@@ -369,7 +369,12 @@ queues are bounded, requests are deduplicated per face/physical-size/codepoint,
 and retryable failures use bounded exponential backoff, so layout never waits
 for rasterization. `fontChain()` selects locale-specific CJK face order and a
 missing scalar advances through that chain instead of being broadcast to every
-CJK face. The raster resolver chooses a bounded integer physical-size variant;
+CJK face. The raster resolver chooses a bounded 1/8-physical-pixel variant;
+small coverage glyphs use explicit cumulative per-glyph pixel alignment while
+their fractional advances remain intact. ASCII seeds and async fallbacks both
+use DirectWrite at the selected floating-point size. Externally resolved primary
+variants remain borrowed but participate in the shared bucket bound, closest-size
+fallback, and chain-aware async glyph publication;
 call `setDpiScale()` on monitor changes and prewarm known control sizes to avoid
 first-use atlas work. `releaseResources()` stops the worker and explicitly
 retires every internally owned face, glyph, and atlas page.

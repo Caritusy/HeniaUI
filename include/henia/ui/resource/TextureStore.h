@@ -81,6 +81,8 @@ private:
         std::uint64_t regionCount = 0;
         std::vector<std::byte> pixels;
         std::vector<std::byte> rollbackPixels;
+        std::vector<std::byte> rollbackSourcePixels;
+        bool regeneratedBacking = false;
     };
     std::vector<Entry> mEntries;
     bool mReady = false;
@@ -158,6 +160,9 @@ public:
         TextureHandle handle,
         std::uint32_t rowPitch,
         std::span<const std::byte> pixels);
+    // Regenerators may re-enter this store. Backing supplied by a reentrant
+    // update/restore wins; destruction, replacement, or incompatible mutation
+    // of the target makes the outer restoration fail without publishing.
     [[nodiscard]] bool ensureCpuBacking(TextureHandle handle);
 
     [[nodiscard]] TextureView view(TextureHandle handle) const noexcept;
@@ -187,6 +192,9 @@ private:
     };
 
     [[nodiscard]] static std::size_t bytesPerPixel(TextureFormat format) noexcept;
+    [[nodiscard]] bool regenerateCpuBacking(
+        TextureHandle handle,
+        std::vector<std::byte>& output);
     [[nodiscard]] TextureHandle allocate(Entry entry);
     [[nodiscard]] Entry* find(TextureHandle handle) noexcept;
     [[nodiscard]] const Entry* find(TextureHandle handle) const noexcept;

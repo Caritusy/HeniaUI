@@ -1,5 +1,6 @@
 #include "henia/ui/platform/win32/Win32FontLoader.h"
 #include "henia/CheckedArithmetic.h"
+#include "DirectWriteGlyphRasterizer.h"
 
 #define NOMINMAX
 #include <Windows.h>
@@ -69,10 +70,22 @@ FontHandle Win32FontLoader::load(
     TextureStore& textures,
     FontStore& fonts,
     const Win32FontRequest& request) {
+    const float physicalPixelHeight = request.physicalPixelHeight > 0.0F
+        ? request.physicalPixelHeight
+        : static_cast<float>(request.pixelHeight);
+    const float logicalPixelHeight = request.logicalPixelHeight > 0.0F
+        ? request.logicalPixelHeight
+        : physicalPixelHeight / request.metricsScale;
     if (request.family.empty() || request.pixelHeight == 0 || request.atlasWidth == 0
         || request.atlasHeight == 0 || request.ranges.empty()
         || request.pixelHeight > static_cast<std::uint32_t>(std::numeric_limits<int>::max())
-        || !std::isfinite(request.metricsScale) || request.metricsScale <= 0.0F) {
+        || !std::isfinite(request.metricsScale) || request.metricsScale <= 0.0F
+        || !std::isfinite(request.physicalPixelHeight) || request.physicalPixelHeight < 0.0F
+        || !std::isfinite(request.logicalPixelHeight) || request.logicalPixelHeight < 0.0F
+        || !std::isfinite(physicalPixelHeight) || physicalPixelHeight < 1.0F
+        || !std::isfinite(logicalPixelHeight) || logicalPixelHeight <= 0.0F
+        || !std::isfinite(request.pixelAlignedMaximumPhysicalHeight)
+        || request.pixelAlignedMaximumPhysicalHeight < 0.0F) {
         return {};
     }
     std::size_t atlasBytes = 0;
@@ -84,6 +97,30 @@ FontHandle Win32FontLoader::load(
         return {};
     }
     const float inverseMetricsScale = 1.0F / request.metricsScale;
+
+    detail::ComPtr<IDWriteFactory> directWriteFactory;
+    if (FAILED(DWriteCreateFactory(
+            DWRITE_FACTORY_TYPE_SHARED,
+            __uuidof(IDWriteFactory),
+            reinterpret_cast<IUnknown**>(directWriteFactory.GetAddressOf())))) {
+        return {};
+    }
+    detail::ComPtr<IDWriteFontCollection> directWriteCollection;
+    if (FAILED(directWriteFactory->GetSystemFontCollection(
+            &directWriteCollection, FALSE))) {
+        return {};
+    }
+    detail::ComPtr<IDWriteFontFace> directWriteFace;
+    if (!detail::makeDirectWriteFace(
+            *directWriteCollection.Get(), request.family, directWriteFace)) {
+        return {};
+    }
+    DWRITE_FONT_METRICS directWriteMetrics{};
+    directWriteFace->GetMetrics(&directWriteMetrics);
+    if (directWriteMetrics.designUnitsPerEm == 0) return {};
+    const float directWriteMetricScale = physicalPixelHeight
+        / static_cast<float>(directWriteMetrics.designUnitsPerEm)
+        * inverseMetricsScale;
 
     GdiObjects gdi{};
     gdi.context = CreateCompatibleDC(nullptr);
@@ -115,11 +152,6 @@ FontHandle Win32FontLoader::load(
         return {};
     }
 
-    TEXTMETRICW textMetrics{};
-    if (!GetTextMetricsW(gdi.context, &textMetrics)) {
-        return {};
-    }
-
     std::vector<std::byte> atlas(atlasBytes, std::byte{0});
     std::vector<GlyphMetrics> glyphs;
     glyphs.reserve(256);
@@ -127,28 +159,24 @@ FontHandle Win32FontLoader::load(
     std::uint32_t penX = 1;
     std::uint32_t penY = 1;
     std::uint32_t shelfHeight = 0;
-    const MAT2 matrix = identityMatrix();
 
     for (const UnicodeRange range : request.ranges) {
         if (range.first > range.last || range.last > 0xFFFF) {
             return {};
         }
         for (char32_t codepoint = range.first; codepoint <= range.last; ++codepoint) {
-            GLYPHMETRICS metrics{};
-            const DWORD bitmapBytes = GetGlyphOutlineW(
-                gdi.context,
-                static_cast<UINT>(codepoint),
-                GGO_GRAY8_BITMAP,
-                &metrics,
-                0,
-                nullptr,
-                &matrix);
-            if (bitmapBytes == GDI_ERROR) {
-                continue;
-            }
+            detail::DirectWriteGlyphBitmap rasterized = detail::rasterizeDirectWriteGlyph(
+                *directWriteFactory.Get(),
+                *directWriteFace.Get(),
+                codepoint,
+                physicalPixelHeight,
+                request.metricsScale,
+                request.pixelAlignedMaximumPhysicalHeight);
+            if (rasterized.status == detail::DirectWriteGlyphStatus::Missing) continue;
+            if (rasterized.status != detail::DirectWriteGlyphStatus::Ready) return {};
 
-            const std::uint32_t glyphWidth = metrics.gmBlackBoxX;
-            const std::uint32_t glyphHeight = metrics.gmBlackBoxY;
+            const std::uint32_t glyphWidth = rasterized.width;
+            const std::uint32_t glyphHeight = rasterized.height;
             const std::uint32_t packedWidth = glyphWidth == 0 ? 1 : glyphWidth;
             const std::uint32_t packedHeight = glyphHeight == 0 ? 1 : glyphHeight;
             std::uint32_t widthWithPadding = 0;
@@ -175,29 +203,13 @@ FontHandle Win32FontLoader::load(
                 return {};
             }
 
-            if (bitmapBytes != 0 && glyphWidth != 0 && glyphHeight != 0) {
-                std::vector<std::byte> bitmap(bitmapBytes);
-                if (GetGlyphOutlineW(
-                        gdi.context,
-                        static_cast<UINT>(codepoint),
-                        GGO_GRAY8_BITMAP,
-                        &metrics,
-                        bitmapBytes,
-                        bitmap.data(),
-                        &matrix)
-                    == GDI_ERROR) {
-                    return {};
-                }
-
-                std::uint32_t paddedWidth = 0;
-                if (!checkedAdd(glyphWidth, std::uint32_t{3}, paddedWidth)) return {};
-                const std::uint32_t sourcePitch = paddedWidth & ~3U;
+            if (glyphWidth != 0 && glyphHeight != 0) {
                 std::size_t requiredSourceBytes = 0;
                 if (!checkedMultiply(
-                        static_cast<std::size_t>(sourcePitch),
+                        static_cast<std::size_t>(rasterized.rowPitch),
                         static_cast<std::size_t>(glyphHeight),
                         requiredSourceBytes)
-                    || requiredSourceBytes > bitmap.size()) {
+                    || requiredSourceBytes > rasterized.pixels.size()) {
                     return {};
                 }
                 for (std::uint32_t row = 0; row < glyphHeight; ++row) {
@@ -207,7 +219,7 @@ FontHandle Win32FontLoader::load(
                         std::size_t destinationOffset = 0;
                         if (!checkedMultiply(
                                 static_cast<std::size_t>(row),
-                                static_cast<std::size_t>(sourcePitch),
+                                static_cast<std::size_t>(rasterized.rowPitch),
                                 sourceOffset)
                             || !checkedAdd(sourceOffset, static_cast<std::size_t>(column), sourceOffset)
                             || !checkedMultiply(
@@ -218,29 +230,15 @@ FontHandle Win32FontLoader::load(
                                 destinationRow,
                                 static_cast<std::size_t>(penX + column),
                                 destinationOffset)
-                            || sourceOffset >= bitmap.size()
+                            || sourceOffset >= rasterized.pixels.size()
                             || destinationOffset >= atlas.size()) {
                             return {};
                         }
-                        const auto coverage = static_cast<unsigned char>(bitmap[sourceOffset]);
-                        const auto normalized = static_cast<unsigned char>(
-                            std::min(coverage, static_cast<unsigned char>(64U)) * 255U / 64U);
-                        atlas[destinationOffset] = static_cast<std::byte>(normalized);
+                        atlas[destinationOffset] = rasterized.pixels[sourceOffset];
                     }
                 }
             }
 
-            WCHAR character = static_cast<WCHAR>(codepoint);
-            WORD glyphIndex = 0;
-            if (GetGlyphIndicesW(
-                    gdi.context,
-                    &character,
-                    1,
-                    &glyphIndex,
-                    GGI_MARK_NONEXISTING_GLYPHS) == GDI_ERROR
-                || glyphIndex == 0xFFFFU) {
-                glyphIndex = 0;
-            }
             glyphs.push_back({
                 .codepoint = codepoint,
                 .uv = {
@@ -253,16 +251,11 @@ FontHandle Win32FontLoader::load(
                         static_cast<float>(penY + glyphHeight) / static_cast<float>(request.atlasHeight),
                     },
                 },
-                .size = {
-                    static_cast<float>(glyphWidth) * inverseMetricsScale,
-                    static_cast<float>(glyphHeight) * inverseMetricsScale,
-                },
-                .bearing = {
-                    static_cast<float>(metrics.gmptGlyphOrigin.x) * inverseMetricsScale,
-                    static_cast<float>(metrics.gmptGlyphOrigin.y) * inverseMetricsScale,
-                },
-                .advance = static_cast<float>(metrics.gmCellIncX) * inverseMetricsScale,
-                .glyphId = glyphIndex,
+                .size = rasterized.logicalSize,
+                .bearing = rasterized.bearing,
+                .advance = rasterized.advance,
+                .glyphId = rasterized.glyphId,
+                .rasterPlacement = rasterized.rasterPlacement,
             });
 
             if (!checkedAdd(penX, widthWithPadding, penX)) return {};
@@ -307,10 +300,10 @@ FontHandle Win32FontLoader::load(
     TextureRollback rollback{&textures, atlasHandle};
     const FontHandle font = fonts.add({
         .atlas = atlasHandle,
-        .pixelSize = static_cast<float>(request.pixelHeight) * inverseMetricsScale,
-        .ascent = static_cast<float>(textMetrics.tmAscent) * inverseMetricsScale,
-        .descent = static_cast<float>(textMetrics.tmDescent) * inverseMetricsScale,
-        .lineGap = static_cast<float>(textMetrics.tmExternalLeading) * inverseMetricsScale,
+        .pixelSize = logicalPixelHeight,
+        .ascent = static_cast<float>(directWriteMetrics.ascent) * directWriteMetricScale,
+        .descent = static_cast<float>(directWriteMetrics.descent) * directWriteMetricScale,
+        .lineGap = static_cast<float>(directWriteMetrics.lineGap) * directWriteMetricScale,
         .glyphs = std::move(glyphs),
         .kerning = std::move(kerning),
     });
@@ -453,7 +446,10 @@ Win32FontScaleCache::Win32FontScaleCache(
       mAtlasWidth(request.atlasWidth),
       mAtlasHeight(request.atlasHeight),
       mRanges(request.ranges.begin(), request.ranges.end()),
-      mMaximumVariants(std::clamp(request.maximumVariants, std::size_t{1}, std::size_t{256})) {
+      mMaximumVariants(std::clamp(request.maximumVariants, std::size_t{1}, std::size_t{256})),
+      mPhysicalSizeStepsPerPixel(detail::normalizedPhysicalSizeSteps(
+          request.physicalSizeStepsPerPixel)),
+      mPixelAlignedMaximumPhysicalHeight(request.pixelAlignedMaximumPhysicalHeight) {
     mVariants.reserve(mMaximumVariants);
 }
 
@@ -467,6 +463,8 @@ FontHandle Win32FontScaleCache::selectTextSize(
     if (!std::isfinite(dpiScale) || dpiScale <= 0.0F
         || !std::isfinite(logicalPixelHeight) || logicalPixelHeight <= 0.0F
         || !std::isfinite(mLogicalPixelHeight) || mLogicalPixelHeight <= 0.0F
+        || !std::isfinite(mPixelAlignedMaximumPhysicalHeight)
+        || mPixelAlignedMaximumPhysicalHeight < 0.0F
         || mFamily.empty() || mAtlasWidth == 0 || mAtlasHeight == 0 || mRanges.empty()) {
         return {};
     }
@@ -475,10 +473,15 @@ FontHandle Win32FontScaleCache::selectTextSize(
         || requestedHeight > static_cast<double>(std::numeric_limits<int>::max())) {
         return {};
     }
-    const auto pixelHeight = static_cast<std::uint32_t>(std::round(requestedHeight));
+    const std::uint64_t physicalKey = detail::physicalSizeKey(
+        requestedHeight, mPhysicalSizeStepsPerPixel);
+    if (physicalKey == 0) return {};
+    const float physicalPixelHeight = detail::physicalSizeFromKey(
+        physicalKey, mPhysicalSizeStepsPerPixel);
     mDpiScale = dpiScale;
     for (const Variant& variant : mVariants) {
-        if (variant.pixelHeight == pixelHeight && mFonts->find(variant.font) != nullptr) {
+        if (variant.physicalSizeKey == physicalKey
+            && mFonts->find(variant.font) != nullptr) {
             ++mCacheHits;
             return variant.font;
         }
@@ -488,19 +491,18 @@ FontHandle Win32FontScaleCache::selectTextSize(
         ++mVariantLimitFallbacks;
         const auto closest = std::min_element(
             mVariants.begin(), mVariants.end(),
-            [pixelHeight](const Variant& left, const Variant& right) {
-                const std::uint64_t leftDistance = left.pixelHeight > pixelHeight
-                    ? left.pixelHeight - pixelHeight : pixelHeight - left.pixelHeight;
-                const std::uint64_t rightDistance = right.pixelHeight > pixelHeight
-                    ? right.pixelHeight - pixelHeight : pixelHeight - right.pixelHeight;
+            [physicalKey](const Variant& left, const Variant& right) {
+                const std::uint64_t leftDistance = left.physicalSizeKey > physicalKey
+                    ? left.physicalSizeKey - physicalKey : physicalKey - left.physicalSizeKey;
+                const std::uint64_t rightDistance = right.physicalSizeKey > physicalKey
+                    ? right.physicalSizeKey - physicalKey : physicalKey - right.physicalSizeKey;
                 return leftDistance < rightDistance;
             });
         return closest != mVariants.end() ? closest->font : FontHandle{};
     }
 
     ++mCacheMisses;
-    const float metricsScale = static_cast<float>(pixelHeight) / logicalPixelHeight;
-    const float atlasScale = static_cast<float>(pixelHeight) / mLogicalPixelHeight;
+    const float atlasScale = physicalPixelHeight / mLogicalPixelHeight;
     const auto scaledDimension = [atlasScale](std::uint32_t dimension) {
         const double scaled = std::ceil(static_cast<double>(dimension) * atlasScale);
         if (scaled < 1.0 || scaled > std::numeric_limits<std::uint32_t>::max()) {
@@ -521,14 +523,17 @@ FontHandle Win32FontScaleCache::selectTextSize(
         *mFonts,
         {
             .family = mFamily,
-            .pixelHeight = pixelHeight,
+            .pixelHeight = static_cast<std::uint32_t>(std::ceil(physicalPixelHeight)),
             .atlasWidth = atlasWidth,
             .atlasHeight = atlasHeight,
             .ranges = mRanges,
-            .metricsScale = metricsScale,
+            .metricsScale = dpiScale,
+            .physicalPixelHeight = physicalPixelHeight,
+            .logicalPixelHeight = logicalPixelHeight,
+            .pixelAlignedMaximumPhysicalHeight = mPixelAlignedMaximumPhysicalHeight,
         });
     if (!font.valid()) return {};
-    mVariants.push_back({pixelHeight, logicalPixelHeight, font});
+    mVariants.push_back({physicalKey, physicalPixelHeight, logicalPixelHeight, font});
     return font;
 }
 

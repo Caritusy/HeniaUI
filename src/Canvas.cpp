@@ -666,6 +666,11 @@ void Canvas::glyphs(
         if (issue.empty()) {
             issue = validateRect(glyph.uv, "glyph.uv");
         }
+        if (issue.empty()
+            && glyph.rasterPlacement != GlyphRasterPlacement::Smooth
+            && glyph.rasterPlacement != GlyphRasterPlacement::PixelAligned) {
+            issue = "glyph.rasterPlacement";
+        }
         if (!issue.empty()) {
             ++mRejectedCommands;
             ++mInvalidInputCommands;
@@ -682,11 +687,11 @@ void Canvas::glyphs(
         };
         command.uv = glyph.uv;
         command.color = color;
-        // Glyph shaders snap this shared run origin in framebuffer space. The
-        // relative glyph geometry remains fractional, preserving kerning while
-        // avoiding a second bitmap resample at an arbitrary run phase.
+        // Smooth glyphs snap the shared run origin. Pixel-aligned coverage
+        // glyphs instead snap each cumulative glyph position in the shader.
         command.radius = origin.x;
         command.thickness = origin.y;
+        command.lineFlags = glyph.rasterPlacement == GlyphRasterPlacement::PixelAligned ? 1U : 0U;
         append(command);
     }
 }

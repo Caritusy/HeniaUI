@@ -28,6 +28,13 @@ struct Win32FontRequest final {
     // Physical raster pixels per logical UI unit. Metrics exposed through the
     // FontStore are divided by this value while atlas texels remain physical.
     float metricsScale = 1.0F;
+    // Optional floating-point DirectWrite raster height. Zero preserves the
+    // pixelHeight behavior. logicalPixelHeight keeps the public face size exact
+    // when the physical raster is quantized independently from UI layout.
+    float physicalPixelHeight = 0.0F;
+    float logicalPixelHeight = 0.0F;
+    // Zero disables cumulative per-glyph pixel alignment.
+    float pixelAlignedMaximumPhysicalHeight = 20.0F;
 };
 
 struct Win32ScaledFontRequest final {
@@ -37,6 +44,9 @@ struct Win32ScaledFontRequest final {
     std::uint32_t atlasHeight = 1024;
     std::span<const UnicodeRange> ranges{};
     std::size_t maximumVariants = 32;
+    // Physical sizes are cached as bounded fixed-point keys.
+    std::uint32_t physicalSizeStepsPerPixel = 8;
+    float pixelAlignedMaximumPhysicalHeight = 20.0F;
 };
 
 struct Win32FontScaleCacheStatistics final {
@@ -60,8 +70,8 @@ public:
         std::span<const char32_t> codepoints);
 };
 
-// Retains one physical raster per required pixel height. A window moving back
-// to a previously visited monitor reuses its stable FontHandle and atlas.
+// Retains one fixed-point physical raster per required height. A window moving
+// back to a previously visited monitor reuses its stable FontHandle and atlas.
 class Win32FontScaleCache final : public TextFontRasterResolver {
 public:
     Win32FontScaleCache(
@@ -84,7 +94,8 @@ public:
 
 private:
     struct Variant final {
-        std::uint32_t pixelHeight = 0;
+        std::uint64_t physicalSizeKey = 0;
+        float physicalPixelHeight = 0.0F;
         float logicalPixelHeight = 0.0F;
         FontHandle font{};
     };
@@ -98,6 +109,8 @@ private:
     std::vector<UnicodeRange> mRanges;
     std::vector<Variant> mVariants;
     std::size_t mMaximumVariants = 32;
+    std::uint32_t mPhysicalSizeStepsPerPixel = 8;
+    float mPixelAlignedMaximumPhysicalHeight = 20.0F;
     std::uint64_t mCacheHits = 0;
     std::uint64_t mCacheMisses = 0;
     std::uint64_t mVariantLimitFallbacks = 0;

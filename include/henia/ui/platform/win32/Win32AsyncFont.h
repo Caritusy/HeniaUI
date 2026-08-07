@@ -46,8 +46,9 @@ struct Win32AsyncFontConfiguration final {
     // An existing primary face may be extended instead of creating another
     // synchronous ASCII seed atlas. Its metrics must match this request.
     FontHandle primaryFont{};
-    // Optional external physical-size cache for the primary face. Fallback
-    // faces still create lightweight size-specific dynamic variants here.
+    // Optional external physical-size cache for the primary face. Returned
+    // fonts remain externally owned but become publishable async targets here.
+    // Fallback faces create lightweight size-specific dynamic variants here.
     TextFontRasterResolver* primaryRasterResolver = nullptr;
     float logicalPixelHeight = 18.0F;
     float dpiScale = 1.0F;
@@ -64,10 +65,13 @@ struct Win32AsyncFontConfiguration final {
     std::size_t preallocatedPagesPerFace = 1;
     std::size_t requestQueueCapacity = 4096;
     std::size_t resultQueueCapacity = 512;
-    // Integer physical-pixel buckets are shared by every role. Once the cap is
-    // reached the closest retained bucket is reused, bounding long-lived atlas
-    // and FontStore growth under arbitrary text-size input.
+    // Fixed-point physical-size buckets are shared by every role. Once the cap
+    // is reached the closest retained bucket is reused, bounding long-lived
+    // atlas and FontStore growth under arbitrary text-size input.
     std::size_t maximumRasterSizeBuckets = 16;
+    std::uint32_t physicalSizeStepsPerPixel = 8;
+    // Zero disables cumulative per-glyph pixel alignment.
+    float pixelAlignedMaximumPhysicalHeight = 20.0F;
     // Deterministic fault injection for transactional/retry tests. Production
     // configurations leave both counters at zero.
     std::size_t injectedRasterizationFailures = 0;
@@ -111,7 +115,7 @@ public:
         TextureStore& textures,
         FontStore& fonts,
         Win32AsyncFontConfiguration configuration = {});
-    ~Win32AsyncFontSet();
+    ~Win32AsyncFontSet() noexcept;
 
     Win32AsyncFontSet(const Win32AsyncFontSet&) = delete;
     Win32AsyncFontSet& operator=(const Win32AsyncFontSet&) = delete;
@@ -154,9 +158,10 @@ public:
     // Stops the worker, removes glyphs/pages published by this helper, and
     // destroys internally created fonts plus their seed atlases. Published
     // handles owned by this helper do not outlive this call. A borrowed primary
-    // font and its seed atlas are never destroyed. Destruction invokes this
-    // automatically on the owner thread.
-    [[nodiscard]] bool releaseResources();
+    // font and its seed atlas are never destroyed. The owner-thread call is
+    // non-throwing and reports allocation/cleanup failure as false. Destruction
+    // attempts the same cleanup, suppresses failure, and always stops the worker.
+    [[nodiscard]] bool releaseResources() noexcept;
 
     [[nodiscard]] bool idle() const noexcept;
     [[nodiscard]] Win32AsyncFontStatistics statistics() const noexcept;

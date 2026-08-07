@@ -3,6 +3,7 @@
 #include "henia/CheckedArithmetic.h"
 #include "henia/ui/platform/win32/Win32FontLoader.h"
 #include "henia/ui/text/Utf8.h"
+#include "DirectWriteGlyphRasterizer.h"
 
 #define NOMINMAX
 #include <Windows.h>
@@ -170,8 +171,9 @@ struct BakeJob final {
     std::uint8_t face = 0;
     std::uint8_t variant = 0;
     char32_t codepoint = U'\0';
-    std::uint32_t pixelHeight = 0;
-    float metricsScale = 1.0F;
+    float physicalPixelHeight = 0.0F;
+    float pixelsPerLogicalUnit = 1.0F;
+    float pixelAlignedMaximumPhysicalHeight = 0.0F;
 };
 
 struct OwnedGlyph final {
@@ -183,6 +185,7 @@ struct OwnedGlyph final {
     Vec2 bearing{};
     float advance = 0.0F;
     Vec2 logicalSize{};
+    GlyphRasterPlacement rasterPlacement = GlyphRasterPlacement::Smooth;
     std::vector<std::byte> pixels;
 
     [[nodiscard]] RasterizedGlyph view() const noexcept {
@@ -196,6 +199,7 @@ struct OwnedGlyph final {
             .advance = advance,
             .pixels = pixels,
             .logicalSize = logicalSize,
+            .rasterPlacement = rasterPlacement,
         };
     }
 };
@@ -249,8 +253,9 @@ struct GlyphJobRecord final {
     IDWriteFactory& factory,
     IDWriteFontFace& face,
     BakeJob job,
-    std::uint32_t pixelHeight,
-    float metricsScale) {
+    float physicalPixelHeight,
+    float pixelsPerLogicalUnit,
+    float pixelAlignedMaximumPhysicalHeight) {
     BakeResult result{.face = job.face, .variant = job.variant};
     result.glyph.codepoint = job.codepoint;
     const UINT32 codepoint = static_cast<UINT32>(job.codepoint);
@@ -269,14 +274,14 @@ struct GlyphJobRecord final {
         return result;
     }
 
-    const float logicalScale = static_cast<float>(pixelHeight)
-        / static_cast<float>(fontMetrics.designUnitsPerEm) / metricsScale;
+    const float logicalScale = physicalPixelHeight
+        / static_cast<float>(fontMetrics.designUnitsPerEm) / pixelsPerLogicalUnit;
     const float advance = static_cast<float>(glyphMetrics.advanceWidth) * logicalScale;
     if (!std::isfinite(advance) || advance < 0.0F) return result;
 
     const DWRITE_GLYPH_RUN run{
         .fontFace = &face,
-        .fontEmSize = static_cast<float>(pixelHeight),
+        .fontEmSize = physicalPixelHeight,
         .glyphCount = 1,
         .glyphIndices = &glyphIndex,
         .glyphAdvances = nullptr,
@@ -285,11 +290,14 @@ struct GlyphJobRecord final {
         .bidiLevel = 0,
     };
     ComPtr<IDWriteGlyphRunAnalysis> analysis;
+    const bool pixelAligned = pixelAlignedMaximumPhysicalHeight > 0.0F
+        && physicalPixelHeight <= pixelAlignedMaximumPhysicalHeight;
     if (FAILED(factory.CreateGlyphRunAnalysis(
             &run,
             1.0F,
             nullptr,
-            DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+            pixelAligned ? DWRITE_RENDERING_MODE_NATURAL
+                         : DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
             DWRITE_MEASURING_MODE_NATURAL,
             0.0F,
             0.0F,
@@ -303,6 +311,9 @@ struct GlyphJobRecord final {
     }
     result.glyph.glyphId = glyphIndex;
     result.glyph.advance = advance;
+    result.glyph.rasterPlacement = pixelAligned
+        ? GlyphRasterPlacement::PixelAligned
+        : GlyphRasterPlacement::Smooth;
     if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) {
         result.status = BakeStatus::Ready;
         return result;
@@ -351,12 +362,12 @@ struct GlyphJobRecord final {
     result.glyph.height = static_cast<std::uint32_t>(height);
     result.glyph.rowPitch = result.glyph.width;
     result.glyph.bearing = {
-        static_cast<float>(bounds.left) / metricsScale,
-        -static_cast<float>(bounds.top) / metricsScale,
+        static_cast<float>(bounds.left) / pixelsPerLogicalUnit,
+        -static_cast<float>(bounds.top) / pixelsPerLogicalUnit,
     };
     result.glyph.logicalSize = {
-        static_cast<float>(width) / metricsScale,
-        static_cast<float>(height) / metricsScale,
+        static_cast<float>(width) / pixelsPerLogicalUnit,
+        static_cast<float>(height) / pixelsPerLogicalUnit,
     };
     result.status = BakeStatus::Ready;
     return result;
@@ -404,7 +415,9 @@ public:
         }
     }
 
-    ~Impl() { static_cast<void>(releaseResources()); }
+    ~Impl() noexcept {
+        if (!releaseResources()) stopWorker();
+    }
 
     [[nodiscard]] bool valid() const noexcept { return mValid; }
     [[nodiscard]] std::string_view lastError() const noexcept { return mLastError; }
@@ -472,30 +485,63 @@ public:
         if (physical < 1.0 || physical > static_cast<double>(std::numeric_limits<int>::max())) {
             return font;
         }
-        const std::uint32_t pixelHeight = static_cast<std::uint32_t>(std::round(physical));
+        const std::uint64_t physicalKey = detail::physicalSizeKey(physical, mPhysicalSizeSteps);
+        if (physicalKey == 0) return font;
+        const float physicalPixelHeight = detail::physicalSizeFromKey(
+            physicalKey, mPhysicalSizeSteps);
 
+        if (face.physicalSizeKey == physicalKey) return face.font;
+        for (const RasterVariant& variant : face.variants) {
+            if (variant.physicalSizeKey == physicalKey
+                && mFonts->find(variant.font) != nullptr) {
+                return variant.font;
+            }
+        }
+        if (!rememberRasterBucket(physicalKey)) {
+            ++mRasterVariantLimitFallbacks;
+            return closestVariant(face, physicalKey);
+        }
         if (located->face == roleIndex(Win32FontRole::Primary)
             && mConfiguration.primaryRasterResolver != nullptr) {
             const FontHandle resolved = mConfiguration.primaryRasterResolver->resolveFont(
                 face.font, logicalPixelSize);
             if (resolved.valid()) {
-                static_cast<void>(rememberRasterBucket(pixelHeight));
-                return resolved;
+                if (resolved == face.font) return face.font;
+                const auto retained = std::find_if(
+                    face.variants.begin(),
+                    face.variants.end(),
+                    [resolved](const RasterVariant& variant) {
+                        return variant.font == resolved;
+                    });
+                if (retained != face.variants.end()) return retained->font;
+                if (mFonts->find(resolved) == nullptr
+                    || face.variants.size() + 1U >= mBucketCapacity) {
+                    return closestVariant(face, physicalKey);
+                }
+                try {
+                    auto atlas = std::make_unique<DynamicGlyphAtlas>(
+                        *mTextures, *mFonts, resolved, mConfiguration.dynamicAtlas);
+                    face.variants.push_back({
+                        .font = resolved,
+                        .atlas = std::move(atlas),
+                        .physicalSizeKey = physicalKey,
+                        .physicalPixelHeight = physicalPixelHeight,
+                        .logicalPixelHeight = logicalPixelSize,
+                        .pixelsPerLogicalUnit = mDpiScale,
+                    });
+                    ++mRasterVariantCount;
+                    return resolved;
+                } catch (...) {
+                    return closestVariant(face, physicalKey);
+                }
             }
-        }
-        if (face.pixelHeight == pixelHeight) return face.font;
-        for (const RasterVariant& variant : face.variants) {
-            if (variant.pixelHeight == pixelHeight && mFonts->find(variant.font) != nullptr) {
-                return variant.font;
-            }
-        }
-        if (!rememberRasterBucket(pixelHeight)) {
-            ++mRasterVariantLimitFallbacks;
-            return closestVariant(face, pixelHeight);
         }
         const FontHandle created = createVariant(
-            static_cast<std::uint8_t>(located->face), logicalPixelSize, pixelHeight);
-        return created.valid() ? created : closestVariant(face, pixelHeight);
+            static_cast<std::uint8_t>(located->face),
+            logicalPixelSize,
+            physicalKey,
+            physicalPixelHeight);
+        return created.valid() ? created : closestVariant(face, physicalKey);
     }
 
     [[nodiscard]] bool prewarmTextSizes(std::span<const float> logicalPixelSizes) {
@@ -574,10 +620,10 @@ public:
         return committed;
     }
 
-    [[nodiscard]] bool releaseResources() {
+    [[nodiscard]] bool releaseResources() noexcept {
         if (mReleased) return true;
-        stopWorker();
         if (!ownerThread()) return false;
+        stopWorker();
 
         bool released = true;
         for (Face& face : mFaces) {
@@ -672,9 +718,10 @@ private:
     struct RasterVariant final {
         FontHandle font{};
         std::unique_ptr<DynamicGlyphAtlas> atlas;
-        std::uint32_t pixelHeight = 0;
+        std::uint64_t physicalSizeKey = 0;
+        float physicalPixelHeight = 0.0F;
         float logicalPixelHeight = 0.0F;
-        float metricsScale = 1.0F;
+        float pixelsPerLogicalUnit = 1.0F;
         bool ownsFont = false;
         bool ownsSeedAtlas = false;
     };
@@ -684,9 +731,10 @@ private:
         FontHandle font{};
         std::unique_ptr<DynamicGlyphAtlas> atlas;
         std::vector<RasterVariant> variants;
-        std::uint32_t pixelHeight = 0;
+        std::uint64_t physicalSizeKey = 0;
+        float physicalPixelHeight = 0.0F;
         float logicalPixelHeight = 0.0F;
-        float metricsScale = 1.0F;
+        float pixelsPerLogicalUnit = 1.0F;
         bool ownsFont = false;
         bool ownsSeedAtlas = false;
     };
@@ -719,8 +767,8 @@ private:
         std::uint8_t variant = 0;
         FontHandle font{};
         DynamicGlyphAtlas* atlas = nullptr;
-        std::uint32_t pixelHeight = 0;
-        float metricsScale = 1.0F;
+        float physicalPixelHeight = 0.0F;
+        float pixelsPerLogicalUnit = 1.0F;
     };
 
     [[nodiscard]] std::optional<Target> locateTarget(FontHandle handle) noexcept {
@@ -731,8 +779,8 @@ private:
                     .face = static_cast<std::uint8_t>(faceIndex),
                     .font = face.font,
                     .atlas = face.atlas.get(),
-                    .pixelHeight = face.pixelHeight,
-                    .metricsScale = face.metricsScale,
+                    .physicalPixelHeight = face.physicalPixelHeight,
+                    .pixelsPerLogicalUnit = face.pixelsPerLogicalUnit,
                 };
             }
             for (std::size_t variantIndex = 0;
@@ -744,8 +792,8 @@ private:
                         .variant = static_cast<std::uint8_t>(variantIndex + 1U),
                         .font = variant.font,
                         .atlas = variant.atlas.get(),
-                        .pixelHeight = variant.pixelHeight,
-                        .metricsScale = variant.metricsScale,
+                        .physicalPixelHeight = variant.physicalPixelHeight,
+                        .pixelsPerLogicalUnit = variant.pixelsPerLogicalUnit,
                     };
                 }
             }
@@ -753,27 +801,27 @@ private:
         return std::nullopt;
     }
 
-    [[nodiscard]] bool rememberRasterBucket(std::uint32_t pixelHeight) {
-        if (std::find(mRasterBuckets.begin(), mRasterBuckets.end(), pixelHeight)
+    [[nodiscard]] bool rememberRasterBucket(std::uint64_t physicalSizeKey) {
+        if (std::find(mRasterBuckets.begin(), mRasterBuckets.end(), physicalSizeKey)
             != mRasterBuckets.end()) {
             return true;
         }
         if (mRasterBuckets.size() >= mBucketCapacity) return false;
-        mRasterBuckets.push_back(pixelHeight);
+        mRasterBuckets.push_back(physicalSizeKey);
         return true;
     }
 
     [[nodiscard]] FontHandle closestVariant(
         const Face& face,
-        std::uint32_t pixelHeight) const noexcept {
+        std::uint64_t physicalSizeKey) const noexcept {
         FontHandle closest = face.font;
-        std::uint64_t distance = face.pixelHeight > pixelHeight
-            ? static_cast<std::uint64_t>(face.pixelHeight - pixelHeight)
-            : static_cast<std::uint64_t>(pixelHeight - face.pixelHeight);
+        std::uint64_t distance = face.physicalSizeKey > physicalSizeKey
+            ? static_cast<std::uint64_t>(face.physicalSizeKey - physicalSizeKey)
+            : static_cast<std::uint64_t>(physicalSizeKey - face.physicalSizeKey);
         for (const RasterVariant& variant : face.variants) {
-            const std::uint64_t candidateDistance = variant.pixelHeight > pixelHeight
-                ? static_cast<std::uint64_t>(variant.pixelHeight - pixelHeight)
-                : static_cast<std::uint64_t>(pixelHeight - variant.pixelHeight);
+            const std::uint64_t candidateDistance = variant.physicalSizeKey > physicalSizeKey
+                ? static_cast<std::uint64_t>(variant.physicalSizeKey - physicalSizeKey)
+                : static_cast<std::uint64_t>(physicalSizeKey - variant.physicalSizeKey);
             if (candidateDistance < distance && mFonts->find(variant.font) != nullptr) {
                 closest = variant.font;
                 distance = candidateDistance;
@@ -785,7 +833,8 @@ private:
     [[nodiscard]] FontHandle createVariant(
         std::uint8_t faceIndex,
         float logicalPixelHeight,
-        std::uint32_t pixelHeight) {
+        std::uint64_t physicalSizeKey,
+        float physicalPixelHeight) {
         if (faceIndex >= mFaces.size()) return {};
         Face& face = mFaces[faceIndex];
         if (face.variants.size() + 1U >= mBucketCapacity) return {};
@@ -794,8 +843,8 @@ private:
         bool ownsSeedAtlas = false;
         if (faceIndex == roleIndex(Win32FontRole::Primary)) {
             constexpr std::array ranges{UnicodeRange{U' ', U'~'}};
-            const double atlasScale = static_cast<double>(pixelHeight)
-                / static_cast<double>(std::max(face.pixelHeight, 1U));
+            const double atlasScale = static_cast<double>(physicalPixelHeight)
+                / static_cast<double>(std::max(face.physicalPixelHeight, 1.0F));
             const auto scaledDimension = [atlasScale](std::uint32_t dimension) {
                 const double scaled = std::ceil(static_cast<double>(dimension) * atlasScale);
                 return scaled >= 1.0
@@ -810,11 +859,15 @@ private:
                 *mFonts,
                 {
                     .family = face.family,
-                    .pixelHeight = pixelHeight,
+                    .pixelHeight = static_cast<std::uint32_t>(std::ceil(physicalPixelHeight)),
                     .atlasWidth = atlasWidth,
                     .atlasHeight = atlasHeight,
                     .ranges = ranges,
-                    .metricsScale = static_cast<float>(pixelHeight) / logicalPixelHeight,
+                    .metricsScale = mDpiScale,
+                    .physicalPixelHeight = physicalPixelHeight,
+                    .logicalPixelHeight = logicalPixelHeight,
+                    .pixelAlignedMaximumPhysicalHeight =
+                        mConfiguration.pixelAlignedMaximumPhysicalHeight,
                 });
             ownsSeedAtlas = variantFont.valid();
         } else {
@@ -863,9 +916,10 @@ private:
         face.variants.push_back({
             .font = variantFont,
             .atlas = std::move(atlas),
-            .pixelHeight = pixelHeight,
+            .physicalSizeKey = physicalSizeKey,
+            .physicalPixelHeight = physicalPixelHeight,
             .logicalPixelHeight = logicalPixelHeight,
-            .metricsScale = static_cast<float>(pixelHeight) / logicalPixelHeight,
+            .pixelsPerLogicalUnit = mDpiScale,
             .ownsFont = true,
             .ownsSeedAtlas = ownsSeedAtlas,
         });
@@ -912,6 +966,8 @@ private:
             || mConfiguration.dynamicAtlas.pageHeight == 0
             || mConfiguration.dynamicAtlas.maximumPages == 0
             || mConfiguration.maximumRasterSizeBuckets == 0
+            || !std::isfinite(mConfiguration.pixelAlignedMaximumPhysicalHeight)
+            || mConfiguration.pixelAlignedMaximumPhysicalHeight < 0.0F
             || mConfiguration.preallocatedPagesPerFace
                 > mConfiguration.dynamicAtlas.maximumPages) {
             mLastError = "Invalid asynchronous font configuration";
@@ -924,12 +980,18 @@ private:
             mLastError = "Asynchronous font pixel height is out of range";
             return false;
         }
-        mPixelHeight = static_cast<std::uint32_t>(std::round(physicalHeight));
-        mMetricsScale = static_cast<float>(mPixelHeight)
-            / mConfiguration.logicalPixelHeight;
+        mPhysicalSizeSteps = detail::normalizedPhysicalSizeSteps(
+            mConfiguration.physicalSizeStepsPerPixel);
+        mPhysicalSizeKey = detail::physicalSizeKey(physicalHeight, mPhysicalSizeSteps);
+        if (mPhysicalSizeKey == 0) {
+            mLastError = "Asynchronous font pixel height is out of range";
+            return false;
+        }
+        mPhysicalPixelHeight = detail::physicalSizeFromKey(
+            mPhysicalSizeKey, mPhysicalSizeSteps);
         mDpiScale = mConfiguration.dpiScale;
         mRasterBuckets.reserve(mBucketCapacity);
-        mRasterBuckets.push_back(mPixelHeight);
+        mRasterBuckets.push_back(mPhysicalSizeKey);
 
         const std::array families{
             mConfiguration.families.primary,
@@ -945,9 +1007,10 @@ private:
             Face& face = mFaces[index];
             face.family.assign(families[index]);
             face.variants.reserve(mBucketCapacity > 0 ? mBucketCapacity - 1U : 0U);
-            face.pixelHeight = mPixelHeight;
+            face.physicalSizeKey = mPhysicalSizeKey;
+            face.physicalPixelHeight = mPhysicalPixelHeight;
             face.logicalPixelHeight = mConfiguration.logicalPixelHeight;
-            face.metricsScale = mMetricsScale;
+            face.pixelsPerLogicalUnit = mDpiScale;
             if (index == roleIndex(Win32FontRole::Primary)
                 && mConfiguration.primaryFont.valid()) {
                 face.font = mConfiguration.primaryFont;
@@ -964,11 +1027,16 @@ private:
                     *mFonts,
                     {
                         .family = face.family,
-                        .pixelHeight = mPixelHeight,
+                        .pixelHeight = static_cast<std::uint32_t>(
+                            std::ceil(mPhysicalPixelHeight)),
                         .atlasWidth = mConfiguration.initialAtlasWidth,
                         .atlasHeight = mConfiguration.initialAtlasHeight,
                         .ranges = ranges,
-                        .metricsScale = mMetricsScale,
+                        .metricsScale = mDpiScale,
+                        .physicalPixelHeight = mPhysicalPixelHeight,
+                        .logicalPixelHeight = mConfiguration.logicalPixelHeight,
+                        .pixelAlignedMaximumPhysicalHeight =
+                            mConfiguration.pixelAlignedMaximumPhysicalHeight,
                     });
                 face.ownsFont = face.font.valid();
                 face.ownsSeedAtlas = face.font.valid();
@@ -1139,8 +1207,10 @@ private:
                 .face = target->face,
                 .variant = target->variant,
                 .codepoint = codepoint,
-                .pixelHeight = target->pixelHeight,
-                .metricsScale = target->metricsScale,
+                .physicalPixelHeight = target->physicalPixelHeight,
+                .pixelsPerLogicalUnit = target->pixelsPerLogicalUnit,
+                .pixelAlignedMaximumPhysicalHeight =
+                    mConfiguration.pixelAlignedMaximumPhysicalHeight,
             };
             if (!mRequests.push(std::move(job))) {
                 ++mRequestQueueFull;
@@ -1206,8 +1276,9 @@ private:
                         *factory.Get(),
                         *workerFaces[job.face].Get(),
                         job,
-                        job.pixelHeight,
-                        job.metricsScale);
+                        job.physicalPixelHeight,
+                        job.pixelsPerLogicalUnit,
+                        job.pixelAlignedMaximumPhysicalHeight);
                 } else {
                     result.status = BakeStatus::Missing;
                 }
@@ -1247,13 +1318,14 @@ private:
     std::jthread mWorker;
     std::vector<std::vector<OwnedGlyph>> mCommitBatches;
     std::vector<std::vector<RasterizedGlyph>> mRasterizedViews;
-    std::vector<std::uint32_t> mRasterBuckets;
+    std::vector<std::uint64_t> mRasterBuckets;
     std::unordered_set<char32_t> mUniqueCodepoints;
     std::unordered_map<std::uint64_t, GlyphJobRecord> mJobStates;
     std::string mLastError;
     std::size_t mFaceCount = 0;
-    std::uint32_t mPixelHeight = 0;
-    float mMetricsScale = 1.0F;
+    std::uint32_t mPhysicalSizeSteps = 8;
+    std::uint64_t mPhysicalSizeKey = 0;
+    float mPhysicalPixelHeight = 0.0F;
     float mDpiScale = 1.0F;
     std::atomic_size_t mPendingBakeJobs{0};
     std::atomic_uint64_t mRasterizedGlyphs{0};
@@ -1289,7 +1361,7 @@ Win32AsyncFontSet::Win32AsyncFontSet(
     Win32AsyncFontConfiguration configuration)
     : mImpl(std::make_unique<Impl>(textures, fonts, configuration)) {}
 
-Win32AsyncFontSet::~Win32AsyncFontSet() = default;
+Win32AsyncFontSet::~Win32AsyncFontSet() noexcept = default;
 
 bool Win32AsyncFontSet::valid() const noexcept { return mImpl->valid(); }
 std::string_view Win32AsyncFontSet::lastError() const noexcept { return mImpl->lastError(); }
@@ -1340,7 +1412,7 @@ bool Win32AsyncFontSet::setDpiScale(float dpiScale) noexcept {
 std::size_t Win32AsyncFontSet::commitReady(std::size_t maximumResults) {
     return mImpl->commitReady(maximumResults);
 }
-bool Win32AsyncFontSet::releaseResources() { return mImpl->releaseResources(); }
+bool Win32AsyncFontSet::releaseResources() noexcept { return mImpl->releaseResources(); }
 bool Win32AsyncFontSet::idle() const noexcept { return mImpl->idle(); }
 Win32AsyncFontStatistics Win32AsyncFontSet::statistics() const noexcept {
     return mImpl->statistics();

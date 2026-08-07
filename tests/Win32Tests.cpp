@@ -15,11 +15,14 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace {
 
 using namespace henia::ui;
+
+static_assert(std::is_nothrow_destructible_v<Win32AsyncFontSet>);
 
 [[noreturn]] void fail(const char* message) {
     std::cerr << message << '\n';
@@ -568,7 +571,7 @@ int main() {
         return EXIT_FAILURE;
     }
     const FontHandle text13 = scaleCache.selectTextSize(13.0F, 1.25F);
-    const FontHandle text13SameBucket = scaleCache.selectTextSize(13.1F, 1.25F);
+    const FontHandle text13SameBucket = scaleCache.selectTextSize(13.02F, 1.25F);
     constexpr std::array rasterSizes{12.0F, 14.0F, 16.0F, 22.0F};
     if (!text13.valid() || text13SameBucket != text13
         || std::abs(fonts.find(text13)->pixelSize() - 13.0F) > 0.0001F
@@ -582,6 +585,82 @@ int main() {
     if (rasterLayout == nullptr || rasterLayout->glyphs.empty()
         || rasterLayout->glyphs.front().font != text13) {
         fail("TextPainter did not select the final-size Win32 raster face");
+    }
+
+    Win32FontScaleCache fractionalScaleCache(
+        textures,
+        fonts,
+        {
+            .family = L"Segoe UI",
+            .logicalPixelHeight = 13.0F,
+            .atlasWidth = 256,
+            .atlasHeight = 128,
+            .ranges = ranges,
+            .maximumVariants = 8,
+            .physicalSizeStepsPerPixel = 8,
+            .pixelAlignedMaximumPhysicalHeight = 20.0F,
+        });
+    constexpr float fractionalDpiScale = 1.35F;
+    const FontHandle fractional1755 = fractionalScaleCache.selectTextSize(
+        13.0F, fractionalDpiScale);
+    const FontFace* fractionalFace = fonts.find(fractional1755);
+    const GlyphMetrics* fractionalGlyph = fractionalFace == nullptr
+        ? nullptr : fractionalFace->glyph(U'r');
+    const TextureView fractionalAtlas = fractionalFace == nullptr
+        ? TextureView{} : textures.view(fractionalFace->atlas());
+    const float atlasTexelWidth = fractionalGlyph == nullptr
+        ? 0.0F
+        : fractionalGlyph->uv.width() * static_cast<float>(fractionalAtlas.width);
+    const float physicalQuadWidth = fractionalGlyph == nullptr
+        ? 0.0F
+        : fractionalGlyph->size.x * fractionalDpiScale;
+    if (!fractional1755.valid() || fractionalFace == nullptr || fractionalGlyph == nullptr
+        || fractionalGlyph->rasterPlacement != GlyphRasterPlacement::PixelAligned
+        || atlasTexelWidth <= 0.0F
+        || std::abs(physicalQuadWidth - atlasTexelWidth)
+            > atlasTexelWidth * 0.004F) {
+        fail("17.55px DirectWrite glyphs were rescaled away from their fixed-point raster");
+    }
+    constexpr std::array physicalTextSizes{17.0F, 17.25F, 17.5F, 17.75F, 18.0F};
+    std::array<FontHandle, physicalTextSizes.size()> fractionalHandles{};
+    for (std::size_t index = 0; index < physicalTextSizes.size(); ++index) {
+        fractionalHandles[index] = fractionalScaleCache.selectTextSize(
+            physicalTextSizes[index] / fractionalDpiScale,
+            fractionalDpiScale);
+        if (!fractionalHandles[index].valid()) {
+            fail("fractional DirectWrite raster-size matrix could not be created");
+        }
+        if (index != 0 && fractionalHandles[index] == fractionalHandles[index - 1U]) {
+            fail("distinct quarter-pixel raster sizes collapsed into one cache key");
+        }
+    }
+    if (fractionalScaleCache.statistics().variants != physicalTextSizes.size()) {
+        fail("fractional raster-size cache retained an unexpected number of variants");
+    }
+
+    Win32FontScaleCache boundedFractionalCache(
+        textures,
+        fonts,
+        {
+            .family = L"Segoe UI",
+            .logicalPixelHeight = 13.0F,
+            .atlasWidth = 256,
+            .atlasHeight = 128,
+            .ranges = ranges,
+            .maximumVariants = 2,
+            .physicalSizeStepsPerPixel = 8,
+        });
+    for (float physicalSize : physicalTextSizes) {
+        if (!boundedFractionalCache.selectTextSize(
+                physicalSize / fractionalDpiScale,
+                fractionalDpiScale).valid()) {
+            fail("bounded fractional raster cache did not return a retained fallback");
+        }
+    }
+    const Win32FontScaleCacheStatistics boundedStatistics =
+        boundedFractionalCache.statistics();
+    if (boundedStatistics.variants != 2 || boundedStatistics.variantLimitFallbacks != 3) {
+        fail("fractional raster-size cache exceeded or misreported its variant bound");
     }
 
     DynamicGlyphAtlas dynamic(textures, fonts, font, {
@@ -690,6 +769,32 @@ int main() {
         std::cerr << "Win32 asynchronous font publication statistics are invalid\n";
         return EXIT_FAILURE;
     }
+    bool wrongThreadRelease = true;
+    std::thread rejectedRelease([&] {
+        wrongThreadRelease = asyncFonts.releaseResources();
+    });
+    rejectedRelease.join();
+    constexpr std::array postReleaseCodepoints{U'\u0104'};
+    const std::uint64_t revisionBeforeRejectedReleaseProgress = fonts.find(font)->revision();
+    const std::size_t queuedAfterRejectedRelease = asyncFonts.request(postReleaseCodepoints);
+    const auto rejectedReleaseDeadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < rejectedReleaseDeadline
+        && fonts.find(font)->glyph(postReleaseCodepoints.front()) == nullptr) {
+        static_cast<void>(asyncFonts.commitReady(2));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    static_cast<void>(asyncFonts.commitReady(4));
+    const Win32AsyncFontStatistics postRejectedReleaseStatistics = asyncFonts.statistics();
+    if (wrongThreadRelease || !asyncFonts.valid() || queuedAfterRejectedRelease != 1
+        || fonts.find(font)->glyph(postReleaseCodepoints.front()) == nullptr
+        || fonts.find(font)->revision() != revisionBeforeRejectedReleaseProgress + 1U
+        || !asyncFonts.idle()
+        || postRejectedReleaseStatistics.pendingBakeJobs != 0
+        || postRejectedReleaseStatistics.readyResults != 0
+        || postRejectedReleaseStatistics.wrongThreadCalls != 1) {
+        fail("Wrong-thread async font release stopped owner-thread forward progress");
+    }
     const std::size_t borrowedFontCount = fonts.size();
     const std::size_t borrowedTextureCount = textures.size();
     if (!asyncFonts.releaseResources()
@@ -708,6 +813,43 @@ int main() {
         static_cast<void>(set.commitReady(8));
         return set.idle();
     };
+    const std::size_t automaticFontCount = fonts.size();
+    const std::size_t automaticTextureCount = textures.size();
+    constexpr std::array automaticCodepoints{U'\u0106'};
+    {
+        Win32AsyncFontSet automaticCleanup(textures, fonts, {
+            .families = {
+                .primary = L"Segoe UI",
+                .simplifiedChinese = {},
+                .traditionalChinese = {},
+                .japanese = {},
+                .korean = {},
+                .symbols = {},
+                .emoji = {},
+            },
+            .primaryFont = font,
+            .logicalPixelHeight = 24.0F,
+            .dynamicAtlas = {
+                .pageWidth = 64,
+                .pageHeight = 64,
+                .padding = 1,
+                .maximumPages = 2,
+            },
+            .preallocatedPagesPerFace = 1,
+            .requestQueueCapacity = 8,
+            .resultQueueCapacity = 4,
+        });
+        if (!automaticCleanup.valid()
+            || automaticCleanup.request(automaticCodepoints) != 1
+            || !drainAsync(automaticCleanup)
+            || fonts.find(font)->glyph(automaticCodepoints.front()) == nullptr) {
+            fail("Automatic async font cleanup fixture did not publish a dynamic glyph");
+        }
+    }
+    if (fonts.size() != automaticFontCount || textures.size() != automaticTextureCount
+        || fonts.find(font)->glyph(automaticCodepoints.front()) != nullptr) {
+        fail("Automatic async font destruction did not reclaim published resources");
+    }
     const auto verifyRetry = [&](char32_t codepoint, bool failRasterization) {
         Win32AsyncFontSet retrying(textures, fonts, {
             .families = {
@@ -749,6 +891,100 @@ int main() {
     };
     if (!verifyRetry(U'\u0100', true) || !verifyRetry(U'\u0102', false)) {
         fail("Win32 async transient raster/commit failure was permanently blacklisted");
+    }
+
+    Win32FontScaleCache externalPrimaryCache(
+        textures,
+        fonts,
+        {
+            .family = L"Segoe UI",
+            .logicalPixelHeight = 18.0F,
+            .atlasWidth = 256,
+            .atlasHeight = 128,
+            .ranges = ranges,
+            .maximumVariants = 8,
+            .physicalSizeStepsPerPixel = 8,
+        });
+    const FontHandle externalPrimaryBase = externalPrimaryCache.selectTextSize(18.0F, 1.25F);
+    if (!externalPrimaryBase.valid()) {
+        fail("External primary raster-cache fixture could not create its base font");
+    }
+    {
+        Win32AsyncFontSet externallyResolved(textures, fonts, {
+            .families = {
+                .primary = L"Segoe UI",
+                .simplifiedChinese = {},
+                .traditionalChinese = {},
+                .japanese = {},
+                .korean = {},
+                .symbols = L"Segoe UI Symbol",
+                .emoji = {},
+            },
+            .primaryFont = externalPrimaryBase,
+            .primaryRasterResolver = &externalPrimaryCache,
+            .logicalPixelHeight = 18.0F,
+            .dpiScale = 1.25F,
+            .dynamicAtlas = {
+                .pageWidth = 64,
+                .pageHeight = 64,
+                .padding = 1,
+                .maximumPages = 2,
+            },
+            .preallocatedPagesPerFace = 1,
+            .maximumRasterSizeBuckets = 2,
+            .physicalSizeStepsPerPixel = 8,
+        });
+        const FontHandle retained1625 = externallyResolved.resolveFont(
+            externalPrimaryBase, 13.0F);
+        const FontHandle fallback1750 = externallyResolved.resolveFont(
+            externalPrimaryBase, 14.0F);
+        const FontHandle fallback2125 = externallyResolved.resolveFont(
+            externalPrimaryBase, 17.0F);
+        const Win32FontScaleCacheStatistics externalStatistics =
+            externalPrimaryCache.statistics();
+        const Win32AsyncFontStatistics externalBoundStatistics =
+            externallyResolved.statistics();
+        if (!externallyResolved.valid() || !retained1625.valid()
+            || retained1625 == externalPrimaryBase
+            || fallback1750 != retained1625
+            || fallback2125 != externalPrimaryBase
+            || externalStatistics.variants != 2
+            || externalBoundStatistics.rasterSizeBuckets != 2
+            || externalBoundStatistics.rasterVariants != 1
+            || externalBoundStatistics.rasterVariantLimitFallbacks != 2) {
+            fail("Async external primary resolver exceeded or misapplied the shared bucket cap");
+        }
+        TextRunCache externalPrimaryRunCache(fonts);
+        TextPainter externalPrimaryPainter(externalPrimaryRunCache);
+        externalPrimaryPainter.setFallbackFonts(externallyResolved.fontChain());
+        externalPrimaryPainter.setFontRasterResolver(&externallyResolved);
+        externalPrimaryPainter.setGlyphRequestBackend(&externallyResolved);
+        constexpr std::string_view accentedText{"\xC3\xA9"};
+        const TextLayoutResult* pendingAccentedLayout = externalPrimaryPainter.layout(
+            externalPrimaryBase, 13.0F, accentedText);
+        const Win32AsyncFontStatistics queuedRouteStatistics =
+            externallyResolved.statistics();
+        const bool accentedSettled = drainAsync(externallyResolved);
+        const TextLayoutResult* resolvedAccentedLayout = externalPrimaryPainter.layout(
+            externalPrimaryBase, 13.0F, accentedText);
+        const Win32AsyncFontStatistics routedStatistics = externallyResolved.statistics();
+        if (pendingAccentedLayout == nullptr || !accentedSettled
+            || fonts.find(retained1625)->glyph(U'\u00E9') == nullptr
+            || resolvedAccentedLayout == nullptr
+            || resolvedAccentedLayout->glyphs.size() != 1
+            || resolvedAccentedLayout->glyphs.front().font != retained1625
+            || resolvedAccentedLayout->glyphs.front().codepoint != U'\u00E9'
+            || routedStatistics.bakeJobsQueued != 1
+            || queuedRouteStatistics.candidateFaceProbes != 1
+            || queuedRouteStatistics.avoidedFanoutJobs != 1) {
+            fail("Resolved external primary font did not receive its async glyph publication");
+        }
+        if (!externallyResolved.releaseResources()) {
+            fail("Async external primary bucket fixture did not release borrowed resources");
+        }
+        if (fonts.find(retained1625)->glyph(U'\u00E9') != nullptr) {
+            fail("External primary variant retained a helper-owned glyph after release");
+        }
     }
 
     const std::size_t chainFontCount = fonts.size();

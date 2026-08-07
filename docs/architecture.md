@@ -202,11 +202,17 @@ entries; explicit document invalidation is still required because an otherwise
 stable retained tree has no reason to revisit typography. Atlas pages may be
 preallocated during font-set construction so interactive commits perform only
 region uploads and bounded font publication until those pages fill.
-`TextFontRasterResolver` selects bounded integer physical-pixel variants close
-to the final requested size, while glyph run origins are snapped in framebuffer
-space without rounding unrelated UI geometry. Explicit `releaseResources()`
+`TextFontRasterResolver` selects bounded 1/8-physical-pixel variants close to
+the final requested size. DirectWrite rasterizes both synchronous ASCII seeds
+and asynchronous fallback glyphs at that floating-point size. Small coverage
+glyphs carry an explicit pixel-aligned placement flag: each cumulative glyph
+position is snapped in framebuffer space while fractional advances remain in
+layout, so pen error is carried forward without rounding unrelated UI geometry.
+Larger smooth glyphs retain shared run-origin snapping. Explicit `releaseResources()`
 joins the worker before reclaiming owned dynamic glyphs, variant faces, and
-atlas textures.
+atlas textures. Externally resolved primary variants are borrowed first-class
+async targets: their dynamic publications are reclaimed without destroying the
+external face, and the shared raster-bucket cap is checked before resolution.
 
 The built-in routing is scalar fallback, not a universal shaping engine.
 Locale-specific chains select the preferred Han forms. DirectWrite emoji

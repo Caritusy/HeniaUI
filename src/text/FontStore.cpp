@@ -31,7 +31,9 @@ namespace {
         && std::isfinite(glyph.size.x) && std::isfinite(glyph.size.y)
         && glyph.size.x >= 0.0F && glyph.size.y >= 0.0F
         && std::isfinite(glyph.bearing.x) && std::isfinite(glyph.bearing.y)
-        && std::isfinite(glyph.advance) && glyph.advance >= 0.0F;
+        && std::isfinite(glyph.advance) && glyph.advance >= 0.0F
+        && (glyph.rasterPlacement == GlyphRasterPlacement::Smooth
+            || glyph.rasterPlacement == GlyphRasterPlacement::PixelAligned);
 }
 
 [[nodiscard]] bool validKerning(const KerningPair& pair) noexcept {
@@ -269,6 +271,52 @@ bool FontStore::removeGlyphs(
         }
     }
     if (prepared.mGlyphs.size() == entry->face->mGlyphs.size()) return true;
+    prepared.mGlyphIdIndex = FontFace::buildGlyphIdIndex(prepared.mGlyphs);
+    prepared.mHandle = handle;
+    prepared.mExpectedRevision = entry->face->mRevision;
+    prepared.mReady = true;
+    return commit(std::move(prepared));
+}
+
+bool FontStore::restoreGlyphs(
+    FontHandle handle,
+    std::span<const GlyphMetrics> restored,
+    std::span<const char32_t> removed) {
+    Entry* entry = findEntry(handle);
+    if (entry == nullptr
+        || (restored.empty() && removed.empty())
+        || entry->face->mRevision == std::numeric_limits<std::uint64_t>::max()) {
+        return false;
+    }
+    PreparedGlyphUpdate prepared;
+    prepared.mGlyphs = entry->face->mGlyphs;
+    for (char32_t codepoint : removed) {
+        const auto iterator = std::lower_bound(
+            prepared.mGlyphs.begin(),
+            prepared.mGlyphs.end(),
+            codepoint,
+            [](const GlyphMetrics& existing, char32_t value) {
+                return existing.codepoint < value;
+            });
+        if (iterator != prepared.mGlyphs.end() && iterator->codepoint == codepoint) {
+            prepared.mGlyphs.erase(iterator);
+        }
+    }
+    for (const GlyphMetrics& glyph : restored) {
+        if (!validGlyph(glyph, entry->face->mAtlas)) return false;
+        const auto iterator = std::lower_bound(
+            prepared.mGlyphs.begin(),
+            prepared.mGlyphs.end(),
+            glyph.codepoint,
+            [](const GlyphMetrics& existing, char32_t value) {
+                return existing.codepoint < value;
+            });
+        if (iterator != prepared.mGlyphs.end() && iterator->codepoint == glyph.codepoint) {
+            *iterator = glyph;
+        } else {
+            prepared.mGlyphs.insert(iterator, glyph);
+        }
+    }
     prepared.mGlyphIdIndex = FontFace::buildGlyphIdIndex(prepared.mGlyphs);
     prepared.mHandle = handle;
     prepared.mExpectedRevision = entry->face->mRevision;

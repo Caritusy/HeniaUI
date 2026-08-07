@@ -13,6 +13,7 @@ namespace henia::ui {
 struct GlyphQuad final {
     Rect bounds{};
     Rect uv{};
+    GlyphRasterPlacement rasterPlacement = GlyphRasterPlacement::Smooth;
 };
 
 enum class EffectLayerKind : std::uint8_t {

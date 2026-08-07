@@ -427,7 +427,11 @@ bool TextRenderCache::build(const TextLayoutResult& layout, TextRun& output) con
             segment.glyphs.reserve(mGlyphReserve);
             output.segments.push_back(std::move(segment));
         }
-        output.segments.back().glyphs.push_back({item.bounds, glyph->uv});
+        output.segments.back().glyphs.push_back({
+            item.bounds,
+            glyph->uv,
+            glyph->rasterPlacement,
+        });
     }
     return true;
 }

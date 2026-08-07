@@ -481,7 +481,7 @@ int main() {
         fail("D3D12 texture upload did not commit after fence completion");
     }
 
-    if (packet.instances().size() != 19 || packet.batches().size() != 2
+    if (packet.instances().size() != 20 || packet.batches().size() != 2
         || packet.statistics().effectInstances != 6
         || packet.statistics().shaderVariantTransitions != 13) {
         fail("Visual regression scene compiled unexpectedly");

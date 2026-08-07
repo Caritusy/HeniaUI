@@ -73,7 +73,9 @@ bool DynamicGlyphAtlas::add(std::span<const RasterizedGlyph> glyphs) {
     // Publication tracking is part of resource ownership. Reserve it before
     // creating/committing store resources so an allocation failure cannot make
     // a glyph unreachable from releaseResources().
-    mPublishedCodepoints.reserve(mPublishedCodepoints.size() + glyphs.size());
+    mPublishedGlyphs.reserve(mPublishedGlyphs.size() + glyphs.size());
+    std::vector<PublishedGlyph> plannedPublications;
+    plannedPublications.reserve(glyphs.size());
 
     TextureCreationRollback rollback{mTextures, &newTextures};
     const auto allocatePlannedPage = [&]() {
@@ -135,6 +137,7 @@ bool DynamicGlyphAtlas::add(std::span<const RasterizedGlyph> glyphs) {
             .advance = glyph.advance,
             .glyphId = glyph.glyphId,
             .atlas = face->atlas(),
+            .rasterPlacement = glyph.rasterPlacement,
         };
         if (glyph.width != 0) {
             Placement& placement = placements[glyphIndex];
@@ -166,6 +169,27 @@ bool DynamicGlyphAtlas::add(std::span<const RasterizedGlyph> glyphs) {
         metrics.push_back(metric);
         uploadedBytes += glyph.pixels.size();
     }
+    for (const RasterizedGlyph& glyph : glyphs) {
+        const bool alreadyPublished = std::any_of(
+            mPublishedGlyphs.begin(),
+            mPublishedGlyphs.end(),
+            [codepoint = glyph.codepoint](const PublishedGlyph& publication) {
+                return publication.codepoint == codepoint;
+            });
+        const bool plannedAlready = std::any_of(
+            plannedPublications.begin(),
+            plannedPublications.end(),
+            [codepoint = glyph.codepoint](const PublishedGlyph& publication) {
+                return publication.codepoint == codepoint;
+            });
+        if (alreadyPublished || plannedAlready) continue;
+        const GlyphMetrics* previous = face->glyph(glyph.codepoint);
+        plannedPublications.push_back({
+            .codepoint = glyph.codepoint,
+            .hadPrevious = previous != nullptr,
+            .previous = previous != nullptr ? *previous : GlyphMetrics{},
+        });
+    }
     PreparedGlyphUpdate preparedGlyphs = mFonts->prepareGlyphs(mFont, metrics);
     if (!preparedGlyphs.valid()) {
         ++mStatistics.failedAdditions;
@@ -193,11 +217,8 @@ bool DynamicGlyphAtlas::add(std::span<const RasterizedGlyph> glyphs) {
     mPageState = std::move(plannedPages);
     mPageHandles = std::move(plannedHandles);
     rollback.release();
-    for (const RasterizedGlyph& glyph : glyphs) {
-        if (std::find(mPublishedCodepoints.begin(), mPublishedCodepoints.end(), glyph.codepoint)
-            == mPublishedCodepoints.end()) {
-            mPublishedCodepoints.push_back(glyph.codepoint);
-        }
+    for (PublishedGlyph& publication : plannedPublications) {
+        mPublishedGlyphs.push_back(std::move(publication));
     }
     mStatistics.fullPageAllocations += newTextures.size();
     mStatistics.uploadedBytes += uploadedBytes;
@@ -205,23 +226,40 @@ bool DynamicGlyphAtlas::add(std::span<const RasterizedGlyph> glyphs) {
     return true;
 }
 
-bool DynamicGlyphAtlas::releaseResources() {
-    if (!mPublishedCodepoints.empty() && mFonts->find(mFont) != nullptr
-        && !mFonts->removeGlyphs(mFont, mPublishedCodepoints)) {
+bool DynamicGlyphAtlas::releaseResources() noexcept {
+    try {
+        if (!mPublishedGlyphs.empty()) {
+            std::vector<GlyphMetrics> restored;
+            std::vector<char32_t> removed;
+            restored.reserve(mPublishedGlyphs.size());
+            removed.reserve(mPublishedGlyphs.size());
+            for (const PublishedGlyph& publication : mPublishedGlyphs) {
+                if (publication.hadPrevious) {
+                    restored.push_back(publication.previous);
+                } else {
+                    removed.push_back(publication.codepoint);
+                }
+            }
+            if (mFonts->find(mFont) != nullptr
+                && !mFonts->restoreGlyphs(mFont, restored, removed)) {
+                return false;
+            }
+            mPublishedGlyphs.clear();
+        }
+        bool released = true;
+        for (TextureHandle handle : mPageHandles) {
+            if (mTextures->view(handle).handle.valid()
+                && !mTextures->destroy(handle)) {
+                released = false;
+            }
+        }
+        if (!released) return false;
+        mPageState.clear();
+        mPageHandles.clear();
+        return true;
+    } catch (...) {
         return false;
     }
-    bool released = true;
-    for (TextureHandle handle : mPageHandles) {
-        if (mTextures->view(handle).handle.valid()
-            && !mTextures->destroy(handle)) {
-            released = false;
-        }
-    }
-    if (!released) return false;
-    mPublishedCodepoints.clear();
-    mPageState.clear();
-    mPageHandles.clear();
-    return true;
 }
 
 FontHandle DynamicGlyphAtlas::font() const noexcept { return mFont; }
@@ -261,7 +299,9 @@ bool DynamicGlyphAtlas::valid(const RasterizedGlyph& glyph) const noexcept {
         && std::isfinite(glyph.logicalSize.x) && std::isfinite(glyph.logicalSize.y)
         && (defaultLogicalSize || explicitLogicalSize)
         && std::isfinite(glyph.bearing.x) && std::isfinite(glyph.bearing.y)
-        && std::isfinite(glyph.advance) && glyph.advance >= 0.0F;
+        && std::isfinite(glyph.advance) && glyph.advance >= 0.0F
+        && (glyph.rasterPlacement == GlyphRasterPlacement::Smooth
+            || glyph.rasterPlacement == GlyphRasterPlacement::PixelAligned);
 }
 
 bool DynamicGlyphAtlas::allocatePage() {

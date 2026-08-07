@@ -338,7 +338,8 @@ DrawInstance BatchCompiler::makeInstance(
     };
     if (command.kind == PrimitiveKind::Line) {
         instance.setLineStyle(command.lineJoin, command.lineFlags);
-    } else if (command.kind == PrimitiveKind::AnimatedGradientRect) {
+    } else if (command.kind == PrimitiveKind::AnimatedGradientRect
+        || command.kind == PrimitiveKind::Glyph) {
         instance.setShaderParameter(command.lineFlags);
     } else {
         instance.setLineStyle(command.lineJoin, 0);

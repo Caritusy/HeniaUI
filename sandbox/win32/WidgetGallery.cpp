@@ -534,6 +534,26 @@ struct GalleryState final {
     multilingual.emplaceChild<Label>(
         "Caf\u00E9 / \u03A9 / \u221E / \u2605 / \U0001F525",
         LabelStyle{font, 13.0F, kMuted});
+    multilingual.emplaceChild<Label>(
+        "Cherry / rr ii ll rn / minimum illumination",
+        LabelStyle{font, 13.0F, kText});
+    multilingual.emplaceChild<Label>(
+        "\u5DDD\u5DDE \u65E5\u7530 \u4E2D\u56FD \u9F8D\u9580",
+        LabelStyle{font, 13.0F, kText});
+    Panel& lightTextFixture = multilingual.emplaceChild<Panel>(PanelStyle{
+        .background = Color{0.91F, 0.93F, 0.94F, 1.0F},
+        .padding = {8.0F, 6.0F, 8.0F, 6.0F},
+        .gap = 3.0F,
+        .direction = LayoutDirection::Column,
+        .stretchCrossAxis = true,
+    });
+    constexpr Color darkFixtureText{0.055F, 0.070F, 0.080F, 1.0F};
+    lightTextFixture.emplaceChild<Label>(
+        "Cherry / rr ii ll rn / minimum illumination",
+        LabelStyle{font, 13.0F, darkFixtureText});
+    lightTextFixture.emplaceChild<Label>(
+        "\u5DDD\u5DDE \u65E5\u7530 \u4E2D\u56FD \u9F8D\u9580",
+        LabelStyle{font, 13.0F, darkFixtureText});
 
     Panel& values = addCard(
         first, font, "Values", "Slider and keyboard-editable NumericInput");

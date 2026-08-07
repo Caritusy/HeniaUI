@@ -199,8 +199,6 @@ PreparedTextureUpdate TextureStore::prepareRegionUpdates(
             || update.region.height > entry->height - update.region.y) {
             return {};
         }
-        if (entry->pixels.empty() && !ensureCpuBacking(update.handle)) return {};
-
         std::size_t copyBytes = 0;
         std::size_t requiredBytes = 0;
         if (!checkedMultiply(
@@ -221,13 +219,38 @@ PreparedTextureUpdate TextureStore::prepareRegionUpdates(
                 return value.handle == update.handle;
             });
         if (staged == result.mEntries.end()) {
+            std::vector<std::byte> stagedPixels;
+            bool regeneratedBacking = false;
+            if (entry->pixels.empty()) {
+                if (!regenerateCpuBacking(update.handle, stagedPixels)) return {};
+                entry = find(update.handle);
+                if (entry == nullptr || entry->backingPolicy == TextureBackingPolicy::ExternalGpu
+                    || entry->revision == std::numeric_limits<std::uint64_t>::max()
+                    || update.region.x > entry->width
+                    || update.region.width > entry->width - update.region.x
+                    || update.region.y > entry->height
+                    || update.region.height > entry->height - update.region.y) {
+                    return {};
+                }
+                if (!entry->pixels.empty()) {
+                    stagedPixels = entry->pixels;
+                } else {
+                    regeneratedBacking = true;
+                }
+            } else {
+                stagedPixels = entry->pixels;
+            }
             result.mEntries.push_back({
                 .handle = update.handle,
                 .expectedRevision = entry->revision,
                 .dirtyRegion = update.region,
-                .pixels = entry->pixels,
+                .pixels = std::move(stagedPixels),
+                .regeneratedBacking = regeneratedBacking,
             });
             staged = result.mEntries.end() - 1;
+            if (regeneratedBacking) {
+                staged->rollbackSourcePixels = staged->pixels;
+            }
         } else {
             const std::uint32_t left = std::min(staged->dirtyRegion.x, update.region.x);
             const std::uint32_t top = std::min(staged->dirtyRegion.y, update.region.y);
@@ -270,9 +293,13 @@ PreparedTextureUpdate TextureStore::prepareRegionUpdates(
         staged.rollbackPixels.resize(rollbackBytes);
         const std::size_t xOffset = static_cast<std::size_t>(staged.dirtyRegion.x)
             * bytesPerPixel(entry->format);
+        const std::span<const std::byte> rollbackSource = staged.rollbackSourcePixels.empty()
+            ? entry->pixels
+            : std::span<const std::byte>(staged.rollbackSourcePixels);
+        if (rollbackSource.empty()) return {};
         for (std::uint32_t row = 0; row < staged.dirtyRegion.height; ++row) {
             std::copy_n(
-                entry->pixels.data()
+                rollbackSource.data()
                     + static_cast<std::size_t>(staged.dirtyRegion.y + row) * entry->rowPitch
                     + xOffset,
                 rowBytes,
@@ -296,6 +323,7 @@ bool TextureStore::commit(PreparedTextureUpdate&& update) noexcept {
         entry->dirtyRegion = staged.dirtyRegion;
         entry->fullUpdate = false;
         ++entry->revision;
+        if (staged.regeneratedBacking) ++mBackingRestorations;
         mRegionUpdates += staged.regionCount;
         mCoalescedDirtyArea += static_cast<std::uint64_t>(staged.dirtyRegion.width)
             * staged.dirtyRegion.height;
@@ -339,6 +367,60 @@ bool TextureStore::restoreCpuBacking(
     return true;
 }
 
+bool TextureStore::regenerateCpuBacking(
+    TextureHandle handle,
+    std::vector<std::byte>& output) {
+    Entry* entry = find(handle);
+    if (entry == nullptr) return false;
+    if (!entry->pixels.empty()) {
+        output = entry->pixels;
+        return true;
+    }
+    if (entry->backingPolicy != TextureBackingPolicy::Regenerable || !entry->regenerator) {
+        return false;
+    }
+
+    const TextureFormat expectedFormat = entry->format;
+    const std::uint32_t expectedWidth = entry->width;
+    const std::uint32_t expectedHeight = entry->height;
+    const std::uint32_t expectedRowPitch = entry->rowPitch;
+    const std::uint64_t expectedRevision = entry->revision;
+    try {
+        TextureRegenerator regenerator = entry->regenerator;
+        std::vector<std::byte> regenerated = regenerator();
+        entry = find(handle);
+        if (entry == nullptr) {
+            return false;
+        }
+        // A reentrant update or explicit restoration is newer than the
+        // callback result and remains authoritative.
+        if (!entry->pixels.empty()) {
+            output = entry->pixels;
+            return true;
+        }
+        if (entry->backingPolicy != TextureBackingPolicy::Regenerable
+            || entry->revision != expectedRevision
+            || entry->format != expectedFormat
+            || entry->width != expectedWidth
+            || entry->height != expectedHeight
+            || entry->rowPitch != expectedRowPitch) {
+            return false;
+        }
+        if (!validatePixels(
+                expectedFormat,
+                expectedWidth,
+                expectedHeight,
+                expectedRowPitch,
+                regenerated)) {
+            return false;
+        }
+        output = std::move(regenerated);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool TextureStore::ensureCpuBacking(TextureHandle handle) {
     Entry* entry = find(handle);
     if (entry == nullptr) return false;
@@ -346,24 +428,20 @@ bool TextureStore::ensureCpuBacking(TextureHandle handle) {
     if (entry->backingPolicy != TextureBackingPolicy::Regenerable || !entry->regenerator) {
         return false;
     }
-    try {
-        std::vector<std::byte> regenerated = entry->regenerator();
-        if (!validatePixels(
-                entry->format,
-                entry->width,
-                entry->height,
-                entry->rowPitch,
-                regenerated)) {
-            ++mBackingRestorationFailures;
-            return false;
-        }
-        entry->pixels = std::move(regenerated);
-        ++mBackingRestorations;
-        return true;
-    } catch (...) {
+    std::vector<std::byte> regenerated;
+    if (!regenerateCpuBacking(handle, regenerated)) {
         ++mBackingRestorationFailures;
         return false;
     }
+    entry = find(handle);
+    if (entry == nullptr) {
+        ++mBackingRestorationFailures;
+        return false;
+    }
+    if (!entry->pixels.empty()) return true;
+    entry->pixels = std::move(regenerated);
+    ++mBackingRestorations;
+    return true;
 }
 
 TextureView TextureStore::view(TextureHandle handle) const noexcept {

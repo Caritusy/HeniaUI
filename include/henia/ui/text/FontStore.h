@@ -24,6 +24,9 @@ struct GlyphMetrics final {
     std::uint32_t glyphId = 0;
     // Dynamic/paged atlases may override the face's default texture per glyph.
     TextureHandle atlas{};
+    // Pixel-aligned coverage bitmaps snap each glyph quad independently while
+    // retaining fractional advances. Smooth glyphs retain run-origin snapping.
+    GlyphRasterPlacement rasterPlacement = GlyphRasterPlacement::Smooth;
 };
 
 struct KerningPair final {
@@ -110,6 +113,12 @@ public:
     [[nodiscard]] bool removeGlyphs(
         FontHandle handle,
         std::span<const char32_t> codepoints);
+    // Atomically restores prior glyph records and removes records that were
+    // introduced by a retiring helper.
+    [[nodiscard]] bool restoreGlyphs(
+        FontHandle handle,
+        std::span<const GlyphMetrics> restored,
+        std::span<const char32_t> removed);
     [[nodiscard]] bool destroy(FontHandle handle) noexcept;
     [[nodiscard]] const FontFace* find(FontHandle handle) const noexcept;
     [[nodiscard]] FontHandle handleAt(std::size_t slotIndex) const noexcept;

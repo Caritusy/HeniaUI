@@ -92,8 +92,12 @@ namespace henia::ui {
         && (command.lineFlags & ~(kLineHasPrevious | kLineHasNext)) != 0) {
         return "line.flags";
     }
+    if (command.kind == PrimitiveKind::Glyph && (command.lineFlags & ~1U) != 0) {
+        return "shader.parameter";
+    }
     if (command.kind != PrimitiveKind::Line
         && command.kind != PrimitiveKind::AnimatedGradientRect
+        && command.kind != PrimitiveKind::Glyph
         && command.lineFlags != 0) {
         return "shader.parameter";
     }

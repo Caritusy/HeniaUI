@@ -24,6 +24,7 @@ struct RasterizedGlyph final {
     // Optional logical dimensions when the bitmap is rasterized above 1x.
     // Zero selects the physical width/height for backward compatibility.
     Vec2 logicalSize{};
+    GlyphRasterPlacement rasterPlacement = GlyphRasterPlacement::Smooth;
 };
 
 struct DynamicGlyphAtlasOptions final {
@@ -56,10 +57,11 @@ public:
     [[nodiscard]] bool reservePages(std::size_t count);
     [[nodiscard]] bool add(const RasterizedGlyph& glyph);
     [[nodiscard]] bool add(std::span<const RasterizedGlyph> glyphs);
-    // Explicitly removes glyph records published by this atlas and retires all
-    // of its page textures. The destructor intentionally does not do this so a
-    // host can choose whether published resources outlive the packing helper.
-    [[nodiscard]] bool releaseResources();
+    // Explicitly removes glyphs introduced by this atlas, restores records it
+    // replaced, and retires all page textures. The destructor intentionally
+    // does not do this so a host can choose whether published resources outlive
+    // the packing helper.
+    [[nodiscard]] bool releaseResources() noexcept;
 
     [[nodiscard]] FontHandle font() const noexcept;
     [[nodiscard]] std::span<const TextureHandle> pages() const noexcept;
@@ -79,6 +81,12 @@ private:
         std::uint32_t y = 0;
     };
 
+    struct PublishedGlyph final {
+        char32_t codepoint = U'\0';
+        bool hadPrevious = false;
+        GlyphMetrics previous{};
+    };
+
     [[nodiscard]] bool valid(const RasterizedGlyph& glyph) const noexcept;
     [[nodiscard]] bool allocatePage();
 
@@ -88,7 +96,7 @@ private:
     DynamicGlyphAtlasOptions mOptions{};
     std::vector<Page> mPageState;
     std::vector<TextureHandle> mPageHandles;
-    std::vector<char32_t> mPublishedCodepoints;
+    std::vector<PublishedGlyph> mPublishedGlyphs;
     DynamicGlyphAtlasStatistics mStatistics{};
 };
 

@@ -90,9 +90,12 @@ PixelInput vertexMain(VertexInput input) {
     float2 framebufferPixel = pixel * logicalToFramebufferScale
         + logicalToFramebufferTranslation;
     if (kind == 4) {
-        float2 runOrigin = input.metrics * logicalToFramebufferScale
+        float2 snapOrigin = (input.style.w & 1) != 0
+            ? input.bounds.xy
+            : input.metrics;
+        float2 physicalSnapOrigin = snapOrigin * logicalToFramebufferScale
             + logicalToFramebufferTranslation;
-        framebufferPixel += round(runOrigin) - runOrigin;
+        framebufferPixel += floor(physicalSnapOrigin + 0.5) - physicalSnapOrigin;
     }
     float2 normalized = framebufferPixel / viewportSize;
     output.position = float4(normalized.x * 2.0 - 1.0, 1.0 - normalized.y * 2.0, 0.0, 1.0);

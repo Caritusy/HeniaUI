@@ -364,9 +364,12 @@ void main() {
     vec2 framebufferPixel = pixel * logicalToFramebufferScale
         + logicalToFramebufferTranslation;
     if (kind == 4u) {
-        vec2 runOrigin = instanceMetrics * logicalToFramebufferScale
+        vec2 snapOrigin = (instanceStyle.w & 1u) != 0u
+            ? instanceBounds.xy
+            : instanceMetrics;
+        vec2 physicalSnapOrigin = snapOrigin * logicalToFramebufferScale
             + logicalToFramebufferTranslation;
-        framebufferPixel += round(runOrigin) - runOrigin;
+        framebufferPixel += floor(physicalSnapOrigin + vec2(0.5)) - physicalSnapOrigin;
     }
     vec2 normalized = framebufferPixel / viewportSize;
     gl_Position = vec4(normalized.x * 2.0 - 1.0, 1.0 - normalized.y * 2.0, 0.0, 1.0);
