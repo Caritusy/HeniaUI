@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.24)
 
 project(HeniaUI VERSION 0.1.0 LANGUAGES CXX)
 
+if(MSVC)
+    # Manual-map consumers require both explicit and compiler-generated TLS to be absent.
+    add_compile_options(/Zc:threadSafeInit-)
+endif()
+
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 

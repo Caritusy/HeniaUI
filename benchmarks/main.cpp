@@ -48,7 +48,7 @@ struct State final {
     std::uint64_t peakLiveBytes = 0;
 };
 
-thread_local State gState;
+State gState;
 
 [[nodiscard]] void* allocate(std::size_t size, std::size_t alignment) noexcept {
     size = std::max<std::size_t>(size, 1);
