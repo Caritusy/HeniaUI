@@ -3,6 +3,7 @@
 #include "henia/ui/platform/win32/Win32FontLoader.h"
 #include "henia/ui/platform/win32/Win32InputAdapter.h"
 #include "henia/ui/text/TextLayout.h"
+#include "henia/ui/text/Utf8.h"
 #include "henia/ui/widget/controls/Panel.h"
 
 #include <array>
@@ -804,6 +805,45 @@ int main() {
         fail("Win32 async borrowed-primary cleanup did not retire only its dynamic page");
     }
 
+    {
+        Win32AsyncFontSet queueLimited(textures, fonts, {
+            .families = {
+                .primary = L"Segoe UI",
+                .simplifiedChinese = {},
+                .traditionalChinese = {},
+                .japanese = {},
+                .korean = {},
+                .symbols = {},
+                .emoji = {},
+            },
+            .primaryFont = font,
+            .logicalPixelHeight = 24.0F,
+            .dynamicAtlas = {
+                .pageWidth = 64,
+                .pageHeight = 64,
+                .padding = 1,
+                .maximumPages = 2,
+            },
+            .preallocatedPagesPerFace = 1,
+            .requestQueueCapacity = 1,
+            .resultQueueCapacity = 1,
+        });
+        std::string burst;
+        for (char32_t codepoint = U'\u0100'; codepoint < U'\u0180'; ++codepoint) {
+            if (!appendUtf8(burst, codepoint)) {
+                fail("Queue-limited async fixture could not encode its text");
+            }
+        }
+        const TextPreparationStatus burstStatus = queueLimited.prepareText(
+            queueLimited.fontChain(), 24.0F, burst);
+        const Win32AsyncFontStatistics burstStatistics = queueLimited.statistics();
+        if (!queueLimited.valid() || burstStatus != TextPreparationStatus::Pending
+            || burstStatistics.requestQueueFull == 0
+            || !queueLimited.releaseResources()) {
+            fail("A full async request queue was not retained as pending work");
+        }
+    }
+
     const auto drainAsync = [](Win32AsyncFontSet& set) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (std::chrono::steady_clock::now() < deadline && !set.idle()) {
@@ -876,9 +916,13 @@ int main() {
             .injectedCommitFailures = failRasterization ? 0U : 1U,
         });
         const std::array requested{codepoint};
+        std::string text;
+        if (!appendUtf8(text, codepoint)) return false;
         if (!retrying.valid() || retrying.request(requested) != 1 || !drainAsync(retrying)
             || fonts.find(font)->glyph(codepoint) != nullptr
-            || retrying.request(requested) != 1 || !drainAsync(retrying)
+            || retrying.prepareText(retrying.fontChain(), 24.0F, text)
+                != TextPreparationStatus::Pending
+            || !drainAsync(retrying)
             || fonts.find(font)->glyph(codepoint) == nullptr) {
             return false;
         }
@@ -962,22 +1006,84 @@ int main() {
         constexpr std::string_view accentedText{"\xC3\xA9"};
         const TextLayoutResult* pendingAccentedLayout = externalPrimaryPainter.layout(
             externalPrimaryBase, 13.0F, accentedText);
+        DisplayList pendingAccentedCommands;
+        Canvas pendingAccentedCanvas(pendingAccentedCommands);
+        externalPrimaryPainter.draw(
+            pendingAccentedCanvas,
+            externalPrimaryBase,
+            13.0F,
+            {},
+            {},
+            accentedText);
+        DisplayList pendingLayoutCommands;
+        Canvas pendingLayoutCanvas(pendingLayoutCommands);
+        if (pendingAccentedLayout != nullptr) {
+            externalPrimaryPainter.drawLayout(
+                pendingLayoutCanvas, *pendingAccentedLayout, {}, {});
+        }
+        const bool pendingAccentedMarked = pendingAccentedLayout != nullptr
+            && pendingAccentedLayout->preparationStatus == TextPreparationStatus::Pending;
         const Win32AsyncFontStatistics queuedRouteStatistics =
             externallyResolved.statistics();
         const bool accentedSettled = drainAsync(externallyResolved);
         const TextLayoutResult* resolvedAccentedLayout = externalPrimaryPainter.layout(
             externalPrimaryBase, 13.0F, accentedText);
+        DisplayList resolvedAccentedCommands;
+        Canvas resolvedAccentedCanvas(resolvedAccentedCommands);
+        externalPrimaryPainter.draw(
+            resolvedAccentedCanvas,
+            externalPrimaryBase,
+            13.0F,
+            {},
+            {},
+            accentedText);
         const Win32AsyncFontStatistics routedStatistics = externallyResolved.statistics();
-        if (pendingAccentedLayout == nullptr || !accentedSettled
+        if (!pendingAccentedMarked
+            || !pendingAccentedCommands.commands().empty()
+            || !pendingLayoutCommands.commands().empty()
+            || !accentedSettled
             || fonts.find(retained1625)->glyph(U'\u00E9') == nullptr
             || resolvedAccentedLayout == nullptr
             || resolvedAccentedLayout->glyphs.size() != 1
             || resolvedAccentedLayout->glyphs.front().font != retained1625
             || resolvedAccentedLayout->glyphs.front().codepoint != U'\u00E9'
+            || resolvedAccentedLayout->preparationStatus != TextPreparationStatus::Ready
+            || resolvedAccentedCommands.commands().size() != 1
+            || resolvedAccentedCommands.commands().front().kind != PrimitiveKind::Glyph
             || routedStatistics.bakeJobsQueued != 1
-            || queuedRouteStatistics.candidateFaceProbes != 1
+            || queuedRouteStatistics.candidateFaceProbes != 2
+            || queuedRouteStatistics.deduplicatedInFlight != 1
             || queuedRouteStatistics.avoidedFanoutJobs != 1) {
             fail("Resolved external primary font did not receive its async glyph publication");
+        }
+
+        constexpr std::string_view permanentlyMissing{"\xF4\x8F\xBF\xBF"};
+        std::vector<FontHandle> missingChain;
+        for (FontHandle handle : externallyResolved.fontChain()) {
+            missingChain.push_back(externallyResolved.resolveFont(handle, 13.0F));
+        }
+        TextPreparationStatus missingStatus = TextPreparationStatus::Pending;
+        for (std::size_t attempt = 0; attempt < missingChain.size() + 2U
+             && missingStatus == TextPreparationStatus::Pending; ++attempt) {
+            missingStatus = externallyResolved.prepareText(
+                missingChain, 13.0F, permanentlyMissing);
+            if (!drainAsync(externallyResolved)) {
+                fail("Permanent-missing glyph fixture did not drain");
+            }
+        }
+        DisplayList missingCommands;
+        Canvas missingCanvas(missingCommands);
+        externalPrimaryPainter.draw(
+            missingCanvas,
+            externalPrimaryBase,
+            13.0F,
+            {},
+            {},
+            permanentlyMissing);
+        if (missingStatus != TextPreparationStatus::Ready
+            || missingCommands.commands().size() != 1
+            || externallyResolved.statistics().permanentMissingGlyphs == 0) {
+            fail("Permanent-missing glyph did not retain final replacement rendering");
         }
         if (!externallyResolved.releaseResources()) {
             fail("Async external primary bucket fixture did not release borrowed resources");

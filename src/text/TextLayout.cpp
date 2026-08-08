@@ -584,8 +584,11 @@ TextMetrics TextPainter::measure(
     std::string_view text) {
     if (text.empty()) return {};
     fontChain = resolvedRasterFonts(fontChain, size);
-    if (mGlyphRequests != nullptr) mGlyphRequests->requestText(fontChain, size, text);
+    const TextPreparationStatus status = mGlyphRequests != nullptr
+        ? mGlyphRequests->prepareText(fontChain, size, text)
+        : TextPreparationStatus::Ready;
     const TextLayoutResult* result = mCache->layoutResult(fontChain, size, text);
+    if (result != nullptr) result->preparationStatus = status;
     return result == nullptr ? TextMetrics{} : result->metrics;
 }
 
@@ -601,10 +604,12 @@ const TextLayoutResult* TextPainter::layout(
     float size,
     std::string_view text) {
     fontChain = resolvedRasterFonts(fontChain, size);
-    if (!text.empty() && mGlyphRequests != nullptr) {
-        mGlyphRequests->requestText(fontChain, size, text);
-    }
-    return mCache->layoutResult(fontChain, size, text);
+    const TextPreparationStatus status = !text.empty() && mGlyphRequests != nullptr
+        ? mGlyphRequests->prepareText(fontChain, size, text)
+        : TextPreparationStatus::Ready;
+    const TextLayoutResult* result = mCache->layoutResult(fontChain, size, text);
+    if (result != nullptr) result->preparationStatus = status;
+    return result;
 }
 
 void TextPainter::draw(
@@ -626,8 +631,11 @@ void TextPainter::draw(
     std::string_view text) {
     if (text.empty()) return;
     fontChain = resolvedRasterFonts(fontChain, size);
-    if (mGlyphRequests != nullptr) mGlyphRequests->requestText(fontChain, size, text);
+    const TextPreparationStatus status = mGlyphRequests != nullptr
+        ? mGlyphRequests->prepareText(fontChain, size, text)
+        : TextPreparationStatus::Ready;
     const TextLayoutResult* result = mCache->layoutResult(fontChain, size, text);
+    if (result != nullptr) result->preparationStatus = status;
     if (result != nullptr) drawLayout(canvas, *result, origin, color);
 }
 
@@ -636,6 +644,7 @@ void TextPainter::drawLayout(
     const TextLayoutResult& layout,
     Vec2 origin,
     Color color) {
+    if (layout.preparationStatus == TextPreparationStatus::Pending) return;
     const TextRun* run = mCache->renderLayout(layout);
     if (run == nullptr) return;
     for (const TextRenderSegment& segment : run->segments) {

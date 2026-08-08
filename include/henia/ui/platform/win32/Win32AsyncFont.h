@@ -146,6 +146,10 @@ public:
         std::span<const FontHandle> fontChain,
         float logicalPixelSize,
         std::string_view text) override;
+    [[nodiscard]] TextPreparationStatus prepareText(
+        std::span<const FontHandle> fontChain,
+        float logicalPixelSize,
+        std::string_view text) override;
     [[nodiscard]] FontHandle resolveFont(
         FontHandle font,
         float logicalPixelSize) override;

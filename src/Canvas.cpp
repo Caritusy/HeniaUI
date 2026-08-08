@@ -744,7 +744,7 @@ void Canvas::append(DrawCommand command) noexcept {
         mLastError = {};
         return;
     }
-    if (!mDisplayList->append(command)) {
+    if (!mDisplayList->appendValidated(command)) {
         ++mRejectedCommands;
         ++mCapacityRejectedCommands;
         mLastError = "displayList.capacity";

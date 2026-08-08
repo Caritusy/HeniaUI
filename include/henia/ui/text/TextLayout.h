@@ -42,6 +42,11 @@ public:
         std::vector<TextShapingGlyph>& output) const = 0;
 };
 
+enum class TextPreparationStatus : std::uint8_t {
+    Ready,
+    Pending,
+};
+
 // Optional non-owning bridge for on-demand glyph systems. TextPainter calls it
 // before layout so platform adapters can enqueue work without blocking.
 class TextGlyphRequestBackend {
@@ -58,6 +63,16 @@ public:
         static_cast<void>(fontChain);
         static_cast<void>(logicalPixelSize);
         requestText(text);
+    }
+    // Status-aware adapters should return Pending while a valid requested
+    // glyph is still queued, baking, retryable, or waiting for publication.
+    // Compatibility adapters keep the historical immediate-ready behavior.
+    [[nodiscard]] virtual TextPreparationStatus prepareText(
+        std::span<const FontHandle> fontChain,
+        float logicalPixelSize,
+        std::string_view text) {
+        requestText(fontChain, logicalPixelSize, text);
+        return TextPreparationStatus::Ready;
     }
 };
 
@@ -94,6 +109,10 @@ struct TextCaretStop final {
 struct TextLayoutResult final {
     std::uint64_t identity = 0;
     std::uint64_t fontRevisionHash = 0;
+    // Updated by TextPainter when its request backend prepares this cached
+    // layout. Mutable because readiness changes independently from geometry
+    // while an asynchronous face revision has not yet been published.
+    mutable TextPreparationStatus preparationStatus = TextPreparationStatus::Ready;
     TextMetrics metrics{};
     std::vector<FontHandle> fonts;
     std::vector<TextLayoutGlyph> glyphs;

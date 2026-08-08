@@ -11,9 +11,22 @@ void DisplayList::reserve(std::size_t commandCapacity, CapacityPolicy capacityPo
     }
 }
 
-void DisplayList::clear() noexcept { mCommands.clear(); }
+void DisplayList::clear() noexcept {
+    mCommands.clear();
+    mCommandsValidated = true;
+}
 
 bool DisplayList::append(const DrawCommand& command) noexcept {
+    if (!appendImpl(command)) return false;
+    mCommandsValidated = false;
+    return true;
+}
+
+bool DisplayList::appendValidated(const DrawCommand& command) noexcept {
+    return appendImpl(command);
+}
+
+bool DisplayList::appendImpl(const DrawCommand& command) noexcept {
     if (mCapacityPolicy == CapacityPolicy::Fixed && mCommands.size() == mCommands.capacity()) {
         return false;
     }

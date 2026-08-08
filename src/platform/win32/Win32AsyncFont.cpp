@@ -437,7 +437,9 @@ public:
         ++mRequestEpoch;
         std::size_t queued = 0;
         for (char32_t codepoint : codepoints) {
-            queued += requestOne(codepoint, mChains[localeIndex(Win32FontLocale::Default)]);
+            queued += requestOne(
+                codepoint,
+                mChains[localeIndex(Win32FontLocale::Default)]).queued;
         }
         return queued;
     }
@@ -448,7 +450,9 @@ public:
         if (!ownerThread()) return 0;
         ++mRequestEpoch;
         std::size_t queued = 0;
-        for (char32_t codepoint : codepoints) queued += requestOne(codepoint, fontChain);
+        for (char32_t codepoint : codepoints) {
+            queued += requestOne(codepoint, fontChain).queued;
+        }
         return queued;
     }
 
@@ -466,9 +470,31 @@ public:
             const Utf8Codepoint decoded = decodeUtf8(text, offset);
             if (decoded.bytes == 0) break;
             offset += decoded.bytes;
-            queued += requestOne(decoded.valid ? decoded.value : U'\uFFFD', fontChain);
+            queued += requestOne(
+                decoded.valid ? decoded.value : U'\uFFFD',
+                fontChain).queued;
         }
         return queued;
+    }
+
+    [[nodiscard]] TextPreparationStatus prepareText(
+        std::span<const FontHandle> fontChain,
+        float logicalPixelSize,
+        std::string_view text) {
+        static_cast<void>(logicalPixelSize);
+        if (!ownerThread()) return TextPreparationStatus::Pending;
+        ++mRequestEpoch;
+        TextPreparationStatus status = TextPreparationStatus::Ready;
+        for (std::size_t offset = 0; offset < text.size();) {
+            const Utf8Codepoint decoded = decodeUtf8(text, offset);
+            if (decoded.bytes == 0) break;
+            offset += decoded.bytes;
+            if (requestOne(decoded.valid ? decoded.value : U'\uFFFD', fontChain).status
+                == TextPreparationStatus::Pending) {
+                status = TextPreparationStatus::Pending;
+            }
+        }
+        return status;
     }
 
     [[nodiscard]] FontHandle resolveFont(
@@ -1152,15 +1178,20 @@ private:
         return false;
     }
 
-    [[nodiscard]] std::size_t requestOne(
+    struct RequestOutcome final {
+        std::size_t queued = 0;
+        TextPreparationStatus status = TextPreparationStatus::Ready;
+    };
+
+    [[nodiscard]] RequestOutcome requestOne(
         char32_t codepoint,
         std::span<const FontHandle> fontChain) {
         // Layout text commonly contains line separators; they are not glyph
         // requests and should not inflate unsupported-codepoint telemetry.
-        if (codepoint < U' ') return 0;
+        if (codepoint < U' ') return {};
         if (!validScalar(codepoint)) {
             ++mUnsupportedCodepoints;
-            return 0;
+            return {};
         }
         if (mUniqueCodepoints.insert(codepoint).second) ++mUniqueCodepointsRequested;
         const std::uint32_t routes = routeMask(codepoint);
@@ -1179,7 +1210,7 @@ private:
             if (fontFace != nullptr && fontFace->glyph(codepoint) != nullptr) {
                 mJobStates[key] = {.state = GlyphJobState::Resident};
                 ++mResidentGlyphsSkipped;
-                return 0;
+                return {};
             }
 
             bool retry = false;
@@ -1188,7 +1219,7 @@ private:
                     case GlyphJobState::InFlight:
                         ++mDeduplicatedBakeJobs;
                         ++mDeduplicatedInFlight;
-                        return 0;
+                        return {.status = TextPreparationStatus::Pending};
                     case GlyphJobState::Missing:
                         continue;
                     case GlyphJobState::Resident:
@@ -1197,7 +1228,7 @@ private:
                     case GlyphJobState::Retryable:
                         if (mRequestEpoch < state->second.retryAfterRequest) {
                             ++mDeduplicatedBakeJobs;
-                            return 0;
+                            return {.status = TextPreparationStatus::Pending};
                         }
                         retry = true;
                         break;
@@ -1214,7 +1245,7 @@ private:
             };
             if (!mRequests.push(std::move(job))) {
                 ++mRequestQueueFull;
-                return 0;
+                return {.status = TextPreparationStatus::Pending};
             }
             GlyphJobRecord& record = mJobStates[key];
             record.state = GlyphJobState::InFlight;
@@ -1233,9 +1264,9 @@ private:
                 }
             }
             mAvoidedFanoutJobs += laterCandidates;
-            return 1;
+            return {.queued = 1, .status = TextPreparationStatus::Pending};
         }
-        return 0;
+        return {};
     }
 
     void workerMain(std::stop_token stop) noexcept {
@@ -1397,6 +1428,12 @@ void Win32AsyncFontSet::requestText(
     std::string_view text) {
     static_cast<void>(logicalPixelSize);
     static_cast<void>(requestUtf8(fontChain, text));
+}
+TextPreparationStatus Win32AsyncFontSet::prepareText(
+    std::span<const FontHandle> fontChain,
+    float logicalPixelSize,
+    std::string_view text) {
+    return mImpl->prepareText(fontChain, logicalPixelSize, text);
 }
 FontHandle Win32AsyncFontSet::resolveFont(
     FontHandle font,

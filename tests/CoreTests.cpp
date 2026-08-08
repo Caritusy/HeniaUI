@@ -657,6 +657,31 @@ void testInvalidGeometryAndCheckedArithmetic() {
             && rejected.statistics().capacityRejectedCommands == 0,
         "raw invalid command rejection was not transactional/classified");
 
+    displayList.clear();
+    canvas.reset();
+    canvas.fillRect({{0.0F, 0.0F}, {4.0F, 4.0F}}, {});
+    require(displayList.append(invalid), "mixed-provenance invalid command setup failed");
+    require(builder.begin(), "mixed-provenance command test could not begin packet");
+    require(!compiler.compile(displayList, builder),
+        "Canvas validation provenance incorrectly trusted a mixed raw list");
+    const RenderPacket mixedRejected = builder.publish();
+    require(mixedRejected.instances().empty()
+            && mixedRejected.statistics().sourceCommands == 2
+            && mixedRejected.statistics().invalidInputCommands == 1,
+        "mixed-provenance rejection changed packet statistics");
+
+    displayList.clear();
+    canvas.reset();
+    canvas.fillRect({{0.0F, 0.0F}, {4.0F, 4.0F}}, {});
+    require(builder.begin(), "cleared Canvas command test could not begin packet");
+    require(compiler.compile(displayList, builder),
+        "clear did not start a new Canvas-validated display-list epoch");
+    const RenderPacket validated = builder.publish();
+    require(validated.instances().size() == 1
+            && validated.statistics().sourceCommands == 1
+            && validated.statistics().invalidInputCommands == 0,
+        "Canvas-validated display-list epoch changed published work");
+
     ScissorRect scissor{};
     require(makeScissorRect({{-2.25F, 3.75F}, {10.10F, 20.01F}}, 8, 16, scissor)
             && scissor.left == 0 && scissor.top == 3

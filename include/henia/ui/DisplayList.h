@@ -9,6 +9,9 @@
 
 namespace henia::ui {
 
+class BatchCompiler;
+class Canvas;
+
 enum class CapacityPolicy : std::uint8_t {
     Grow,
     Fixed,
@@ -103,9 +106,16 @@ public:
     [[nodiscard]] std::uint64_t capacityGrowths() const noexcept;
 
 private:
+    friend class BatchCompiler;
+    friend class Canvas;
+
+    [[nodiscard]] bool appendValidated(const DrawCommand& command) noexcept;
+    [[nodiscard]] bool appendImpl(const DrawCommand& command) noexcept;
+
     std::vector<DrawCommand> mCommands;
     CapacityPolicy mCapacityPolicy = CapacityPolicy::Grow;
     std::uint64_t mCapacityGrowths = 0;
+    bool mCommandsValidated = true;
 };
 
 } // namespace henia::ui

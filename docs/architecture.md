@@ -45,6 +45,14 @@ overflow publishes no partial packet and is reported in `PacketStatistics`.
 Grow mode may expand retained vectors, but allocation failure is converted into
 the same rejection path rather than escaping a `noexcept` boundary.
 
+An immediate `DisplayList` cleared and populated exclusively by `Canvas` keeps
+validated-source provenance, so `BatchCompiler` does not repeat the same full
+command validation while converting it to instances. A public raw
+`DisplayList::append()` clears that provenance for the whole list, including a
+mix of raw and Canvas-authored commands, and compilation retains its defensive
+validation. `clear()` starts a new empty validated epoch; provenance never
+changes the command payload or the rejection behavior of raw input.
+
 ### Compact 2D draw payloads
 
 The retained and compiled streams keep paint order in one contiguous sequence,
@@ -202,6 +210,19 @@ entries; explicit document invalidation is still required because an otherwise
 stable retained tree has no reason to revisit typography. Atlas pages may be
 preallocated during font-set construction so interactive commits perform only
 region uploads and bounded font publication until those pages fill.
+The request bridge distinguishes ready text from a supported glyph that is
+queued, baking, retryable, waiting for commit, or temporarily blocked by a full
+request queue. Measurement and explicit layout may use replacement metrics in
+that state, preserving geometry and caret behavior, but `TextPainter::draw()`
+and `drawLayout()` do not emit the known-temporary replacement run. The cached
+layout carries this preparation status independently from its geometry. Once
+publication advances the face revision, the next draw builds the real run. A
+scalar confirmed
+missing across the eligible chain remains ready and keeps the ordinary
+U+FFFD/`?` fallback. Hosts should drain a bounded result budget appropriate to
+their visible text burst before composition; an artificially small per-frame
+budget extends the intentionally blank pending interval even though it no
+longer exposes question marks.
 `TextFontRasterResolver` selects bounded 1/8-physical-pixel variants close to
 the final requested size. DirectWrite rasterizes both synchronous ASCII seeds
 and asynchronous fallback glyphs at that floating-point size. Small coverage

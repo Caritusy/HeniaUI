@@ -196,6 +196,26 @@ microsecond-scale work. These measurements justify the default selector for
 this hardware pair; the public override exists because adapter and workload
 results are not universal.
 
+## Validated immediate display-list capture (#103)
+
+Recorded on 2026-08-08 with MSVC Release/x64, 25 measured iterations after five
+warmups. The `a5393e8` base and Canvas-provenance candidate ran on the same
+workstation and the benchmark comparator passed. Commands accepted by `Canvas`
+skip the duplicate full validation in `BatchCompiler`; public raw
+`DisplayList::append()` input keeps the defensive pass.
+
+| Scenario | Packet compile before / after | Change | Commands / instances | Allocations |
+|---|---:|---:|---:|---:|
+| 4,096 analytic ellipses | 173.2 / 62.1 us | -64.1% | 4,096 / 4,096 | 0 / 0 |
+| 4,096 rounded rectangles | 178.4 / 60.8 us | -65.9% | 4,096 / 4,096 | 0 / 0 |
+| 4,096 effect layers | 229.1 / 87.3 us | -61.9% | 4,096 / 4,096 | 0 / 0 |
+| Full dynamic widget repaint | 60.1 / 16.9 us | -71.9% | 1,113 / 1,113 | 0 / 0 |
+| 4,270-glyph text UI | 237.6 / 67.8 us | -71.5% | 4,270 / 4,270 | 0 / 0 |
+
+Draw counts, upload bytes, payload sizes, and resident memory were unchanged.
+The optimization removes producer validation only; backend preflight remains a
+separate trust boundary for every submitted packet.
+
 ## CI behavior
 
 Pull requests run a dedicated `benchmark-regression` job. The base SHA and

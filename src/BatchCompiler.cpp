@@ -44,7 +44,7 @@ bool BatchCompiler::compile(
     output.setSourceCommands(displayList.size());
 
     for (const DrawCommand& command : displayList.commands()) {
-        if (!validateDrawCommand(command).empty()) {
+        if (!displayList.mCommandsValidated && !validateDrawCommand(command).empty()) {
             return output.rejectPacket(true);
         }
         if (!commandOverlapsClip(command)) {
