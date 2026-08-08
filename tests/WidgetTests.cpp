@@ -3,6 +3,7 @@
 #include "henia/ui/text/TextLayout.h"
 #include "henia/ui/widget/UiDocument.h"
 #include "henia/ui/widget/controls/Button.h"
+#include "henia/ui/widget/controls/ColorPanel.h"
 #include "henia/ui/widget/controls/ColorPicker.h"
 #include "henia/ui/widget/controls/ComboBox.h"
 #include "henia/ui/widget/controls/KeyBindingEditor.h"
@@ -81,6 +82,17 @@ struct KeyRecorder final {
 
 struct ColorRecorder final {
     void changed(Color next) { value = next; ++calls; }
+    Color value{};
+    int calls = 0;
+};
+
+struct PopupConfirmation final {
+    void confirmed(Color next) {
+        value = next;
+        ++calls;
+        layer->setOpen(false);
+    }
+    PopupLayer* layer = nullptr;
     Color value{};
     int calls = 0;
 };
@@ -1197,6 +1209,26 @@ void verifyProductionOverlayWidgets(TextPainter& painter, FontHandle font) {
         layer->setOpen(true);
         document.setRoot(std::move(layer));
         const RenderPacket open = document.compose();
+        const Vec2 popupBlank{60.0F, 50.0F};
+        const bool blankDown = document.dispatch({
+            .kind = InputEventKind::PointerDown,
+            .position = popupBlank,
+            .button = PointerButton::Primary,
+        });
+        const bool blankUp = document.dispatch({
+            .kind = InputEventKind::PointerUp,
+            .position = popupBlank,
+            .button = PointerButton::Primary,
+        });
+        const bool blankScroll = document.dispatch({
+            .kind = InputEventKind::PointerScroll,
+            .position = popupBlank,
+            .scrollY = -1.0F,
+        });
+        if (!blankDown || !blankUp || !blankScroll || !layerPointer->open()
+            || dismissed.count != 0) {
+            fail("Popup passive surface did not block pointer pass-through");
+        }
         click(document, {10.0F, 10.0F});
         if (open.instances().size() < 3 || layerPointer->open() || dismissed.count != 1) {
             fail("Modal PopupLayer paint order or backdrop dismissal failed");
@@ -1239,6 +1271,270 @@ void verifyProductionOverlayWidgets(TextPainter& painter, FontHandle font) {
     }
 }
 
+void verifyColorPanelAndInputBoundaries(TextPainter& painter) {
+    {
+        Slider zeroEndpoint(-0.1, -1.0, 0.0, 0.3);
+        zeroEndpoint.setValue(0.0);
+        Slider upperEndpoint(0.9, 0.0, 1.0, 0.3);
+        upperEndpoint.setValue(1.0);
+        Slider lowerEndpoint(0.1, 0.0, 1.0, 0.3);
+        lowerEndpoint.setValue(0.0);
+        if (zeroEndpoint.value() != 0.0 || upperEndpoint.value() != 1.0
+            || lowerEndpoint.value() != 0.0) {
+            fail("Slider step quantization displaced an exact range endpoint");
+        }
+
+        UiDocument document(painter);
+        document.reserve(64, 8);
+        document.setViewport({240.0F, 60.0F});
+        auto slider = std::make_unique<Slider>(-0.1, -1.0, 0.0, 0.3);
+        Slider* sliderPointer = slider.get();
+        ValueRecorder changed;
+        slider->setOnValueChanged(
+            Callback<double>::bind<ValueRecorder, &ValueRecorder::changed>(changed));
+        document.setRoot(std::move(slider));
+        static_cast<void>(document.compose());
+        click(document, {
+            sliderPointer->frame().max.x - 1.0F,
+            rectCenter(sliderPointer->frame()).y,
+        });
+        if (sliderPointer->value() != 0.0 || changed.value != 0.0 || changed.calls != 1) {
+            fail("Slider pointer interaction could not reach an exact zero endpoint");
+        }
+    }
+
+    {
+        UiDocument document(painter);
+        document.reserve(256, 24);
+        document.setViewport({200.0F, 140.0F});
+        auto content = std::make_unique<Button>("Background");
+        ClickCounter clicked;
+        content->setOnClick(Callback<>::bind<ClickCounter, &ClickCounter::clicked>(clicked));
+        auto popup = std::make_unique<Panel>();
+        auto layer = std::make_unique<PopupLayer>(
+            std::move(content),
+            std::move(popup),
+            Rect{{50.0F, 40.0F}, {150.0F, 100.0F}},
+            PopupLayerStyle{.modal = false});
+        PopupLayer* layerPointer = layer.get();
+        layer->setOpen(true);
+        document.setRoot(std::move(layer));
+        static_cast<void>(document.compose());
+        click(document, {10.0F, 10.0F});
+        click(document, {60.0F, 50.0F});
+        if (clicked.count != 1 || !layerPointer->open()) {
+            fail("Non-modal popup did not isolate its surface from interactive background content");
+        }
+    }
+
+    {
+        UiDocument document(painter);
+        document.reserve(256, 24);
+        document.setViewport({220.0F, 184.0F});
+        auto picker = std::make_unique<ColorPicker>(Color{0.4F, 0.2F, 0.8F, 1.0F});
+        ColorPicker* pickerPointer = picker.get();
+        ColorRecorder recorder;
+        picker->setOnColorChanged(
+            Callback<Color>::bind<ColorRecorder, &ColorRecorder::changed>(recorder));
+        document.setRoot(std::move(picker));
+        static_cast<void>(document.compose());
+        const float alphaY = pickerPointer->frame().max.y - 8.0F;
+        click(document, {pickerPointer->frame().min.x, alphaY});
+        if (pickerPointer->color().alpha != 0.0F || recorder.calls == 0
+            || recorder.value.alpha != 0.0F) {
+            fail("ColorPicker alpha track did not reach transparent");
+        }
+        click(document, {
+            pickerPointer->frame().min.x + pickerPointer->frame().width() * 0.5F,
+            alphaY,
+        });
+        if (std::abs(pickerPointer->color().alpha - 0.5F) > 0.01F) {
+            fail("ColorPicker alpha track did not publish its pointer position");
+        }
+    }
+
+    {
+        ColorPanel panel;
+        if (!panel.setHexValue("#33669980")
+            || panel.srgba8() != Srgba8{0x33, 0x66, 0x99, 0x80}
+            || panel.hexValue() != "#33669980") {
+            fail("ColorPanel did not parse and synchronize RGBA HEX input");
+        }
+        const Color beforeInvalid = panel.color();
+        if (panel.setHexValue("#GG669980") || panel.color() != beforeInvalid) {
+            fail("ColorPanel accepted invalid HEX input");
+        }
+        if (!panel.setHexValue("112233")
+            || panel.srgba8() != Srgba8{0x11, 0x22, 0x33, 0xFF}
+            || panel.hexValue() != "#112233FF") {
+            fail("ColorPanel six-digit HEX input did not default alpha to opaque");
+        }
+    }
+
+    {
+        UiDocument document(painter);
+        document.reserve(1024, 96);
+        document.setViewport({320.0F, 380.0F});
+        auto panel = std::make_unique<ColorPanel>(
+            Color{}, ColorPanelInputMode::Rgb);
+        ColorPanel* panelPointer = panel.get();
+        panel->setSrgba8({10, 20, 30, 128});
+        ColorRecorder changed;
+        panel->setOnColorChanged(
+            Callback<Color>::bind<ColorRecorder, &ColorRecorder::changed>(changed));
+        document.setRoot(std::move(panel));
+        static_cast<void>(document.compose());
+        NumericInput* alpha = nullptr;
+        std::size_t numericIndex = 0;
+        for (const std::unique_ptr<Widget>& child : panelPointer->children()) {
+            if (child->kind() == WidgetKind::NumericInput && numericIndex++ == 3U) {
+                alpha = static_cast<NumericInput*>(child.get());
+                break;
+            }
+        }
+        if (alpha == nullptr) {
+            fail("ColorPanel did not expose four RGB+A channel editors");
+        }
+        click(document, {alpha->frame().max.x - 2.0F, rectCenter(alpha->frame()).y});
+        if (panelPointer->srgba8().alpha != 129U || changed.calls != 1) {
+            fail("ColorPanel alpha channel editor did not synchronize RGBA state");
+        }
+    }
+
+    {
+        UiDocument document(painter);
+        document.reserve(2048, 160);
+        document.setViewport({640.0F, 480.0F});
+        auto content = std::make_unique<Panel>();
+        Button& backgroundButton = content->emplaceChild<Button>("Background action");
+        ClickCounter backgroundClicks;
+        backgroundButton.setOnClick(
+            Callback<>::bind<ClickCounter, &ClickCounter::clicked>(backgroundClicks));
+
+        auto panel = std::make_unique<ColorPanel>();
+        ColorPanel* panelPointer = panel.get();
+        auto layer = std::make_unique<PopupLayer>(
+            std::move(content),
+            std::move(panel),
+            Rect{{170.0F, 50.0F}, {490.0F, 430.0F}},
+            PopupLayerStyle{.dismissOnBackdrop = false});
+        PopupLayer* layerPointer = layer.get();
+        PopupConfirmation confirmation{.layer = layerPointer};
+        panelPointer->setOnConfirmed(Callback<Color>::bind<
+            PopupConfirmation, &PopupConfirmation::confirmed>(confirmation));
+        document.setRoot(std::move(layer));
+        static_cast<void>(document.compose());
+        click(document, rectCenter(backgroundButton.frame()));
+        if (backgroundClicks.count != 1 || !backgroundButton.focused()) {
+            fail("Background control setup did not establish pre-modal focus");
+        }
+        layerPointer->setOpen(true);
+        static_cast<void>(document.compose());
+        static_cast<void>(document.dispatch({
+            .kind = InputEventKind::KeyDown,
+            .key = KeyCode::Space,
+        }));
+        if (backgroundClicks.count != 1 || backgroundButton.focused()) {
+            fail("Opening a modal popup left a focused background control keyboard-active");
+        }
+
+        const Vec2 outside{80.0F, 20.0F};
+        const bool outsideDown = document.dispatch({
+            .kind = InputEventKind::PointerDown,
+            .position = outside,
+            .button = PointerButton::Primary,
+        });
+        const bool outsideUp = document.dispatch({
+            .kind = InputEventKind::PointerUp,
+            .position = outside,
+            .button = PointerButton::Primary,
+        });
+        const bool outsideScroll = document.dispatch({
+            .kind = InputEventKind::PointerScroll,
+            .position = outside,
+            .scrollY = -1.0F,
+        });
+        if (!outsideDown || !outsideUp || !outsideScroll || !layerPointer->open()
+            || backgroundClicks.count != 1) {
+            fail("Confirm-only modal popup leaked input or dismissed from its backdrop");
+        }
+
+        if (!document.dispatch({.kind = InputEventKind::KeyDown, .key = KeyCode::Tab})
+            || backgroundButton.focused()) {
+            fail("Modal popup did not trap keyboard focus in its popup branch");
+        }
+        bool popupFocused = false;
+        for (const std::unique_ptr<Widget>& child : panelPointer->children()) {
+            popupFocused = popupFocused || child->focused();
+        }
+        if (!popupFocused) {
+            fail("Modal popup focus traversal did not enter popup content");
+        }
+        for (int index = 0; index < 8; ++index) {
+            static_cast<void>(document.dispatch({
+                .kind = InputEventKind::KeyDown,
+                .key = KeyCode::Tab,
+            }));
+            if (backgroundButton.focused()) {
+                fail("Modal popup Tab traversal escaped into background content");
+            }
+        }
+
+        TextInput* hexInput = nullptr;
+        Button* confirmButton = nullptr;
+        for (const std::unique_ptr<Widget>& child : panelPointer->children()) {
+            if (child->kind() == WidgetKind::TextInput) {
+                hexInput = static_cast<TextInput*>(child.get());
+            } else if (child->kind() == WidgetKind::Button) {
+                confirmButton = static_cast<Button*>(child.get());
+            }
+        }
+        if (hexInput == nullptr || confirmButton == nullptr) {
+            fail("ColorPanel input or explicit confirmation control is missing");
+        }
+
+        const Vec2 hexCenter = rectCenter(hexInput->frame());
+        const bool secondaryDown = document.dispatch({
+            .kind = InputEventKind::PointerDown,
+            .position = hexCenter,
+            .button = PointerButton::Secondary,
+        });
+        const bool secondaryUp = document.dispatch({
+            .kind = InputEventKind::PointerUp,
+            .position = hexCenter,
+            .button = PointerButton::Secondary,
+        });
+        if (!secondaryDown || !secondaryUp || !layerPointer->open()) {
+            fail("Popup input barrier did not consume a child-rejected pointer button");
+        }
+
+        click(document, hexCenter);
+        static_cast<void>(document.dispatch({
+            .kind = InputEventKind::KeyDown,
+            .key = KeyCode::A,
+            .control = true,
+        }));
+        static_cast<void>(document.dispatch({
+            .kind = InputEventKind::TextInput,
+            .text = U'Z',
+        }));
+        click(document, rectCenter(confirmButton->frame()));
+        if (!layerPointer->open() || confirmation.calls != 0) {
+            fail("Invalid HEX input incorrectly confirmed and closed the color popup");
+        }
+
+        if (!panelPointer->setHexValue("#12345678")) {
+            fail("ColorPanel rejected a valid replacement HEX value");
+        }
+        click(document, rectCenter(confirmButton->frame()));
+        if (layerPointer->open() || confirmation.calls != 1
+            || panelPointer->srgba8() != Srgba8{0x12, 0x34, 0x56, 0x78}
+            || backgroundClicks.count != 1) {
+            fail("ColorPanel confirmation did not close exactly once with RGBA state");
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1257,6 +1553,7 @@ int main() {
     verifyEditorGradeTextInput(painter, font);
     verifyOpticalCenteringAndControlFeedback(painter, font);
     verifyProductionOverlayWidgets(painter, font);
+    verifyColorPanelAndInputBoundaries(painter);
     UiDocument document(painter);
     document.reserve(512, 32);
     document.setViewport({320.0F, 200.0F});

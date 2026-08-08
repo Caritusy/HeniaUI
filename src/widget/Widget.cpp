@@ -244,6 +244,9 @@ Widget* Widget::hitTest(Vec2 point) noexcept {
     }
     if (allowsChildInteraction()) {
         for (auto iterator = mChildren.rbegin(); iterator != mChildren.rend(); ++iterator) {
+            if (!allowsInteractionForChild(**iterator)) {
+                continue;
+            }
             if (Widget* hit = (*iterator)->hitTest(point)) {
                 return hit;
             }
@@ -257,6 +260,12 @@ bool Widget::acceptsPointerInput() const noexcept { return false; }
 bool Widget::acceptsKeyboardFocus() const noexcept { return false; }
 
 bool Widget::allowsChildInteraction() const noexcept { return true; }
+
+bool Widget::allowsInteractionForChild(const Widget&) const noexcept {
+    return allowsChildInteraction();
+}
+
+bool Widget::blocksUnhandledPointerInput(Vec2) const noexcept { return false; }
 
 bool Widget::wantsTabKey() const noexcept { return false; }
 

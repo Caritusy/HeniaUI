@@ -261,7 +261,7 @@ Built-in controls include:
 
 `Panel`, `Label`, `Button`, `NumericInput`, `TextInput`, `Checkbox`, `Toggle`,
 `Slider`, `ComboBox`, `TabBar`, `ScrollContainer`, `ListView`, `TreeView`,
-`Tooltip`, `PopupLayer`, `ColorPicker`, and `KeyBindingEditor`.
+`Tooltip`, `PopupLayer`, `ColorPicker`, `ColorPanel`, and `KeyBindingEditor`.
 
 ### Low-level canvas
 

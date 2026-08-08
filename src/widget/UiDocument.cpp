@@ -310,8 +310,15 @@ bool UiDocument::dispatchEvent(const InputEvent& event) {
             updateHover(event.position);
             Widget* target = resolve(
                 mPointerSequenceActive ? mCapturedIdentity : mHoveredIdentity);
-            return target != nullptr && interactive(*target)
-                && target->acceptsPointerInput() && target->handleInput(event);
+            if (target == nullptr || !interactive(*target)
+                || !target->acceptsPointerInput()) {
+                return false;
+            }
+            if (target->handleInput(event)) {
+                return true;
+            }
+            Widget* barrier = pointerBarrier(target->parent(), event.position);
+            return barrier != nullptr && barrier->handleInput(event);
         }
         case InputEventKind::PointerDown: {
             if (Widget* captured = resolve(mCapturedIdentity)) {
@@ -325,8 +332,15 @@ bool UiDocument::dispatchEvent(const InputEvent& event) {
                 setFocus(0);
                 return false;
             }
-            const std::uint64_t targetIdentity = target->identity();
-            const bool handled = target->handleInput(event);
+            std::uint64_t targetIdentity = target->identity();
+            bool handled = target->handleInput(event);
+            if (!handled) {
+                if (Widget* barrier = pointerBarrier(target->parent(), event.position)) {
+                    target = barrier;
+                    targetIdentity = barrier->identity();
+                    handled = barrier->handleInput(event);
+                }
+            }
             target = resolve(targetIdentity);
             if (!handled || target == nullptr || !interactive(*target)
                 || !target->acceptsPointerInput()) {
@@ -350,8 +364,12 @@ bool UiDocument::dispatchEvent(const InputEvent& event) {
             if (target == nullptr && !capturedSequence) {
                 target = mRoot->hitTest(event.position);
             }
-            const bool handled = target != nullptr && interactive(*target)
+            bool handled = target != nullptr && interactive(*target)
                 && target->acceptsPointerInput() && target->handleInput(event);
+            if (!handled && target != nullptr) {
+                Widget* barrier = pointerBarrier(target->parent(), event.position);
+                handled = barrier != nullptr && barrier->handleInput(event);
+            }
             if (Widget* captured = resolve(mCapturedIdentity)) {
                 captured->setPressed(false);
             }
@@ -543,17 +561,27 @@ bool UiDocument::subtreeContains(const Widget& rootWidget, std::uint64_t identit
 }
 
 bool UiDocument::interactive(const Widget& widget) noexcept {
-    const Widget* current = &widget;
-    while (current != nullptr) {
+    const Widget* child = &widget;
+    for (const Widget* current = &widget; current != nullptr; current = current->parent()) {
         if (!current->visible() || !current->enabled()) {
             return false;
         }
-        if (current != &widget && !current->allowsChildInteraction()) {
+        if (current != &widget && !current->allowsInteractionForChild(*child)) {
             return false;
         }
-        current = current->parent();
+        child = current;
     }
     return true;
+}
+
+Widget* UiDocument::pointerBarrier(Widget* target, Vec2 point) noexcept {
+    for (Widget* current = target; current != nullptr; current = current->parent()) {
+        if (interactive(*current) && current->acceptsPointerInput()
+            && current->blocksUnhandledPointerInput(point)) {
+            return current;
+        }
+    }
+    return nullptr;
 }
 
 Widget* UiDocument::adjacentFocusable(bool backwards) const noexcept {
@@ -576,7 +604,9 @@ Widget* UiDocument::adjacentFocusable(bool backwards) const noexcept {
         }
         if (widget->allowsChildInteraction()) {
             for (const std::unique_ptr<Widget>& child : widget->children()) {
-                self(self, child.get());
+                if (widget->allowsInteractionForChild(*child)) {
+                    self(self, child.get());
+                }
             }
         }
     };

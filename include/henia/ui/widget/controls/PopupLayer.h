@@ -8,6 +8,7 @@
 namespace henia::ui {
 
 class PopupBackdrop;
+class PopupSurface;
 
 struct PopupLayerStyle final {
     Color backdrop{0.0F, 0.0F, 0.0F, 0.48F};
@@ -15,8 +16,8 @@ struct PopupLayerStyle final {
     bool dismissOnBackdrop = true;
 };
 
-// Owns content, backdrop, and popup in that paint order. popupBounds are local
-// to the layer and clamped to its arranged viewport.
+// Owns content, backdrop, a passive input surface, and popup in that order.
+// popupBounds are local to the layer and clamped to its arranged viewport.
 class PopupLayer final : public Widget {
 public:
     explicit PopupLayer(
@@ -38,18 +39,28 @@ public:
     [[nodiscard]] Color backdropColor() const noexcept;
     void setOnDismissed(Callback<> callback) noexcept;
 
+    [[nodiscard]] Widget* hitTest(Vec2 point) noexcept override;
+    [[nodiscard]] bool acceptsPointerInput() const noexcept override;
+    [[nodiscard]] bool allowsInteractionForChild(
+        const Widget& child) const noexcept override;
+    [[nodiscard]] bool blocksUnhandledPointerInput(
+        Vec2 point) const noexcept override;
+    [[nodiscard]] bool handleInput(const InputEvent& event) override;
+
 protected:
     [[nodiscard]] Vec2 onMeasure(TextPainter& text, Constraints constraints) override;
     void onArrange(TextPainter& text, Rect frame) override;
 
 private:
     friend class PopupBackdrop;
+    [[nodiscard]] bool popupContains(Vec2 point) const noexcept;
     void backdropActivated();
 
     PopupLayerStyle mStyle{};
     Callback<> mOnDismissed{};
     Widget* mContent = nullptr;
     PopupBackdrop* mBackdrop = nullptr;
+    PopupSurface* mSurface = nullptr;
     Widget* mPopup = nullptr;
     Rect mPopupBounds{};
     bool mOpen = false;

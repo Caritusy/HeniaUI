@@ -10,14 +10,20 @@ public:
     explicit PopupBackdrop(PopupLayer& owner) noexcept : mOwner(&owner) {}
     [[nodiscard]] bool acceptsPointerInput() const noexcept override { return true; }
     [[nodiscard]] bool handleInput(const InputEvent& event) override {
-        if (event.kind == InputEventKind::PointerDown
-            && event.button == PointerButton::Primary) return true;
-        if (event.kind == InputEventKind::PointerUp
-            && event.button == PointerButton::Primary) {
-            mOwner->backdropActivated();
-            return true;
+        switch (event.kind) {
+            case InputEventKind::PointerDown:
+            case InputEventKind::PointerMove:
+            case InputEventKind::PointerScroll:
+                return true;
+            case InputEventKind::PointerUp:
+                if (event.button == PointerButton::Primary
+                    && !mOwner->popupContains(event.position)) {
+                    mOwner->backdropActivated();
+                }
+                return true;
+            default:
+                return false;
         }
-        return false;
     }
 protected:
     [[nodiscard]] Vec2 onMeasure(TextPainter&, Constraints constraints) override {
@@ -28,6 +34,26 @@ protected:
     }
 private:
     PopupLayer* mOwner = nullptr;
+};
+
+class PopupSurface final : public Widget {
+public:
+    [[nodiscard]] bool acceptsPointerInput() const noexcept override { return true; }
+    [[nodiscard]] bool handleInput(const InputEvent& event) override {
+        switch (event.kind) {
+            case InputEventKind::PointerDown:
+            case InputEventKind::PointerUp:
+            case InputEventKind::PointerMove:
+            case InputEventKind::PointerScroll:
+                return true;
+            default:
+                return false;
+        }
+    }
+protected:
+    [[nodiscard]] Vec2 onMeasure(TextPainter&, Constraints constraints) override {
+        return constraints.maximum;
+    }
 };
 
 PopupLayer::PopupLayer(
@@ -44,6 +70,10 @@ PopupLayer::PopupLayer(
     mBackdrop = backdrop.get();
     mBackdrop->setVisible(false);
     addChild(std::move(backdrop));
+    auto surface = std::make_unique<PopupSurface>();
+    mSurface = surface.get();
+    mSurface->setVisible(false);
+    addChild(std::move(surface));
     if (popupValue != nullptr) {
         mPopup = popupValue.get();
         mPopup->setVisible(false);
@@ -64,6 +94,7 @@ void PopupLayer::setOpen(bool openValue) {
     if (mOpen == openValue) return;
     mOpen = openValue;
     mBackdrop->setVisible(mOpen && mStyle.modal);
+    mSurface->setVisible(mOpen);
     if (mPopup != nullptr) mPopup->setVisible(mOpen);
     markLayoutDirty();
 }
@@ -84,6 +115,51 @@ void PopupLayer::setBackdropColor(Color color) noexcept {
 Color PopupLayer::backdropColor() const noexcept { return mStyle.backdrop; }
 void PopupLayer::setOnDismissed(Callback<> callback) noexcept { mOnDismissed = callback; }
 
+Widget* PopupLayer::hitTest(Vec2 point) noexcept {
+    if (!visible() || !enabled() || !contains(point)) {
+        return nullptr;
+    }
+    if (allowsChildInteraction()) {
+        for (auto iterator = mChildren.rbegin(); iterator != mChildren.rend(); ++iterator) {
+            if (!allowsInteractionForChild(**iterator)) {
+                continue;
+            }
+            if (Widget* hit = (*iterator)->hitTest(point)) {
+                return hit;
+            }
+        }
+    }
+    return blocksUnhandledPointerInput(point) ? this : nullptr;
+}
+
+bool PopupLayer::acceptsPointerInput() const noexcept { return mOpen; }
+
+bool PopupLayer::allowsInteractionForChild(const Widget& child) const noexcept {
+    if (!mOpen || !mStyle.modal) {
+        return true;
+    }
+    return &child == mBackdrop || &child == mSurface || &child == mPopup;
+}
+
+bool PopupLayer::blocksUnhandledPointerInput(Vec2 point) const noexcept {
+    return mOpen && (mStyle.modal || popupContains(point));
+}
+
+bool PopupLayer::handleInput(const InputEvent& event) {
+    if (!blocksUnhandledPointerInput(event.position)) {
+        return false;
+    }
+    switch (event.kind) {
+        case InputEventKind::PointerDown:
+        case InputEventKind::PointerUp:
+        case InputEventKind::PointerMove:
+        case InputEventKind::PointerScroll:
+            return true;
+        default:
+            return false;
+    }
+}
+
 Vec2 PopupLayer::onMeasure(TextPainter&, Constraints constraints) { return constraints.maximum; }
 
 void PopupLayer::onArrange(TextPainter& text, Rect arrangedFrame) {
@@ -97,17 +173,37 @@ void PopupLayer::onArrange(TextPainter& text, Rect arrangedFrame) {
         static_cast<void>(mBackdrop->measure(text, {size, size}));
         mBackdrop->arrange(text, arrangedFrame);
     }
-    if (mPopup != nullptr && mPopup->visible()) {
+    Rect popupFrame{};
+    bool hasPopupFrame = false;
+    if (mOpen) {
         const float width = std::clamp(mPopupBounds.width(), 0.0F, std::max(arrangedFrame.width(), 0.0F));
         const float height = std::clamp(mPopupBounds.height(), 0.0F, std::max(arrangedFrame.height(), 0.0F));
         const float x = std::clamp(arrangedFrame.min.x + mPopupBounds.min.x,
             arrangedFrame.min.x, arrangedFrame.max.x - width);
         const float y = std::clamp(arrangedFrame.min.y + mPopupBounds.min.y,
             arrangedFrame.min.y, arrangedFrame.max.y - height);
-        const Vec2 size{width, height};
-        static_cast<void>(mPopup->measure(text, {size, size}));
-        mPopup->arrange(text, {{x, y}, {x + width, y + height}});
+        popupFrame = {{x, y}, {x + width, y + height}};
+        hasPopupFrame = true;
     }
+    if (mSurface != nullptr && mSurface->visible() && hasPopupFrame) {
+        const Vec2 size{popupFrame.width(), popupFrame.height()};
+        static_cast<void>(mSurface->measure(text, {size, size}));
+        mSurface->arrange(text, popupFrame);
+    }
+    if (mPopup != nullptr && mPopup->visible()) {
+        const Vec2 size{popupFrame.width(), popupFrame.height()};
+        static_cast<void>(mPopup->measure(text, {size, size}));
+        mPopup->arrange(text, popupFrame);
+    }
+}
+
+bool PopupLayer::popupContains(Vec2 point) const noexcept {
+    if (!mOpen || mSurface == nullptr || !mSurface->visible()) {
+        return false;
+    }
+    const Rect bounds = mSurface->frame();
+    return point.x >= bounds.min.x && point.y >= bounds.min.y
+        && point.x < bounds.max.x && point.y < bounds.max.y;
 }
 
 void PopupLayer::backdropActivated() {
