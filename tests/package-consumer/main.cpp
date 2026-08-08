@@ -8,6 +8,7 @@
 #include <henia/ui/text/TextEditor.h>
 #include <henia/ui/Validation.h>
 #include <henia/ui/widget/controls/TextInput.h>
+#include <henia/ui/widget/controls/ColorPanel.h>
 #include <henia/ui/widget/controls/ColorPicker.h>
 #include <henia/ui/widget/controls/ComboBox.h>
 #include <henia/ui/widget/controls/KeyBindingEditor.h>
@@ -108,6 +109,8 @@ int main() {
     recycledList.setSelectedItemKey(42'100);
     henia::ui::TreeView tree({{"Root"}});
     henia::ui::ColorPicker picker;
+    henia::ui::ColorPanel colorPanel;
+    const bool colorPanelHex = colorPanel.setHexValue("#12345678");
     henia::ui::KeyBindingEditor binding(henia::ui::KeyCode::F1);
     henia::ui::Tooltip tooltip("Tip");
     henia::ui::ScrollContainer scroll;
@@ -150,6 +153,8 @@ int main() {
         && recycledList.itemCount() == 50'000
         && recycledList.selectedItemKey() == 42'100
         && tree.nodeCount() == 1 && picker.color().alpha == 1.0F
+        && colorPanelHex
+        && colorPanel.srgba8() == henia::ui::Srgba8{0x12, 0x34, 0x56, 0x78}
         && binding.binding() == henia::ui::KeyCode::F1 && tooltip.text() == "Tip"
         && scroll.content() == nullptr && popup.popup() == nullptr
         && henia::gfx::tryPerspective(1.0F, 1.0F, 0.1F, 100.0F, projection)

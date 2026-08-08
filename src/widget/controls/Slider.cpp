@@ -120,6 +120,11 @@ void Slider::onPaint(Canvas& canvas, TextPainter&, const Theme&) {
 double Slider::normalized(double value) const noexcept {
     if (!std::isfinite(value)) value = mMinimum;
     value = std::clamp(value, mMinimum, mMaximum);
+    // Range endpoints are part of the public contract even when the step does
+    // not divide the range. Quantizing first would turn a maximum of 0 into a
+    // neighbouring interior step for ranges such as [-1, 0] with step 0.3.
+    if (value <= mMinimum) return mMinimum;
+    if (value >= mMaximum) return mMaximum;
     if (mStep > 0.0) {
         value = mMinimum + std::round((value - mMinimum) / mStep) * mStep;
         value = std::clamp(value, mMinimum, mMaximum);

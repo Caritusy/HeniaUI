@@ -296,8 +296,8 @@ dirty paint or publish a replacement packet.
 ### Production overlay controls and virtualization
 
 The production control set covers checkbox/toggle, slider, combo box, tab bar,
-scroll container, virtual list, tooltip, modal popup layer, color picker, key
-binding editor, and tree view. Controls own their strings or node/item arrays
+scroll container, virtual list, tooltip, modal popup layer, color picker, color
+panel, key binding editor, and tree view. Controls own their strings or node/item arrays
 explicitly. Large lists may instead use `ValueCallback<std::string_view,
 std::size_t>` as a non-owning, allocation-free label provider; the provider and
 its returned view must outlive the synchronous paint call. Event callbacks use
@@ -336,11 +336,21 @@ different logical item. Factories and binders may throw to the host; callback
 contexts and any borrowed data must outlive the list. A null factory result is
 an explicit composition error rather than a partially realized list.
 
-`PopupLayer` owns normal content, a modal backdrop, and popup content in that
-paint order. Popup bounds are local to and clamped within the layer viewport.
-Backdrop dismissal is handled by the layer without host hit testing. Tooltip
-visibility is explicit so hosts choose hover delay and scheduling policy rather
-than inheriting a hidden UI timer.
+`PopupLayer` owns normal content, a modal backdrop, a passive input surface, and
+popup content in that paint order. Popup bounds are local to and clamped within
+the layer viewport. The surface consumes blank-area input, while an ancestor
+input barrier consumes pointer messages declined by popup descendants. Modal
+background branches are excluded from pointer, keyboard, and Tab traversal.
+Backdrop dismissal remains explicit policy and is handled by the layer without
+host hit testing.
+
+`ColorPicker` edits saturation/value, hue, and alpha. `ColorPanel` composes it
+with synchronized standard-sRGB `#RRGGBB`/`#RRGGBBAA` and RGB+A byte editors.
+The panel publishes live color changes but exposes confirmation separately so a
+popup owner can use `dismissOnBackdrop = false` and close only from the confirm
+callback. Invalid HEX remains visible for correction and cannot confirm.
+Tooltip visibility is explicit so hosts choose hover delay and scheduling
+policy rather than inheriting a hidden UI timer.
 
 ### Win32 input and message ownership
 

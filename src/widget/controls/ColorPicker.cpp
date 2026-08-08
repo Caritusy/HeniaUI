@@ -62,7 +62,7 @@ bool ColorPicker::handleInput(const InputEvent& event) {
     if (!enabled()) return false;
     if (event.kind == InputEventKind::PointerDown
         && event.button == PointerButton::Primary) {
-        return updateFromPointer(event.position, true);
+        return updateFromPointer(event.position, true) || contains(event.position);
     }
     if (event.kind == InputEventKind::PointerMove && pressed()) {
         return updateFromPointer(event.position, false);
@@ -71,7 +71,7 @@ bool ColorPicker::handleInput(const InputEvent& event) {
         && event.button == PointerButton::Primary) {
         const bool handled = updateFromPointer(event.position, false);
         mDrag = Drag::None;
-        return handled;
+        return handled || contains(event.position);
     }
     if (event.kind != InputEventKind::KeyDown || !focused()) return false;
     const float fine = event.shift ? 0.005F : 0.02F;
@@ -82,6 +82,8 @@ bool ColorPicker::handleInput(const InputEvent& event) {
         case KeyCode::Up: mValue = std::min(mValue + fine, 1.0F); break;
         case KeyCode::Home: mSaturation = 0.0F; break;
         case KeyCode::End: mSaturation = 1.0F; break;
+        case KeyCode::PageDown: mAlpha = std::max(mAlpha - fine, 0.0F); break;
+        case KeyCode::PageUp: mAlpha = std::min(mAlpha + fine, 1.0F); break;
         default: return false;
     }
     publish();
@@ -110,6 +112,29 @@ void ColorPicker::onPaint(Canvas& canvas, TextPainter&, const Theme&) {
             colors[index], colors[index + 1U], {1.0F, 0.0F}, 0.0F);
     }
     canvas.strokeRect(hue, mStyle.border, mStyle.radius, 1.0F);
+    const Rect alpha = alphaRect();
+    canvas.fillRect(alpha, mStyle.alphaDark, mStyle.radius);
+    const float checker = std::max(alpha.height() * 0.5F, 1.0F);
+    const std::size_t columns = checker <= 0.0F ? 0U : static_cast<std::size_t>(
+        std::ceil(std::max(alpha.width(), 0.0F) / checker));
+    for (std::size_t row = 0; row < 2U; ++row) {
+        for (std::size_t column = row % 2U; column < columns; column += 2U) {
+            const float x = alpha.min.x + checker * static_cast<float>(column);
+            const float y = alpha.min.y + checker * static_cast<float>(row);
+            canvas.fillRect(
+                {{x, y}, {std::min(x + checker, alpha.max.x), std::min(y + checker, alpha.max.y)}},
+                mStyle.alphaLight,
+                0.0F);
+        }
+    }
+    const Color current = hsv(mHue, mSaturation, mValue);
+    canvas.gradientRect(
+        alpha,
+        {current.red, current.green, current.blue, 0.0F},
+        {current.red, current.green, current.blue, 1.0F},
+        {1.0F, 0.0F},
+        mStyle.radius);
+    canvas.strokeRect(alpha, mStyle.border, mStyle.radius, 1.0F);
     const Vec2 svMarker{square.min.x + square.width() * mSaturation,
                         square.min.y + square.height() * (1.0F - mValue)};
     canvas.circle(svMarker, 5.0F, mStyle.border);
@@ -117,25 +142,44 @@ void ColorPicker::onPaint(Canvas& canvas, TextPainter&, const Theme&) {
     const float hueX = hue.min.x + hue.width() * mHue;
     canvas.strokeRect({{hueX - 2.0F, hue.min.y - 2.0F}, {hueX + 2.0F, hue.max.y + 2.0F}},
         mStyle.marker, 1.0F, 1.0F);
+    const float alphaX = alpha.min.x + alpha.width() * mAlpha;
+    canvas.strokeRect(
+        {{alphaX - 2.0F, alpha.min.y - 2.0F}, {alphaX + 2.0F, alpha.max.y + 2.0F}},
+        mStyle.marker,
+        1.0F,
+        1.0F);
 }
 
 Rect ColorPicker::saturationRect() const noexcept {
+    const Rect hue = hueRect();
     return {{frame().min.x, frame().min.y},
-            {frame().max.x, std::max(frame().min.y, frame().max.y - mStyle.hueHeight - mStyle.gap)}};
+            {frame().max.x, std::max(frame().min.y, hue.min.y - mStyle.gap)}};
 }
 Rect ColorPicker::hueRect() const noexcept {
-    return {{frame().min.x, std::max(frame().min.y, frame().max.y - mStyle.hueHeight)}, frame().max};
+    const Rect alpha = alphaRect();
+    const float maximumY = std::max(frame().min.y, alpha.min.y - mStyle.gap);
+    return {{frame().min.x, std::max(frame().min.y, maximumY - mStyle.hueHeight)},
+            {frame().max.x, maximumY}};
+}
+Rect ColorPicker::alphaRect() const noexcept {
+    return {{frame().min.x, std::max(frame().min.y, frame().max.y - mStyle.alphaHeight)},
+            frame().max};
 }
 
 bool ColorPicker::updateFromPointer(Vec2 position, bool chooseRegion) {
     if (chooseRegion) {
-        if (inside(hueRect(), position)) mDrag = Drag::Hue;
+        if (inside(alphaRect(), position)) mDrag = Drag::Alpha;
+        else if (inside(hueRect(), position)) mDrag = Drag::Hue;
         else if (inside(saturationRect(), position)) mDrag = Drag::SaturationValue;
         else return false;
     }
     if (mDrag == Drag::Hue) {
         const Rect rect = hueRect();
         mHue = rect.width() <= 0.0F ? 0.0F
+            : std::clamp((position.x - rect.min.x) / rect.width(), 0.0F, 1.0F);
+    } else if (mDrag == Drag::Alpha) {
+        const Rect rect = alphaRect();
+        mAlpha = rect.width() <= 0.0F ? 0.0F
             : std::clamp((position.x - rect.min.x) / rect.width(), 0.0F, 1.0F);
     } else if (mDrag == Drag::SaturationValue) {
         const Rect rect = saturationRect();

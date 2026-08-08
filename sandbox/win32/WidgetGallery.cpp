@@ -9,6 +9,7 @@
 #include "henia/ui/text/TextLayout.h"
 #include "henia/ui/widget/UiDocument.h"
 #include "henia/ui/widget/controls/Button.h"
+#include "henia/ui/widget/controls/ColorPanel.h"
 #include "henia/ui/widget/controls/ColorPicker.h"
 #include "henia/ui/widget/controls/ComboBox.h"
 #include "henia/ui/widget/controls/KeyBindingEditor.h"
@@ -379,6 +380,10 @@ struct GalleryState final {
         color = value;
         setStatus(numberStatus("Color red channel", value.red));
     }
+    void colorConfirmed(Color value) {
+        color = value;
+        setStatus("RGBA color confirmed");
+    }
     void bindingChanged(KeyCode value) {
         binding = value;
         setStatus("Key binding changed to " + std::string(keyCodeName(value)));
@@ -676,11 +681,23 @@ struct GalleryState final {
             GalleryState, &GalleryState::treeExpansionChanged>(state));
 
     Panel& colorCard = addCard(
-        third, font, "Color and key input", "ColorPicker plus KeyBindingEditor capture mode");
-    ColorPicker& color = colorCard.emplaceChild<ColorPicker>(
-        state.color, ColorPickerStyle{.width = 260.0F, .height = 152.0F});
+        third, font, "Color and key input", "RGBA ColorPanel plus key capture mode");
+    ColorPanel& color = colorCard.emplaceChild<ColorPanel>(
+        state.color,
+        ColorPanelInputMode::Hex,
+        ColorPanelStyle{
+            .picker = ColorPickerStyle{.width = 236.0F, .height = 152.0F},
+            .modes = TabBarStyle{.font = font, .width = 236.0F, .height = 32.0F},
+            .hexInput = TextInputStyle{.font = font, .controlWidth = 236.0F, .controlHeight = 36.0F},
+            .channelInput = NumericInputStyle{.font = font},
+            .confirmButton = ButtonStyle{.font = font},
+            .width = 260.0F,
+        });
     color.setOnColorChanged(
         Callback<Color>::bind<GalleryState, &GalleryState::colorChanged>(state));
+    color.setOnConfirmed(
+        Callback<Color>::bind<GalleryState, &GalleryState::colorConfirmed>(state));
+    color.setClipboard(&clipboard);
     KeyBindingEditor& binding = colorCard.emplaceChild<KeyBindingEditor>(
         state.binding, KeyBindingEditorStyle{.font = font, .width = 260.0F});
     binding.setOnBindingChanged(

@@ -98,6 +98,7 @@ add_library(HeniaUI STATIC
     src/widget/UiDocument.cpp
     src/widget/Widget.cpp
     src/widget/controls/Button.cpp
+    src/widget/controls/ColorPanel.cpp
     src/widget/controls/ColorPicker.cpp
     src/widget/controls/ComboBox.cpp
     src/widget/controls/KeyBindingEditor.cpp

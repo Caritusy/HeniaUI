@@ -59,6 +59,7 @@ enum class WidgetKind : std::uint8_t {
     ColorPicker,
     KeyBindingEditor,
     TreeView,
+    ColorPanel,
 };
 
 class Widget {
@@ -120,6 +121,15 @@ public:
     // focus traversal, and stale-interaction validation then stop at the
     // container while the children continue to participate in layout/paint.
     [[nodiscard]] virtual bool allowsChildInteraction() const noexcept;
+    // Containers with selectively interactive child branches can refine the
+    // broad allowsChildInteraction() policy without hiding those branches.
+    [[nodiscard]] virtual bool allowsInteractionForChild(
+        const Widget& child) const noexcept;
+    // An input barrier consumes otherwise-unhandled pointer messages in its
+    // active region. Popup surfaces use this to prevent host click-through
+    // when a passive or button-specific descendant declines an event.
+    [[nodiscard]] virtual bool blocksUnhandledPointerInput(
+        Vec2 point) const noexcept;
     // Focused editors that deliberately bind Tab may opt out of document-level
     // focus traversal for that key while their capture mode is active.
     [[nodiscard]] virtual bool wantsTabKey() const noexcept;
