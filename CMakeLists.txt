@@ -5,6 +5,17 @@ project(HeniaUI VERSION 0.1.0 LANGUAGES CXX)
 if(MSVC)
     # Manual-map consumers require both explicit and compiler-generated TLS to be absent.
     add_compile_options(/Zc:threadSafeInit-)
+    find_program(HENIAUI_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
+    add_custom_target(
+        HeniaUIZeroTlsSource ALL
+        COMMAND "${HENIAUI_POWERSHELL_EXECUTABLE}"
+            -NoProfile
+            -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/Test-ZeroTls.ps1"
+            -RepositoryRoot "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "Verifying that HeniaUI sources contain no explicit TLS"
+        VERBATIM
+    )
 endif()
 
 include(GNUInstallDirs)
@@ -425,6 +436,20 @@ if(HENIAUI_BUILD_BENCHMARKS AND NOT HENIAUI_ENABLE_ADDRESS_SANITIZER)
         )
     endif()
     set_target_properties(HeniaUIBenchmarks PROPERTIES FOLDER "HeniaUI/Benchmarks")
+    if(MSVC)
+        add_custom_command(
+            TARGET HeniaUIBenchmarks
+            POST_BUILD
+            COMMAND "${HENIAUI_POWERSHELL_EXECUTABLE}"
+                -NoProfile
+                -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/Test-ZeroTls.ps1"
+                -RepositoryRoot "${CMAKE_CURRENT_SOURCE_DIR}"
+                -ImagePath "$<TARGET_FILE:HeniaUIBenchmarks>"
+            COMMENT "Verifying that HeniaUIBenchmarks contains no PE static TLS"
+            VERBATIM
+        )
+    endif()
 
     if(WIN32)
         add_executable(
