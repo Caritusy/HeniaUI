@@ -562,6 +562,18 @@ int main() {
         || filledCenter.blue < 160U) {
         fail("D3D12 filled box did not shade its projected faces");
     }
+    filledVisual.setFaceMask(BoxInstance::kNegativeZFace);
+    const std::vector<henia::test::Rgba8> oneFacePixels = renderGfxFrame(
+        henia::test::gfxClipBatch(filledVisual),
+        henia::test::gfxAaView());
+    filledVisual.setFaceMask(0U);
+    const std::vector<henia::test::Rgba8> noFacePixels = renderGfxFrame(
+        henia::test::gfxClipBatch(filledVisual),
+        henia::test::gfxAaView());
+    if (henia::test::visibleGfxPixelCount(oneFacePixels) == 0U
+        || henia::test::visibleGfxPixelCount(noFacePixels) != 0U) {
+        fail("D3D12 box face mask did not suppress hidden procedural geometry");
+    }
     const D3D12GfxStatistics automaticStatistics = clipRenderer.statistics();
     if (automaticStatistics.instanceCopyOperations != 0
         || automaticStatistics.copiedInstanceBytes != 0

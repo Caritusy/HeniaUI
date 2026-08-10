@@ -35,6 +35,11 @@ static const int2 edges[12] = {
     int2(4, 5), int2(6, 7), int2(4, 6), int2(5, 7),
     int2(0, 4), int2(1, 5), int2(2, 6), int2(3, 7)
 };
+static const uint edgeFaces[12] = {
+    17u, 33u, 5u, 9u,
+    18u, 34u, 6u, 10u,
+    20u, 24u, 36u, 40u
+};
 static const float2 quad[4] = {
     float2(0.0, -1.0), float2(1.0, -1.0),
     float2(1.0, 1.0), float2(0.0, 1.0)
@@ -140,6 +145,9 @@ PixelInput vertexMain(VertexInput input) {
     output.effects = input.effects;
     output.validEdge = 0.0;
     output.primitiveKind = input.vertexId >= 48u ? 1u : 0u;
+    uint faceMask = (input.effects & 64u) != 0u
+        ? (input.effects >> 16u) & 63u
+        : 63u;
 
     if (output.primitiveKind != 0u) {
         uint faceVertex = input.vertexId - 48u;
@@ -149,6 +157,7 @@ PixelInput vertexMain(VertexInput input) {
         float3 position = lerp(minimumValue, maximumValue, corner(cornerCode));
         float4 clipPosition = mul(viewProjection, float4(position, 1.0));
         output.validEdge = (input.effects & 16u) != 0u
+            && (faceMask & (1u << face)) != 0u
             && all(isfinite(clipPosition)) ? 1.0 : 0.0;
         if (output.validEdge < 0.5) {
             output.position = float4(2.0, 2.0, 2.0, 1.0);
@@ -168,6 +177,7 @@ PixelInput vertexMain(VertexInput input) {
     float4 startClip = mul(viewProjection, float4(start, 1.0));
     float4 finishClip = mul(viewProjection, float4(finish, 1.0));
     output.validEdge = (input.effects & 32u) == 0u
+        && (faceMask & edgeFaces[edgeIndex]) != 0u
         && clipSegment(startClip, finishClip, zeroToOne) != 0u ? 1.0 : 0.0;
 
     float fringe = 1.25;

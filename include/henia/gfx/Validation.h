@@ -70,9 +70,16 @@ namespace henia::gfx {
         | static_cast<std::uint32_t>(BoxEffect::ExplicitVisibilityMask)
         | static_cast<std::uint32_t>(BoxEffect::Filled)
         | static_cast<std::uint32_t>(BoxEffect::OutlineDisabled)
-        | BoxInstance::kFillOpacityMask;
+        | static_cast<std::uint32_t>(BoxEffect::ExplicitFaceMask)
+        | BoxInstance::kFillOpacityMask
+        | BoxInstance::kFaceMaskMask;
     if ((static_cast<std::uint32_t>(box.effects) & ~validEffects) != 0) return "box.effects";
     if (box.fillEnabled() != (box.fillOpacity() > 0.0F)) return "box.fillOpacity";
+    if ((static_cast<std::uint32_t>(box.effects) & BoxInstance::kFaceMaskMask) != 0U
+        && (static_cast<std::uint32_t>(box.effects)
+            & static_cast<std::uint32_t>(BoxEffect::ExplicitFaceMask)) == 0U) {
+        return "box.effects";
+    }
     if ((static_cast<std::uint32_t>(box.effects)
             & static_cast<std::uint32_t>(BoxEffect::PackedMotionTranslation)) != 0U
         && (static_cast<std::uint32_t>(box.effects)

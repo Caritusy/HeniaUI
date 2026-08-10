@@ -282,6 +282,10 @@ const ivec2 edges[12] = ivec2[12](
     ivec2(0, 1), ivec2(2, 3), ivec2(0, 2), ivec2(1, 3),
     ivec2(4, 5), ivec2(6, 7), ivec2(4, 6), ivec2(5, 7),
     ivec2(0, 4), ivec2(1, 5), ivec2(2, 6), ivec2(3, 7));
+const uint edgeFaces[12] = uint[12](
+    17u, 33u, 5u, 9u,
+    18u, 34u, 6u, 10u,
+    20u, 24u, 36u, 40u);
 const vec2 quad[4] = vec2[4](
     vec2(0.0, -1.0), vec2(1.0, -1.0),
     vec2(1.0, 1.0), vec2(0.0, 1.0));
@@ -392,6 +396,9 @@ void main() {
     halfWidth = max(instanceMinimumAndWidth.w, 0.5) * 0.5;
     validEdge = 0.0;
     bool zeroToOne = zeroToOneDepth != 0;
+    uint faceMask = (instanceEffects & 64u) != 0u
+        ? (instanceEffects >> 16u) & 63u
+        : 63u;
 
     if (primitiveKind != 0u) {
         int faceVertex = gl_VertexID - 48;
@@ -400,7 +407,9 @@ void main() {
         int cornerCode = faces[face][localVertex];
         vec3 position = mix(minimumValue, maximumValue, corner(cornerCode));
         vec4 clipPosition = viewProjection * vec4(position, 1.0);
-        validEdge = (instanceEffects & 16u) != 0u && finiteClip(clipPosition)
+        validEdge = (instanceEffects & 16u) != 0u
+            && (faceMask & (1u << uint(face))) != 0u
+            && finiteClip(clipPosition)
             ? 1.0 : 0.0;
         if (validEdge < 0.5) {
             gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -420,6 +429,7 @@ void main() {
     vec4 startClip = viewProjection * vec4(start, 1.0);
     vec4 finishClip = viewProjection * vec4(finish, 1.0);
     validEdge = (instanceEffects & 32u) == 0u
+        && (faceMask & edgeFaces[edgeIndex]) != 0u
         && clipSegment(startClip, finishClip, zeroToOne) ? 1.0 : 0.0;
 
     float fringe = 1.25;

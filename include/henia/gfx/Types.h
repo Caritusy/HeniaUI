@@ -82,6 +82,7 @@ enum class BoxEffect : std::uint32_t {
     ExplicitVisibilityMask = 1U << 3U,
     Filled = 1U << 4U,
     OutlineDisabled = 1U << 5U,
+    ExplicitFaceMask = 1U << 6U,
 };
 
 [[nodiscard]] constexpr BoxEffect operator|(BoxEffect left, BoxEffect right) noexcept {
@@ -95,6 +96,15 @@ struct BoxInstance final {
         (std::uint32_t{1} << kPackedComponentBits) - 1U;
     static constexpr std::uint32_t kFillOpacityShift = 8U;
     static constexpr std::uint32_t kFillOpacityMask = 0xFFU << kFillOpacityShift;
+    static constexpr std::uint32_t kFaceMaskShift = 16U;
+    static constexpr std::uint32_t kAllFaceMask = 0x3FU;
+    static constexpr std::uint32_t kFaceMaskMask = kAllFaceMask << kFaceMaskShift;
+    static constexpr std::uint32_t kNegativeZFace = 1U << 0U;
+    static constexpr std::uint32_t kPositiveZFace = 1U << 1U;
+    static constexpr std::uint32_t kNegativeXFace = 1U << 2U;
+    static constexpr std::uint32_t kPositiveXFace = 1U << 3U;
+    static constexpr std::uint32_t kNegativeYFace = 1U << 4U;
+    static constexpr std::uint32_t kPositiveYFace = 1U << 5U;
 
     Vec3 minimum{};
     float lineWidth = 1.5F;
@@ -133,6 +143,24 @@ struct BoxInstance final {
     [[nodiscard]] constexpr std::uint32_t visibilityMask() const noexcept {
         return hasEffect(BoxEffect::ExplicitVisibilityMask)
             ? reserved[0] : ~std::uint32_t{0};
+    }
+    // Faces follow the procedural backend order: -Z, +Z, -X, +X, -Y, +Y.
+    // An edge remains visible while either of its adjacent faces is visible.
+    // Legacy instances without an explicit mask retain all six faces.
+    constexpr void setFaceMask(std::uint32_t mask) noexcept {
+        std::uint32_t raw = static_cast<std::uint32_t>(effects) & ~kFaceMaskMask;
+        raw |= (mask & kAllFaceMask) << kFaceMaskShift;
+        raw |= static_cast<std::uint32_t>(BoxEffect::ExplicitFaceMask);
+        effects = static_cast<BoxEffect>(raw);
+    }
+    constexpr void clearFaceMask() noexcept {
+        effects = static_cast<BoxEffect>(static_cast<std::uint32_t>(effects)
+            & ~(kFaceMaskMask | static_cast<std::uint32_t>(BoxEffect::ExplicitFaceMask)));
+    }
+    [[nodiscard]] constexpr std::uint32_t faceMask() const noexcept {
+        return hasEffect(BoxEffect::ExplicitFaceMask)
+            ? (static_cast<std::uint32_t>(effects) & kFaceMaskMask) >> kFaceMaskShift
+            : kAllFaceMask;
     }
     constexpr void setMotionDelta(Vec3 value) noexcept {
         storePackedMotion(value);

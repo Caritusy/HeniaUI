@@ -95,6 +95,31 @@ int main() {
         || !filledBox.outlineEnabled() || !validate(filledBox).empty()) {
         fail("BoxInstance fill state did not clear without changing outline state");
     }
+    BoxInstance maskedBox;
+    if (maskedBox.faceMask() != BoxInstance::kAllFaceMask) {
+        fail("Legacy BoxInstance did not retain all six faces");
+    }
+    maskedBox.setFaceMask(
+        BoxInstance::kNegativeXFace | BoxInstance::kPositiveYFace);
+    if (maskedBox.faceMask()
+            != (BoxInstance::kNegativeXFace | BoxInstance::kPositiveYFace)
+        || !validate(maskedBox).empty()) {
+        fail("BoxInstance face mask was not encoded in the stable layout");
+    }
+    maskedBox.setFaceMask(0U);
+    if (maskedBox.faceMask() != 0U || !validate(maskedBox).empty()) {
+        fail("Explicit empty BoxInstance face mask was not retained");
+    }
+    maskedBox.clearFaceMask();
+    if (maskedBox.faceMask() != BoxInstance::kAllFaceMask
+        || !validate(maskedBox).empty()) {
+        fail("Clearing a BoxInstance face mask did not restore compatibility faces");
+    }
+    maskedBox.effects = static_cast<BoxEffect>(BoxInstance::kNegativeZFace
+        << BoxInstance::kFaceMaskShift);
+    if (validate(maskedBox) != "box.effects") {
+        fail("Face-mask payload without the explicit flag was not rejected");
+    }
 
     ShapeBatch3D shapes;
     shapes.reserve(1024);

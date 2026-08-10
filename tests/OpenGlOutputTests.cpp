@@ -1466,6 +1466,25 @@ int main() {
         || motionSecondStatistics.viewUpdates != motionFirstStatistics.viewUpdates + 1U) {
         fail("OpenGL motion scale did not move immutable instances without re-uploading them");
     }
+    BoxInstance faceMaskedBox{
+        .minimum = {-0.4F, -0.4F, 1.0F},
+        .maximum = {0.4F, 0.4F, 1.4F},
+        .color = {0.9F, 0.1F, 0.8F, 1.0F},
+    };
+    faceMaskedBox.setFillOpacity(1.0F);
+    faceMaskedBox.setOutlineEnabled(false);
+    faceMaskedBox.setFaceMask(BoxInstance::kNegativeZFace);
+    const std::vector<henia::test::Rgba8> oneFacePixels = renderGfxFrame(
+        henia::test::gfxClipBatch(faceMaskedBox),
+        henia::test::gfxAaView());
+    faceMaskedBox.setFaceMask(0U);
+    const std::vector<henia::test::Rgba8> noFacePixels = renderGfxFrame(
+        henia::test::gfxClipBatch(faceMaskedBox),
+        henia::test::gfxAaView());
+    if (henia::test::visibleGfxPixelCount(oneFacePixels) == 0U
+        || henia::test::visibleGfxPixelCount(noFacePixels) != 0U) {
+        fail("OpenGL box face mask did not suppress hidden procedural geometry");
+    }
     constexpr std::array depthRanges{
         ClipDepthRange::ZeroToOne,
         ClipDepthRange::MinusOneToOne,

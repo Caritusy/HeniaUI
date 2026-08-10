@@ -462,6 +462,13 @@ source-over draw lays the translucent fill down before its outline. Consequently
 - hue cycling is driven by a frame constant and per-instance offset;
 - camera and time changes do not upload the instance buffer.
 
+`BoxInstance` also carries an optional six-bit face mask in the same stable
+effects word. Its order is -Z, +Z, -X, +X, -Y, +Y. A masked face emits no fill
+fragments, and an outline edge is emitted only while at least one adjacent face
+is enabled. Omitting the explicit-mask flag preserves all six faces for existing
+producers; an explicit zero mask suppresses the whole procedural box without
+changing its immutable instance layout.
+
 An optional `VisibilityList` derives a compact stream without mutating that
 source contract. It caches one conservative base AABB/mask union plus minimum
 and maximum motion delta per immutable page, rebuilds and validates only changed
