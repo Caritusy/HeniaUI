@@ -2309,16 +2309,27 @@ GlState OpenGlRenderer::Implementation::captureState() const noexcept {
 }
 
 bool OpenGlRenderer::Implementation::restoreState(const GlState& state) noexcept {
+    GLenum firstError = GL_NO_ERROR;
+    const char* failureCategory = nullptr;
+    const auto captureRestoreError = [&](const char* category) noexcept {
+        const GLenum current = consumeOperationErrors();
+        if (firstError == GL_NO_ERROR && current != GL_NO_ERROR) {
+            firstError = current;
+            failureCategory = category;
+        }
+    };
     for (std::uint32_t slot = 0; slot < DrawBatch::kTextureCapacity; ++slot) {
         gl.activeTexture(kTexture0 + slot);
         glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(state.textures[slot]));
         gl.bindSampler(slot, static_cast<GLuint>(state.samplers[slot]));
     }
     gl.activeTexture(static_cast<GLenum>(state.activeTexture));
+    captureRestoreError("OpenGL UI texture/sampler state restoration failed");
     gl.bindBuffer(kArrayBuffer, static_cast<GLuint>(state.arrayBuffer));
     gl.bindVertexArray(static_cast<GLuint>(state.vertexArray));
     const GLuint savedProgram = static_cast<GLuint>(state.program);
     gl.useProgram(savedProgram == 0 || gl.isProgram(savedProgram) == GL_TRUE ? savedProgram : 0);
+    captureRestoreError("OpenGL UI object binding restoration failed");
     gl.blendFuncSeparate(
         static_cast<GLenum>(state.sourceRgb),
         static_cast<GLenum>(state.destinationRgb),
@@ -2327,6 +2338,7 @@ bool OpenGlRenderer::Implementation::restoreState(const GlState& state) noexcept
     gl.blendEquationSeparate(
         static_cast<GLenum>(state.equationRgb),
         static_cast<GLenum>(state.equationAlpha));
+    captureRestoreError("OpenGL UI blend state restoration failed");
     if (state.polygonMode[0] == state.polygonMode[1]) {
         glPolygonMode(GL_FRONT_AND_BACK, static_cast<GLenum>(state.polygonMode[0]));
     } else {
@@ -2335,6 +2347,7 @@ bool OpenGlRenderer::Implementation::restoreState(const GlState& state) noexcept
     }
     gl.colorMaskIndexed(
         0, state.colorMask[0], state.colorMask[1], state.colorMask[2], state.colorMask[3]);
+    captureRestoreError("OpenGL UI raster state restoration failed");
     (state.blend == GL_TRUE ? glEnable : glDisable)(GL_BLEND);
     (state.scissorTest == GL_TRUE ? glEnable : glDisable)(GL_SCISSOR_TEST);
     (state.depthTest == GL_TRUE ? glEnable : glDisable)(GL_DEPTH_TEST);
@@ -2348,11 +2361,18 @@ bool OpenGlRenderer::Implementation::restoreState(const GlState& state) noexcept
     (state.sampleAlphaToCoverage == GL_TRUE ? glEnable : glDisable)(kSampleAlphaToCoverage);
     (state.sampleAlphaToOne == GL_TRUE ? glEnable : glDisable)(kSampleAlphaToOne);
     (state.sampleCoverage == GL_TRUE ? glEnable : glDisable)(kSampleCoverage);
+    captureRestoreError("OpenGL UI capability restoration failed");
     glViewport(state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3]);
     glScissor(state.scissor[0], state.scissor[1], state.scissor[2], state.scissor[3]);
-    if (consumeOperationErrors() != GL_NO_ERROR) {
+    captureRestoreError("OpenGL UI viewport/scissor restoration failed");
+    if (firstError != GL_NO_ERROR) {
         ++statistics.stateRestoreFailures;
-        error = "OpenGL UI state restoration failed";
+        assignGlFailure(
+            error,
+            failureCategory,
+            firstError,
+            "context",
+            reinterpret_cast<std::uintptr_t>(ownerContext));
         return false;
     }
     return true;

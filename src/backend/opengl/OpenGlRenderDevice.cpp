@@ -1277,16 +1277,27 @@ GlState OpenGlRenderDevice::Implementation::captureState() const noexcept {
 }
 
 bool OpenGlRenderDevice::Implementation::restoreState(const GlState& state) noexcept {
+    GLenum firstError = GL_NO_ERROR;
+    const char* failureCategory = nullptr;
+    const auto captureRestoreError = [&](const char* category) noexcept {
+        const GLenum current = consumeOperationErrors();
+        if (firstError == GL_NO_ERROR && current != GL_NO_ERROR) {
+            firstError = current;
+            failureCategory = category;
+        }
+    };
     const GLuint savedProgram = static_cast<GLuint>(state.program);
     gl.useProgram(savedProgram == 0 || gl.isProgram(savedProgram) == GL_TRUE ? savedProgram : 0);
     gl.bindVertexArray(static_cast<GLuint>(state.vertexArray));
     gl.bindBuffer(kArrayBuffer, static_cast<GLuint>(state.arrayBuffer));
+    captureRestoreError("OpenGL gfx object binding restoration failed");
     gl.blendFuncSeparate(
         static_cast<GLenum>(state.sourceRgb), static_cast<GLenum>(state.destinationRgb),
         static_cast<GLenum>(state.sourceAlpha), static_cast<GLenum>(state.destinationAlpha));
     gl.blendEquationSeparate(
         static_cast<GLenum>(state.equationRgb),
         static_cast<GLenum>(state.equationAlpha));
+    captureRestoreError("OpenGL gfx blend state restoration failed");
     glDepthFunc(static_cast<GLenum>(state.depthFunction));
     glDepthMask(state.depthWrite);
     if (state.polygonMode[0] == state.polygonMode[1]) {
@@ -1298,6 +1309,7 @@ bool OpenGlRenderDevice::Implementation::restoreState(const GlState& state) noex
     gl.colorMaskIndexed(
         0, state.colorMask[0], state.colorMask[1], state.colorMask[2], state.colorMask[3]);
     glDepthRange(state.depthRange[0], state.depthRange[1]);
+    captureRestoreError("OpenGL gfx raster/depth state restoration failed");
     state.blend ? glEnable(GL_BLEND) : glDisable(GL_BLEND);
     state.depthTest ? glEnable(GL_DEPTH_TEST) : glDisable(GL_DEPTH_TEST);
     state.cullFace ? glEnable(GL_CULL_FACE) : glDisable(GL_CULL_FACE);
@@ -1311,11 +1323,18 @@ bool OpenGlRenderDevice::Implementation::restoreState(const GlState& state) noex
     state.sampleAlphaToCoverage ? glEnable(kSampleAlphaToCoverage) : glDisable(kSampleAlphaToCoverage);
     state.sampleAlphaToOne ? glEnable(kSampleAlphaToOne) : glDisable(kSampleAlphaToOne);
     state.sampleCoverage ? glEnable(kSampleCoverage) : glDisable(kSampleCoverage);
+    captureRestoreError("OpenGL gfx capability restoration failed");
     glViewport(state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3]);
     glScissor(state.scissor[0], state.scissor[1], state.scissor[2], state.scissor[3]);
-    if (consumeOperationErrors() != GL_NO_ERROR) {
+    captureRestoreError("OpenGL gfx viewport/scissor restoration failed");
+    if (firstError != GL_NO_ERROR) {
         ++statistics.stateRestoreFailures;
-        error = "OpenGL gfx state restoration failed";
+        assignGlFailure(
+            error,
+            failureCategory,
+            firstError,
+            "context",
+            reinterpret_cast<std::uintptr_t>(ownerContext));
         return false;
     }
     return true;
