@@ -716,6 +716,10 @@ if(HENIAUI_BUILD_TESTS)
                 user32
         )
         target_compile_features(HeniaUIOpenGlOutputTests PRIVATE cxx_std_23)
+        target_include_directories(
+            HeniaUIOpenGlOutputTests
+            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/opengl
+        )
         target_compile_definitions(
             HeniaUIOpenGlOutputTests
             PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN

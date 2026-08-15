@@ -5,6 +5,7 @@
 #include "../FixedError.h"
 #include "../ProfileTimeline.h"
 #include "OpenGlFailure.h"
+#include "OpenGlState.h"
 #include "OpenGlUploadRing.h"
 
 #define NOMINMAX
@@ -1255,6 +1256,7 @@ GlState OpenGlRenderDevice::Implementation::captureState() const noexcept {
     glGetIntegerv(kBlendEquationAlpha, &state.equationAlpha);
     glGetIntegerv(GL_DEPTH_FUNC, &state.depthFunction);
     glGetIntegerv(GL_POLYGON_MODE, state.polygonMode.data());
+    henia::detail::normalizeCapturedPolygonModes(state.polygonMode);
     glGetIntegerv(GL_VIEWPORT, state.viewport.data());
     glGetIntegerv(GL_SCISSOR_BOX, state.scissor.data());
     gl.getBooleanIndexed(GL_COLOR_WRITEMASK, 0, state.colorMask.data());
@@ -1300,16 +1302,18 @@ bool OpenGlRenderDevice::Implementation::restoreState(const GlState& state) noex
     captureRestoreError("OpenGL gfx blend state restoration failed");
     glDepthFunc(static_cast<GLenum>(state.depthFunction));
     glDepthMask(state.depthWrite);
+    glDepthRange(state.depthRange[0], state.depthRange[1]);
+    captureRestoreError("OpenGL gfx depth-state restoration failed");
     if (state.polygonMode[0] == state.polygonMode[1]) {
         glPolygonMode(GL_FRONT_AND_BACK, static_cast<GLenum>(state.polygonMode[0]));
     } else {
         glPolygonMode(GL_FRONT, static_cast<GLenum>(state.polygonMode[0]));
         glPolygonMode(GL_BACK, static_cast<GLenum>(state.polygonMode[1]));
     }
+    captureRestoreError("OpenGL gfx polygon-mode restoration failed");
     gl.colorMaskIndexed(
         0, state.colorMask[0], state.colorMask[1], state.colorMask[2], state.colorMask[3]);
-    glDepthRange(state.depthRange[0], state.depthRange[1]);
-    captureRestoreError("OpenGL gfx raster/depth state restoration failed");
+    captureRestoreError("OpenGL gfx color-mask restoration failed");
     state.blend ? glEnable(GL_BLEND) : glDisable(GL_BLEND);
     state.depthTest ? glEnable(GL_DEPTH_TEST) : glDisable(GL_DEPTH_TEST);
     state.cullFace ? glEnable(GL_CULL_FACE) : glDisable(GL_CULL_FACE);

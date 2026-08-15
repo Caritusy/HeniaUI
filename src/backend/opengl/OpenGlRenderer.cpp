@@ -5,6 +5,7 @@
 #include "../FixedError.h"
 #include "../ProfileTimeline.h"
 #include "OpenGlFailure.h"
+#include "OpenGlState.h"
 #include "OpenGlTextureTransaction.h"
 #include "OpenGlUploadRing.h"
 
@@ -2285,6 +2286,7 @@ GlState OpenGlRenderer::Implementation::captureState() const noexcept {
     glGetIntegerv(kBlendEquationRgb, &state.equationRgb);
     glGetIntegerv(kBlendEquationAlpha, &state.equationAlpha);
     glGetIntegerv(GL_POLYGON_MODE, state.polygonMode.data());
+    henia::detail::normalizeCapturedPolygonModes(state.polygonMode);
     gl.getBooleanIndexed(GL_COLOR_WRITEMASK, 0, state.colorMask.data());
     state.blend = glIsEnabled(GL_BLEND);
     state.scissorTest = glIsEnabled(GL_SCISSOR_TEST);
@@ -2345,9 +2347,10 @@ bool OpenGlRenderer::Implementation::restoreState(const GlState& state) noexcept
         glPolygonMode(GL_FRONT, static_cast<GLenum>(state.polygonMode[0]));
         glPolygonMode(GL_BACK, static_cast<GLenum>(state.polygonMode[1]));
     }
+    captureRestoreError("OpenGL UI polygon-mode restoration failed");
     gl.colorMaskIndexed(
         0, state.colorMask[0], state.colorMask[1], state.colorMask[2], state.colorMask[3]);
-    captureRestoreError("OpenGL UI raster state restoration failed");
+    captureRestoreError("OpenGL UI color-mask restoration failed");
     (state.blend == GL_TRUE ? glEnable : glDisable)(GL_BLEND);
     (state.scissorTest == GL_TRUE ? glEnable : glDisable)(GL_SCISSOR_TEST);
     (state.depthTest == GL_TRUE ? glEnable : glDisable)(GL_DEPTH_TEST);

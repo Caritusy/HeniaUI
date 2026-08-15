@@ -1,4 +1,5 @@
 #include "VisualRegression.h"
+#include "OpenGlState.h"
 
 #include "henia/gfx/ShapeBatch3D.h"
 #include "henia/gfx/backend/opengl/OpenGlRenderDevice.h"
@@ -43,6 +44,7 @@ using DeleteBuffersFn = void(APIENTRY*)(GLsizei, const GLuint*);
 using GenVertexArraysFn = void(APIENTRY*)(GLsizei, GLuint*);
 using BindVertexArrayFn = void(APIENTRY*)(GLuint);
 using DeleteVertexArraysFn = void(APIENTRY*)(GLsizei, const GLuint*);
+using CreateContextAttribsFn = HGLRC(WINAPI*)(HDC, HGLRC, const int*);
 
 constexpr GLenum kTexture0 = 0x84C0;
 constexpr GLenum kActiveTexture = 0x84E0;
@@ -76,6 +78,10 @@ constexpr GLenum kStencilBackFunction = 0x8800;
 constexpr GLenum kStencilBackFail = 0x8801;
 constexpr GLenum kStencilBackDepthFail = 0x8802;
 constexpr GLenum kStencilBackDepthPass = 0x8803;
+constexpr int kWglContextMajorVersion = 0x2091;
+constexpr int kWglContextMinorVersion = 0x2092;
+constexpr int kWglContextProfileMask = 0x9126;
+constexpr int kWglContextCoreProfileBit = 0x00000001;
 constexpr GLenum kStencilBackReference = 0x8CA3;
 constexpr GLenum kStencilBackValueMask = 0x8CA4;
 constexpr GLenum kStencilBackWriteMask = 0x8CA5;
@@ -214,7 +220,12 @@ struct GlState final {
 
 class HiddenOpenGlContext final {
 public:
-    HiddenOpenGlContext() {
+    enum class Profile {
+        Compatibility,
+        Core,
+    };
+
+    explicit HiddenOpenGlContext(Profile profile = Profile::Compatibility) {
         WNDCLASSW windowClass{};
         windowClass.style = CS_OWNDC;
         windowClass.lpfnWndProc = DefWindowProcW;
@@ -257,6 +268,29 @@ public:
         mContext = wglCreateContext(mDeviceContext);
         if (mContext == nullptr || wglMakeCurrent(mDeviceContext, mContext) == FALSE) {
             return;
+        }
+        if (profile == Profile::Core) {
+            const auto createContextAttribs = reinterpret_cast<CreateContextAttribsFn>(
+                wglGetProcAddress("wglCreateContextAttribsARB"));
+            if (createContextAttribs == nullptr) {
+                static_cast<void>(wglMakeCurrent(nullptr, nullptr));
+                static_cast<void>(wglDeleteContext(mContext));
+                mContext = nullptr;
+                return;
+            }
+            constexpr int attributes[]{
+                kWglContextMajorVersion, 3,
+                kWglContextMinorVersion, 3,
+                kWglContextProfileMask, kWglContextCoreProfileBit,
+                0,
+            };
+            const HGLRC coreContext = createContextAttribs(mDeviceContext, nullptr, attributes);
+            static_cast<void>(wglMakeCurrent(nullptr, nullptr));
+            static_cast<void>(wglDeleteContext(mContext));
+            mContext = coreContext;
+            if (mContext == nullptr || wglMakeCurrent(mDeviceContext, mContext) == FALSE) {
+                return;
+            }
         }
         mActiveTexture = reinterpret_cast<ActiveTextureFn>(wglGetProcAddress("glActiveTexture"));
     }
@@ -472,6 +506,17 @@ void setHostState(
 
 int main() {
     using namespace henia::ui;
+
+    std::array<GLint, 2> singlePolygonMode{GL_LINE, 0};
+    henia::detail::normalizeCapturedPolygonModes(singlePolygonMode);
+    if (singlePolygonMode != std::array<GLint, 2>{GL_LINE, GL_LINE}) {
+        fail("OpenGL single-value polygon-mode capture was not normalized");
+    }
+    std::array<GLint, 2> asymmetricPolygonMode{GL_POINT, GL_FILL};
+    henia::detail::normalizeCapturedPolygonModes(asymmetricPolygonMode);
+    if (asymmetricPolygonMode != std::array<GLint, 2>{GL_POINT, GL_FILL}) {
+        fail("OpenGL compatibility-profile polygon modes were not preserved");
+    }
 
     HiddenOpenGlContext context;
     if (!context.ready()) {
@@ -1158,6 +1203,30 @@ int main() {
     }
 
     ViewParameters validView{.viewport = {128.0F, 128.0F}};
+    {
+        HiddenOpenGlContext coreContext{HiddenOpenGlContext::Profile::Core};
+        TextureStore coreTextures;
+        Frame coreFrame;
+        const RenderPacket corePacket = henia::test::buildUiVisualScene(coreTextures, coreFrame);
+        OpenGlRenderer coreRenderer;
+        OpenGlRenderDevice coreGfx;
+        if (!coreContext.ready()
+            || !coreRenderer.initialize(64, 8, 1)
+            || !coreRenderer.synchronizeTextures(coreTextures)
+            || !coreRenderer.render(corePacket, henia::test::kVisualWidth, henia::test::kVisualHeight)
+            || !coreGfx.initialize(1, 1)
+            || !coreGfx.render(boxBatch, validView)) {
+            std::cerr << "OpenGL core UI error: " << coreRenderer.lastError() << '\n'
+                      << "OpenGL core gfx error: " << coreGfx.lastError() << '\n';
+            fail("OpenGL 3.3 core-profile state preservation failed");
+        }
+        if (!coreGfx.shutdown() || !coreRenderer.shutdown()) {
+            fail("OpenGL 3.3 core-profile renderer shutdown failed");
+        }
+    }
+    if (!context.makeCurrent()) {
+        fail("Unable to restore the compatibility OpenGL context after core-profile validation");
+    }
     glEnable(0xFFFFFFFFU);
     for (int iteration = 0; iteration < 100; ++iteration) {
         setHostState(testGl, hostTextures, hostSamplers, random);
