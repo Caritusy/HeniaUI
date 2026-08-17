@@ -364,6 +364,38 @@ if(WIN32)
         EXPORT_NAME D3D12
         FOLDER "HeniaUI/Backends"
     )
+
+    add_library(HeniaUIDirectX STATIC
+        src/backend/directx/DirectXBackend.cpp
+        src/backend/directx/DirectXRenderer.cpp
+        src/backend/directx/DirectXRenderDevice.cpp
+        "${HENIAUI_D3D12_UI_SHADER_HEADER}"
+        "${HENIAUI_D3D12_GFX_SHADER_HEADER}"
+    )
+    add_library(HeniaUI::DirectX ALIAS HeniaUIDirectX)
+    target_compile_features(HeniaUIDirectX PUBLIC cxx_std_23)
+    target_include_directories(
+        HeniaUIDirectX
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+        PRIVATE
+            "${HENIAUI_D3D12_GENERATED_DIRECTORY}"
+    )
+    target_link_libraries(
+        HeniaUIDirectX
+        PUBLIC HeniaUI::D3D12
+        PRIVATE d3d11 d3dcompiler dxgi
+    )
+    target_compile_definitions(HeniaUIDirectX PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+    if(MSVC)
+        target_compile_options(HeniaUIDirectX PRIVATE /W4 /permissive- /utf-8 /GR-)
+    endif()
+    set_target_properties(HeniaUIDirectX PROPERTIES
+        CXX_EXTENSIONS OFF
+        EXPORT_NAME DirectX
+        FOLDER "HeniaUI/Backends"
+    )
 endif()
 
 if(HENIAUI_BUILD_SANDBOX)
@@ -648,6 +680,29 @@ if(HENIAUI_BUILD_TESTS)
         set_target_properties(HeniaUID3D12GfxTests PROPERTIES FOLDER "HeniaUI/Tests")
         add_test(NAME HeniaUI.D3D12.Gfx COMMAND HeniaUID3D12GfxTests)
 
+        add_executable(HeniaUIDirectXTests tests/DirectXTests.cpp)
+        target_link_libraries(
+            HeniaUIDirectXTests
+            PRIVATE
+                HeniaUI::DirectX
+                d3d11
+                d3d12
+                dxgi
+        )
+        target_compile_features(HeniaUIDirectXTests PRIVATE cxx_std_23)
+        target_compile_definitions(
+            HeniaUIDirectXTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
+        )
+        if(MSVC)
+            target_compile_options(
+                HeniaUIDirectXTests PRIVATE /W4 /permissive- /utf-8 /GR-
+            )
+        endif()
+        set_target_properties(
+            HeniaUIDirectXTests PROPERTIES FOLDER "HeniaUI/Tests"
+        )
+        add_test(NAME HeniaUI.DirectX COMMAND HeniaUIDirectXTests)
+
         add_executable(
             HeniaUID3D12ShaderPackageLinkTests
             tests/D3D12ShaderPackageLinkTests.cpp
@@ -773,6 +828,16 @@ endif()
 if(TARGET HeniaUID3D12)
     install(
         TARGETS HeniaUID3D12
+        EXPORT HeniaUITargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+endif()
+if(TARGET HeniaUIDirectX)
+    install(
+        TARGETS HeniaUIDirectX
         EXPORT HeniaUITargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

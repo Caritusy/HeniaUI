@@ -549,6 +549,16 @@ use `DrawInstanced` and retain exact immutable dirty-range uploads.
 
 HeniaUI does not own hooks, windows, OpenGL contexts, swap chains, back buffers, command allocators, resource transitions, queues, or fences.
 
+The Windows `DirectX` integration layer probes with temporary devices before
+the host creates its long-lived rendering objects. It prefers D3D12 and falls
+back to D3D11 feature level 11, optionally including WARP. The temporary probe
+objects are released immediately. Both unified renderer families then retain
+only the device/context supplied by the host. D3D11 records to the host-bound
+attachments through the supplied immediate context and never creates or
+presents a swap chain. D3D12 delegates to the existing fence-owned recording
+path without changing its ownership model. The full selection and state
+contract is in [Unified DirectX integration](directx-integration.md).
+
 The complete initialization, multi-instance, context/device-loss, destruction,
 submission-fence, resize, and recreation rules are documented in
 [Renderer ownership and recreation](resource-lifetime.md).
