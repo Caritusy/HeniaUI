@@ -229,7 +229,12 @@ struct GlyphJobRecord final {
     std::wstring_view familyName,
     ComPtr<IDWriteFontFace>& output) noexcept {
     if (familyName.empty()) return false;
-    const std::wstring family(familyName);
+    std::wstring family;
+    try {
+        family.assign(familyName.data(), familyName.size());
+    } catch (...) {
+        return false;
+    }
     UINT32 familyIndex = 0;
     BOOL exists = FALSE;
     if (FAILED(collection.FindFamilyName(family.c_str(), &familyIndex, &exists))
