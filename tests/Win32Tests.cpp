@@ -714,9 +714,12 @@ int main() {
         fail("Win32 asynchronous partial initialization leaked store resources");
     }
 
+    constexpr std::array<wchar_t, 8> nonTerminatedPrimary{
+        L'S', L'e', L'g', L'o', L'e', L' ', L'U', L'I'};
     Win32AsyncFontSet asyncFonts(textures, fonts, {
         .families = {
-            .primary = L"Segoe UI",
+            .primary = std::wstring_view{
+                nonTerminatedPrimary.data(), nonTerminatedPrimary.size()},
             .simplifiedChinese = {},
             .traditionalChinese = {},
             .japanese = {},
