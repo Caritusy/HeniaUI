@@ -64,6 +64,62 @@ struct TextureRollback final {
     return false;
 }
 
+// AddFontMemResourceEx fonts are visible to GDI before they are visible to
+// DirectWrite's system collection. Bridge the selected private HFONT through
+// IDWriteGdiInterop so embedded faces use the same raster path as installed
+// faces without writing the font to disk.
+[[nodiscard]] bool makeDirectWriteFaceFromGdi(
+    IDWriteFactory& factory,
+    std::wstring_view familyName,
+    std::uint32_t pixelHeight,
+    detail::ComPtr<IDWriteFontFace>& output) {
+    if (familyName.empty() || pixelHeight == 0
+        || pixelHeight > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+    HDC context = CreateCompatibleDC(nullptr);
+    if (context == nullptr) return false;
+    const std::wstring family(familyName);
+    HFONT font = CreateFontW(
+        -static_cast<int>(pixelHeight),
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_TT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        ANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        family.c_str());
+    if (font == nullptr) {
+        DeleteDC(context);
+        return false;
+    }
+    const HGDIOBJ previous = SelectObject(context, font);
+    if (previous == nullptr || previous == HGDI_ERROR) {
+        DeleteObject(font);
+        DeleteDC(context);
+        return false;
+    }
+    LOGFONTW logFont{};
+    const bool haveLogFont = GetObjectW(font, sizeof(logFont), &logFont)
+        == static_cast<int>(sizeof(logFont));
+    detail::ComPtr<IDWriteGdiInterop> gdiInterop;
+    detail::ComPtr<IDWriteFont> directWriteFont;
+    const bool created = haveLogFont
+        && SUCCEEDED(factory.GetGdiInterop(&gdiInterop))
+        && SUCCEEDED(gdiInterop->CreateFontFromLOGFONT(&logFont, &directWriteFont))
+        && SUCCEEDED(directWriteFont->CreateFontFace(&output));
+    SelectObject(context, previous);
+    DeleteObject(font);
+    DeleteDC(context);
+    return created;
+}
+
 } // namespace
 
 FontHandle Win32FontLoader::load(
@@ -112,7 +168,9 @@ FontHandle Win32FontLoader::load(
     }
     detail::ComPtr<IDWriteFontFace> directWriteFace;
     if (!detail::makeDirectWriteFace(
-            *directWriteCollection.Get(), request.family, directWriteFace)) {
+            *directWriteCollection.Get(), request.family, directWriteFace)
+        && !makeDirectWriteFaceFromGdi(
+            *directWriteFactory.Get(), request.family, request.pixelHeight, directWriteFace)) {
         return {};
     }
     DWRITE_FONT_METRICS directWriteMetrics{};
