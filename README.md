@@ -5,144 +5,111 @@
 </p>
 
 <p align="center">
-  Backend-neutral · host-owned · allocation-aware · independent from ImGui
+  Backend-neutral core · host-owned graphics · predictable frame costs · no ImGui dependency
 </p>
 
 <p align="center">
   <a href="https://github.com/Caritusy/HeniaUI/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Caritusy/HeniaUI/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/Caritusy/HeniaUI/releases/tag/v0.1.0"><img alt="Release v0.1.0" src="https://img.shields.io/badge/release-v0.1.0-2ea44f.svg"></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <img alt="C++23" src="https://img.shields.io/badge/C%2B%2B-23-00599C.svg">
 </p>
 
 <p align="center">
-  <a href="#the-pitch">The Pitch</a> ·
-  <a href="#demo">Demo</a> ·
-  <a href="#getting-started">Getting Started</a> ·
-  <a href="#integration">Integration</a> ·
-  <a href="#how-it-works">How It Works</a> ·
+  <a href="#is-heniaui-a-fit">Fit</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#choose-a-backend">Backends</a> ·
+  <a href="#integration-contract">Integration</a> ·
+  <a href="#testing-and-quality">Testing</a> ·
   <a href="#documentation">Documentation</a>
 </p>
 
 <p align="center">
-  <img src="docs/media/widget-gallery.png" alt="HeniaUI complete retained widget gallery" width="100%">
+  <img src="docs/media/widget-gallery.png" alt="HeniaUI retained widget gallery" width="100%">
 </p>
 
-HeniaUI is a compact, standalone library for building native retained user
-interfaces and high-volume 3D overlays. A retained widget tree or low-level
-display list is compiled into immutable render packets, then submitted through
-host-integrated OpenGL 3.3 or unified DirectX backends with D3D12-to-D3D11
-fallback.
+HeniaUI is an independent C++23 library for native tools, editors, launchers,
+overlays, and real-time visualization. A retained widget tree or a low-level
+`Canvas` display list is compiled into an immutable `RenderPacket`; generic 3D
+boxes are published as an immutable `InstanceBatch`. The host submits those
+snapshots through an already-owned graphics context or command list.
 
-The library does not own your window, graphics context, swap chain, back buffer,
-command queue, or application loop. It does not hook a host process, require
-RTTI, or depend on ImGui. The platform-neutral core has no external dependency
-beyond the C++ standard library.
+The library does not create or own a window, swap chain, back buffer, OpenGL
+context, D3D device, command queue, allocator, fence, or presentation loop. It
+does not install hooks, require RTTI, or depend on a host application's input
+implementation. The platform-neutral `Core` and `Gfx` targets depend only on
+the C++ standard library.
 
-> **Project status:** HeniaUI is currently pre-1.0 (`0.1.0`). The foundation is
-> usable and continuously tested, but public APIs may still evolve.
+> **Release status:** `v0.1.0` is the first tracked release. HeniaUI is still
+> pre-1.0: the ownership and rendering contracts are tested, while public APIs
+> may continue to evolve before 1.0.
 
-## The Pitch
+## Is HeniaUI a fit?
 
-HeniaUI is designed for native tools, editors, launchers, overlays, real-time
-visualization, and engine-integrated interfaces where ownership and frame costs
-must remain explicit.
+Use HeniaUI when the application needs:
 
-- **Retained where it matters.** Stable widget subtrees reuse layout, paint
-  segments, compiled instances, and backend uploads until a real dirty reason
-  appears.
-- **One ordered UI stream.** Shapes, images, effects, SDF icons, nine-patches,
-  and glyphs preserve paint order while compatible work shares draw batches.
-- **Immutable publication.** `RenderPacket` and `InstanceBatch` are cheap,
-  shareable snapshot handles with observable identities and revisions.
-- **Host-owned integration.** Renderers consume an existing OpenGL context,
-  D3D11 device context, or D3D12 command list. They do not hide windows, queues,
-  waits, or presentation.
-- **Predictable frame paths.** Fixed-capacity modes, bounded diagnostics,
-  fence-owned upload slots, dirty ranges, and explicit fallback counters make
-  performance behavior testable.
-- **Separate 2D and 3D fast paths.** Retained UI and generic GPU-instanced boxes
-  share a host frame without being forced into one vertex format.
-- **Production input.** Keyboard focus, pointer capture, scrolling, clipboard,
-  IME composition, UTF-8 editing, and Per-Monitor V2 DPI integration are part of
-  the public model.
+- a retained widget tree with local invalidation, keyboard focus, pointer
+  capture, scrolling, clipboard, IME composition, and UTF-8 editing;
+- a small immediate recording surface for custom controls, diagrams, and
+  analytic 2D primitives;
+- immutable producer-to-render snapshots that can be published between threads;
+- high-volume GPU-instanced boxes whose object content is stable while camera,
+  viewport, and animation constants change;
+- an OpenGL 3.3 renderer or a unified DirectX entry point that probes D3D12 and
+  falls back to D3D11/WARP on Windows.
 
-HeniaUI is not an immediate-mode API and is not an ImGui wrapper. Its goal is a
-small retained system that can be embedded without surrendering host ownership
-or rebuilding stable content every frame.
+HeniaUI is not a windowing toolkit, scene graph, text-shaping suite, or complete
+engine. The host supplies the event loop, native resources, synchronization,
+complex text shaping integration, and presentation policy.
 
-## Demo
+## Capabilities at a glance
 
-### Complete Widget Gallery
+| Layer | What it provides |
+| --- | --- |
+| `Core` | Retained widgets, `UiDocument`, `Canvas`, display lists, immutable packets, textures, UTF-8 text and input state |
+| `Gfx` | Immutable instance batches, visibility policy, generic 3D box data, depth state, producer statistics |
+| `Win32` | Host `WndProc` translation, clipboard/IME, GDI font loading, bounded DirectWrite fallback rasterization |
+| `OpenGL` | Host-context UI renderer and 3D device for compatible OpenGL 3.3+ contexts |
+| `DirectX` | One public Windows backend name with D3D12-first probing and D3D11 rendering fallback |
+| `D3D12` | The existing explicit D3D12 renderer/device target for integrations that choose D3D12 directly |
 
-`HeniaUIWidgetGallery` is the equivalent of a full widget demo window. It shows
-every built-in retained control in one native OpenGL application, including
-text and numeric editing, lists, trees, scrolling, selection, color editing,
-key capture, tooltips, and modal popups.
+The 2D and 3D paths share packet ownership and host contracts, but keep their
+own instance formats and batching rules. This lets each path stay small and
+avoids forcing UI primitives into a 3D vertex representation.
+
+## Demos
+
+The Windows sandbox programs are built with `HENIAUI_BUILD_SANDBOX=ON`:
+
+| Program | Shows |
+| --- | --- |
+| `HeniaUIWidgetGallery` | Retained controls, text/numeric editing, lists, trees, scrolling, selection, tooltips, and popups |
+| `HeniaUIEffectsExample` | Analytic shapes, gradients, tint, glow, shadows, borders, lines, nine-patches, masks, and ordered effects |
+| `HeniaUIVisualSandbox` | Retained controls alongside 5,760 animated GPU-instanced boxes |
 
 ```powershell
-cmake --preset vs2022
-cmake --build --preset release --parallel
 .\out\build\vs2022\Release\HeniaUIWidgetGallery.exe
-```
-
-Use the mouse wheel to inspect the full page and press `Escape` to close it.
-For unattended visual verification, pass `--headless --snapshot`; the program
-writes `HeniaUIWidgetGallery.bmp` in the current directory.
-
-### Effects Gallery
-
-<p align="center">
-  <img src="docs/media/effects-gallery.png" alt="HeniaUI analytic shapes and effects gallery" width="100%">
-</p>
-
-`HeniaUIEffectsExample` demonstrates the current analytic 2D primitives,
-gradients, tinting, glow, soft shadows, borders, line caps and joins,
-nine-patches, masking, blending, SDF icons, text, and ordered effect layers.
-
-```powershell
 .\out\build\vs2022\Release\HeniaUIEffectsExample.exe
-```
-
-### GPU Instance Field
-
-<p align="center">
-  <img src="docs/media/gpu-instance-field.png" alt="HeniaUI GPU-instanced 3D box field with retained controls" width="100%">
-</p>
-
-`HeniaUIVisualSandbox` combines retained controls with 5,760 animated 3D boxes
-submitted in one instanced draw. Camera and hue animation change frame constants
-while the immutable box snapshot remains resident on the GPU.
-
-```powershell
 .\out\build\vs2022\Release\HeniaUIVisualSandbox.exe
 ```
 
-The repository also builds:
+For visual review without an interactive window, the gallery supports
+`--headless --snapshot` and writes a bitmap in the current directory.
 
-- `HeniaUISandbox`: portable CPU-side recording, batching, and statistics smoke
-  test used by CI;
-- `HeniaUIBenchmarks`: reproducible producer and backend performance scenes;
-- `HeniaUID3D12InstanceBenchmarks`: timestamped upload-heap versus GPU-local
-  instance storage comparison on Windows adapters.
+<p align="center">
+  <img src="docs/media/effects-gallery.png" alt="HeniaUI analytic effects gallery" width="100%">
+</p>
 
-## Getting Started
+<p align="center">
+  <img src="docs/media/gpu-instance-field.png" alt="HeniaUI GPU-instanced 3D box field" width="100%">
+</p>
 
-### Requirements
+## Quick Start
 
-| Requirement | Notes |
-| --- | --- |
-| CMake | 3.24 or newer |
-| Language | C++23, RTTI not required |
-| Core and Gfx | Platform-neutral; continuously built on Windows and Linux |
-| Win32 adapters | Windows SDK, DirectWrite, GDI, IMM32, and User32 |
-| OpenGL backend | Windows host with an already-current compatible OpenGL 3.3 context |
-| DirectX backend | Windows host; probes D3D12 first and falls back to D3D11 feature level 11 |
-| D3D12 backend | Windows host with a D3D12 device and host-owned command submission |
+### Build the repository
 
-### Build and test on Windows
-
-The checked-in Visual Studio 2022 preset builds the libraries, tests, examples,
-and benchmarks:
+The checked-in Visual Studio 2022 preset builds libraries, tests, examples, and
+benchmarks on Windows:
 
 ```powershell
 cmake --preset vs2022
@@ -153,13 +120,14 @@ cmake --build --preset release --parallel
 ctest --preset release
 ```
 
-Run the portable batching smoke test with:
+The portable smoke executable exercises recording, batching, retained packet
+reuse, and statistics without opening a window:
 
 ```powershell
 .\out\build\vs2022\Release\HeniaUISandbox.exe
 ```
 
-For a minimal single-configuration build:
+For a minimal single-configuration build, disable the optional programs:
 
 ```bash
 cmake -S . -B out/build/release \
@@ -169,105 +137,10 @@ cmake -S . -B out/build/release \
 cmake --build out/build/release --parallel
 ```
 
-## Integration
+### Record a packet
 
-### `add_subdirectory`
-
-HeniaUI exports narrow CMake targets so consumers link only the layers they
-need:
-
-```cmake
-add_subdirectory(external/HeniaUI)
-
-target_link_libraries(MyApplication PRIVATE
-    HeniaUI::Core
-    HeniaUI::Win32
-    HeniaUI::OpenGL
-)
-```
-
-When HeniaUI is included as a subproject, tests and sandboxes default to off.
-
-### Installed package
-
-```powershell
-cmake --install out\build\vs2022 --config Release --prefix out\install
-```
-
-```cmake
-find_package(HeniaUI CONFIG REQUIRED)
-
-target_link_libraries(MyApplication PRIVATE
-    HeniaUI::Core
-    HeniaUI::Gfx
-    HeniaUI::Win32
-    HeniaUI::OpenGL
-    HeniaUI::DirectX
-)
-```
-
-### CMake targets
-
-| Target | Responsibility | Availability |
-| --- | --- | --- |
-| `HeniaUI::Core` | Retained 2D UI, display lists, text, textures, widgets | All platforms |
-| `HeniaUI::Gfx` | Generic 3D instance data, visibility, shape batches | All platforms |
-| `HeniaUI::Win32` | Font loading, clipboard, input, capture, and IME adapter | Windows |
-| `HeniaUI::OpenGL` | 2D renderer and 3D render device | Windows |
-| `HeniaUI::DirectX` | Unified D3D12-first probe plus D3D11/D3D12 UI and gfx paths | Windows |
-| `HeniaUI::D3D12` | 2D renderer and 3D render device | Windows |
-
-### CMake options
-
-| Option | Default | Purpose |
-| --- | --- | --- |
-| `HENIAUI_BUILD_TESTS` | On for top-level builds | Build the automated test suite |
-| `HENIAUI_BUILD_SANDBOX` | On for top-level builds | Build portable and Win32 examples |
-| `HENIAUI_BUILD_BENCHMARKS` | Follows tests | Build reproducible benchmarks |
-| `HENIAUI_ENABLE_ADDRESS_SANITIZER` | Off | Enable supported ASan instrumentation |
-| `HENIAUI_ENABLE_UNDEFINED_SANITIZER` | Off | Enable Clang/GCC UBSan instrumentation |
-| `HENIAUI_D3D12_RUNTIME_SHADER_COMPILATION` | Off | Allow Debug-only runtime HLSL recompilation |
-
-## Usage
-
-HeniaUI exposes two producer APIs that publish the same backend-neutral packet
-model.
-
-### Retained widgets
-
-```cpp
-#include <henia/ui/widget/Callback.h>
-#include <henia/ui/widget/controls/Button.h>
-#include <henia/ui/widget/controls/Label.h>
-#include <henia/ui/widget/controls/Panel.h>
-
-struct Actions {
-    void save();
-};
-
-Actions actions;
-auto root = std::make_unique<henia::ui::Panel>();
-root->emplaceChild<henia::ui::Label>("Project settings");
-
-auto& save = root->emplaceChild<henia::ui::Button>("Save");
-save.setOnClick(
-    henia::ui::Callback<>::bind<Actions, &Actions::save>(actions));
-
-document.setRoot(std::move(root));
-renderer.render(document.compose(), document.coordinateSpace().render);
-```
-
-`UiDocument` keeps independently revisioned layout and paint state per widget.
-A dirty leaf rebuilds only its affected branch; stable siblings remain cached in
-depth-first paint order.
-
-Built-in controls include:
-
-`Panel`, `Label`, `Button`, `NumericInput`, `TextInput`, `Checkbox`, `Toggle`,
-`Slider`, `ComboBox`, `TabBar`, `ScrollContainer`, `ListView`, `TreeView`,
-`Tooltip`, `PopupLayer`, `ColorPicker`, `ColorPanel`, and `KeyBindingEditor`.
-
-### Low-level canvas
+This is a complete producer-side example. A backend consumes the resulting
+immutable packet later; HeniaUI does not choose when or where to present it.
 
 ```cpp
 #include <henia/ui/Frame.h>
@@ -275,7 +148,7 @@ Built-in controls include:
 henia::ui::Frame frame;
 frame.reserve(4096, 32, henia::ui::CapacityPolicy::Fixed);
 
-auto& canvas = frame.begin();
+henia::ui::Canvas& canvas = frame.begin();
 canvas.fillRect(
     {{20.0F, 20.0F}, {420.0F, 240.0F}},
     {0.03F, 0.05F, 0.08F, 1.0F},
@@ -288,155 +161,217 @@ canvas.line(
     henia::ui::LineCap::Round);
 
 henia::ui::RenderPacket packet = frame.finish();
+if (!frame.lastBuildPublished()) {
+    // Fixed-capacity recording rejected the frame; keep the last good packet.
+}
 ```
 
-`Frame::reserve` prewarms reusable immutable snapshot slots. Fixed-capacity
-recording rejects overflow without allocating or publishing a partial packet;
-grow mode retains expanded storage for later frames.
+`Frame::reserve` prewarms command, instance, batch, and snapshot storage. Fixed
+capacity rejects overflow deterministically and never publishes a partial
+packet. `CapacityPolicy::Grow` permits retained storage to expand and reports
+growth through the packet statistics.
 
-## How It Works
+### Add HeniaUI to an application
 
-```text
-Retained widget tree ─┐
-                      ├─> display-list segments ─> BatchCompiler ─> RenderPacket
-Low-level Canvas ─────┘                                      │
-                                                             ├─> OpenGL UI renderer
-                                                             └─> D3D12 UI renderer
+As a subproject, link only the layers used by the host:
 
-ShapeBatch3D ─> immutable InstanceBatch ─> visibility policy ─┬─> OpenGL render device
-                                                              └─> D3D12 render device
+```cmake
+add_subdirectory(external/HeniaUI)
+
+target_link_libraries(MyApplication PRIVATE
+    HeniaUI::Core
+    HeniaUI::Gfx
+    HeniaUI::Win32       # Windows input/font adapter, when needed
+    HeniaUI::DirectX     # or HeniaUI::OpenGL on Windows
+)
 ```
 
-### 2D rendering
+When HeniaUI is included as a subproject, tests, sandboxes, and benchmarks are
+off by default. A packaged install uses the same names:
 
-- Command ordering and nested clip intersections are preserved.
-- Adjacent compatible instances share a draw batch; each batch carries a table
-  of up to eight live textures.
-- Rectangles, circles, ellipses, arcs, capsules, gradients, rounded shadows,
-  independent-corner borders, lines, images, glyphs, nine-patches, SDF icons,
-  and ordered effects use compact analytic instances.
-- OpenGL and D3D12 consume the same `RenderPacket` and explicit
-  `UiRenderViewport` coordinate transform.
-- UI colors are straight-alpha linear values. Texture alpha and transfer
-  semantics, plus linear versus sRGB render targets, are explicit metadata.
+```powershell
+cmake --install out\build\vs2022 --config Release --prefix out\install
+```
 
-### Text and input
+```cmake
+find_package(HeniaUI 0.1 CONFIG REQUIRED)
+target_link_libraries(MyApplication PRIVATE HeniaUI::Core HeniaUI::DirectX)
+```
 
-The dependency-free text path performs strict UTF-8 lookup, kerning, fallback
-font selection, bounded layout/render caching, caret hit testing, selection,
-and editing. Hosts that need Arabic, Indic, bidirectional, or other complex
-shaping can implement `TextShapingBackend` without adding that dependency to
-minimal builds.
+### Targets and options
 
-`TextEditorState` keeps committed UTF-8 separate from IME preedit text and
-supports codepoint-safe navigation, clipboard operations, and bounded undo/redo.
-The Win32 adapter translates an existing host `WndProc` stream; it never
-subclasses or owns the window.
+| Target | Availability | Responsibility |
+| --- | --- | --- |
+| `HeniaUI::Core` | All platforms | Retained UI, display lists, text, textures, widgets |
+| `HeniaUI::Gfx` | All platforms | Generic 3D instance data and producer-side shape batches |
+| `HeniaUI::Win32` | Windows | Font, clipboard, input, capture, and IME adapters |
+| `HeniaUI::OpenGL` | Windows | OpenGL 3.3+ UI renderer and 3D render device |
+| `HeniaUI::DirectX` | Windows | Unified D3D12/D3D11 UI and 3D renderers |
+| `HeniaUI::D3D12` | Windows | Explicit D3D12 UI renderer and 3D render device |
 
-### Asynchronous multilingual fonts
+Important CMake options are `HENIAUI_BUILD_TESTS`,
+`HENIAUI_BUILD_SANDBOX`, `HENIAUI_BUILD_BENCHMARKS`,
+`HENIAUI_ENABLE_ADDRESS_SANITIZER`,
+`HENIAUI_ENABLE_UNDEFINED_SANITIZER`, and
+`HENIAUI_D3D12_RUNTIME_SHADER_COMPILATION` (Debug-only).
 
-`Win32AsyncFontSet` supplies on-demand English, Simplified and Traditional
-Chinese, Japanese, Korean, symbols, and monochrome emoji fallback faces. A
-private DirectWrite worker rasterizes requested Unicode scalars into owned
-Alpha8 bitmaps. It never touches `FontStore`, `TextureStore`, a renderer, or a
-widget document. The owner thread publishes only a bounded number of completed
-results per frame.
+## Choose a backend
+
+### OpenGL
+
+Link `HeniaUI::OpenGL` and pass an already-current compatible OpenGL 3.3+
+context to the renderer. The default state policy captures and restores the
+state HeniaUI changes. `DedicatedContext` is available when the host owns a
+separate context and wants to avoid that capture/restore walk. The host remains
+responsible for making the context current, selecting the framebuffer, and
+presenting.
+
+### Unified DirectX
+
+New Windows integrations should link `HeniaUI::DirectX` and include headers
+under `henia/*/backend/directx`. Probe before creating the long-lived host
+device:
 
 ```cpp
-#include <henia/ui/platform/win32/Win32AsyncFont.h>
+#include <henia/backend/directx/DirectXBackend.h>
 
-henia::ui::Win32AsyncFontSet multilingual(textures, fontStore, {
-    .primaryFont = primaryFont,
-    .logicalPixelHeight = 18.0F,
-    .dpiScale = dpi / 96.0F,
-    .preallocatedPagesPerFace = 1,
-});
-
-textPainter.setFallbackFonts(multilingual.fontChain(
-    henia::ui::Win32FontLocale::SimplifiedChinese));
-textPainter.setGlyphRequestBackend(&multilingual);
-textPainter.setFontRasterResolver(&multilingual);
-multilingual.prewarmTextSizes({13.0F, 14.0F, 16.0F, 18.0F, 22.0F});
-
-// Interactive frame: publish, upload, invalidate, then compose.
-if (multilingual.commitReady(32) != 0) {
-    if (!renderer.synchronizeTextures(textures)) {
-        return false;
-    }
-    document.invalidateTypography();
+const auto capabilities = henia::backend::directx::probe();
+switch (capabilities.selected) {
+case henia::backend::directx::Api::D3D12:
+    // Create the host-owned D3D12 device, queue, command list, and fences.
+    break;
+case henia::backend::directx::Api::D3D11:
+    // Create the host-owned D3D11 device and immediate context.
+    break;
+default:
+    // Report capabilities.diagnostic and keep GPU rendering disabled.
+    break;
 }
-renderer.render(document.compose(), document.coordinateSpace().render);
 ```
 
-All `TextPainter`-driven controls automatically enqueue their UTF-8 text. The
-queues are bounded, requests are deduplicated per face/physical-size/codepoint,
-and retryable failures use bounded exponential backoff, so layout never waits
-for rasterization. `fontChain()` selects locale-specific CJK face order and a
-missing scalar advances through that chain instead of being broadcast to every
-CJK face. The raster resolver chooses a bounded 1/8-physical-pixel variant;
-small coverage glyphs use explicit cumulative per-glyph pixel alignment while
-their fractional advances remain intact. ASCII seeds and async fallbacks both
-use DirectWrite at the selected floating-point size. Externally resolved primary
-variants remain borrowed but participate in the shared bucket bound, closest-size
-fallback, and chain-aware async glyph publication;
-call `setDpiScale()` on monitor changes and prewarm known control sizes to avoid
-first-use atlas work. `releaseResources()` stops the worker and explicitly
-retires every internally owned face, glyph, and atlas page.
+`probe()` tests hardware adapters in deterministic order, tries D3D12 feature
+level 11_0 first, then D3D11 feature level 11, and optionally uses WARP as a
+compatibility path. It creates only temporary probe devices. The result
+contains both availability flags, selected API, feature levels, adapter type,
+HRESULTs, and a bounded diagnostic.
 
-This scalar fallback path covers Latin, CJK, kana, Hangul, common symbols, and
-many other characters available in the configured system faces. Color emoji is
-currently flattened to the library's Alpha8 text contract. Arabic, Indic,
-bidirectional text, ligatures, and emoji sequences still require an appropriate
-`TextShapingBackend`; the simple shaper does not claim full Unicode shaping.
+`henia::ui::DirectXRenderer` and
+`henia::gfx::DirectXRenderDevice` expose D3D11 and D3D12 initialization paths.
+The selected API is fixed for the lifetime of an initialized object; shut it
+down before recreating it against a different host device. D3D12 records into
+the host's open direct command list. D3D11 renders through the host's immediate
+context and the currently bound render/depth targets.
 
-### GPU-instanced 3D shapes
+The legacy `HeniaUI::D3D12` target remains available for applications that want
+to select D3D12 explicitly. Its fence-owned upload and command-list contract is
+unchanged.
+
+## Integration contract
+
+HeniaUI owns CPU-side widget trees, immutable snapshots, and the GPU resources
+it creates for its renderer. The host owns native lifecycle and synchronization.
+
+- **Producer and render threads:** compose or build a packet on one producer;
+  publish the `RenderPacket` with the host's normal synchronization; consume it
+  read-only on the render thread. A packet's spans remain valid while its handle
+  is alive.
+- **OpenGL:** keep the initialization context current, bind the intended target,
+  and restore any host state needed after rendering. Resources belong to the
+  sharing group of that context.
+- **D3D12:** bind render/depth targets and perform resource transitions before
+  `record()`. Submit the host command list and associate the submission slot
+  with a host fence before that slot is reused. HeniaUI cannot query and restore
+  arbitrary D3D12 state, so rebind the host state before later draws.
+- **D3D11:** bind compatible render/depth targets before `render()`. The
+  immediate context state is overwritten and not restored; rebind the host
+  pipeline before later draws.
+- **Depth:** if a requested depth attachment is unavailable, the renderer uses
+  an explicit depth-disabled fallback and increments the depth fallback counter.
+
+Resize, device recreation, context loss, texture ownership, and shutdown rules
+are collected in [Resource lifetime](docs/resource-lifetime.md).
+
+## Usage model
+
+### Retained widgets
+
+`UiDocument` owns a widget tree and a `TextPainter` supplied by the host. Built-in
+controls include `Panel`, `Label`, `Button`, `NumericInput`, `TextInput`,
+`Checkbox`, `Toggle`, `Slider`, `ComboBox`, `TabBar`, `ScrollContainer`,
+`ListView`, `TreeView`, `Tooltip`, `PopupLayer`, `ColorPicker`, `ColorPanel`,
+and `KeyBindingEditor`.
+
+Each widget has independent layout and paint revisions. A local change rebuilds
+only the affected retained branch; stable siblings remain in depth-first paint
+order and reuse their compiled instances. Call `setViewport()`, update the
+explicit coordinate space, dispatch host input, then call `compose()` once per
+producer frame.
+
+### Canvas and effects
+
+`Canvas` records rectangles, circles, ellipses, arcs, capsules, lines and
+polylines, gradients, images, glyphs, nine-patches, SDF icons, clips, and
+ordered tint/glow/shadow/outline layers. The batch compiler keeps one ordered
+stream, validates input, and groups compatible adjacent work with a table of up
+to eight textures per batch. Effects do not require an intermediate render
+target or a full-screen pass.
+
+### Text and fonts
+
+The default shaper provides strict UTF-8 lookup, same-face kerning, locale-aware
+fallback, bounded layout/render caches, caret geometry, selection, and editing.
+`Win32AsyncFontSet` adds bounded DirectWrite rasterization for Latin, CJK, kana,
+Hangul, symbols, and monochrome Alpha8 emoji fallback. The owner thread commits
+completed glyphs, synchronizes textures, calls `UiDocument::invalidateTypography`,
+and composes again. Arabic, Indic, bidirectional text, ligatures, variation
+sequences, and other multi-codepoint shaping require a host
+`TextShapingBackend`.
+
+### GPU-instanced 3D
+
+`ShapeBatch3D` stores 64-byte `BoxInstance` records and publishes an
+`InstanceBatch` snapshot. The GPU expands fixed faces and edges in the vertex
+shader, so fill-only, outline-only, and combined boxes stay on the instanced
+path. Replace or update boxes only when object content changes; camera,
+viewport, time, and motion constants live in `ViewParameters` and do not force
+content rebuilds. Optional CPU visibility filtering reuses immutable page bounds.
 
 ```cpp
 henia::gfx::ShapeBatch3D shapes;
 henia::gfx::BoxInstance box;
-box.setFillOpacity(0.25F);       // optional face fill, encoded in the 64-byte instance
+box.setFillOpacity(0.25F);
 box.setOutlineEnabled(true);
-const std::array boxes{box};
-shapes.replaceBoxes(boxes);       // only when object content changes
-auto snapshot = shapes.snapshot();
+shapes.addBox(box);                 // object-content change
+const auto snapshot = shapes.snapshot();
 
-henia::gfx::ViewParameters view{
-    .viewProjection = cameraMatrix,
-    .viewport = {width, height},
-    .timeSeconds = time,
-};
-
-renderDevice.render(snapshot, view, hasDepthAttachment);
+henia::gfx::ViewParameters view;
+view.viewport = {width, height};
+view.timeSeconds = timeSeconds;
+// A backend consumes snapshot and view using the host-owned device.
 ```
 
-Each box stores bounds, color, pixel line width, hue offset, optional fill opacity,
-outline state, and generic effect parameters. The GPU expands six faces and/or
-twelve fixed edges from one unchanged 64-byte instance. Fill-only, outline-only,
-and combined batches remain one instanced draw. Camera and time changes update
-frame constants without rebuilding or re-uploading stable instance content.
-Optional visibility reuses immutable page bounds and keeps direct submission as
-the default path.
+## Performance model
 
-### Host ownership
+The library exposes observable counters instead of hiding frame costs:
 
-HeniaUI owns its CPU-side trees, immutable packets, renderer resources, and
-preallocated upload bookkeeping. The host owns application lifecycle and all
-presentation infrastructure.
+- retained layout, paint, and composition reuse;
+- immutable packet identity and revision reuse;
+- source commands, instances, batches, texture-table boundaries, and full cold
+  upload bytes;
+- producer build, CPU upload, CPU submit/record, draw, rejection, and depth
+  fallback statistics;
+- optional conservative fragment-area and effect-variant estimates;
+- 3D content revisions, dirty ranges, visibility rejection, and instance draw
+  counts.
 
-- OpenGL calls require the initialization context to be current. The default
-  `Preserve` policy restores changed pipeline state; opt-in `DedicatedContext`
-  establishes HeniaUI state without the capture/restore walk. Instance uploads
-  are transient by default, with an opt-in persistently mapped strategy on
-  OpenGL 4.4/`ARB_buffer_storage`. Neither strategy waits for an upload slot.
-- D3D12 records into a host-owned direct command list. The host binds targets,
-  performs resource transitions, submits work, and associates submission slots
-  with fences.
-- Missing depth attachments select an explicit depth-disabled fallback and
-  increment diagnostics instead of pretending depth testing occurred.
+Routine submission does not dispatch an event bus, wait on a lock, allocate per
+primitive, or grow a resource container. Fixed-capacity callers can turn
+allocation and overflow into deterministic rejection counters. See
+[Benchmarks](docs/benchmarks.md) before comparing results across machines.
 
-## Quality and Testing
+## Testing and quality
 
-The complete local validation matrix is:
+The local Windows matrix is:
 
 ```powershell
 cmake --preset vs2022
@@ -444,17 +379,24 @@ cmake --build --preset dev --parallel
 ctest --preset dev
 cmake --build --preset release --parallel
 ctest --preset release
-.\out\build\vs2022\Release\HeniaUISandbox.exe
 ```
 
-GitHub Actions additionally covers Windows Debug and Release, Linux Release,
-Clang and MSVC AddressSanitizer builds, Clang undefined-behavior checks, D3D12
-debug-layer/GPU-validation/DRED execution, shader reproducibility, installed
-package consumption, OpenGL output validation, and benchmark regression gates.
+CI additionally covers Windows Debug/Release and Linux builds, MSVC and Clang
+AddressSanitizer, Clang UBSan, zero-static-TLS checks, D3D12 debug-layer and
+GPU-validation paths, shader reproducibility, installed-package consumption,
+OpenGL output validation, DirectX WARP output tests, and benchmark regression
+gates. The DirectX tests lock D3D12 priority, D3D11 fallback, unavailable
+selection, and both unified renderer paths independently of the current GPU.
 
-Performance statistics distinguish producer build time, instance uploads, CPU
-submission/recording, draw counts, fallbacks, and optional host-resolved GPU
-timestamps. See the benchmark methodology before comparing machines or runners.
+Examples and CLI-only checks:
+
+```powershell
+.\out\build\vs2022\Release\HeniaUIEffectsExample.exe --help
+.\out\build\vs2022\Release\HeniaUIWidgetGallery.exe --help
+```
+
+The visual programs can also render a headless snapshot for controlled manual
+inspection; do not start the interactive sandbox from a build script.
 
 ## Documentation
 
@@ -463,22 +405,23 @@ timestamps. See the benchmark methodology before comparing machines or runners.
 | [Architecture](docs/architecture.md) | Retained composition, immutable publication, threading, input, renderer ownership |
 | [Coordinate spaces and DPI](docs/coordinate-spaces.md) | Logical input, layout units, framebuffer transforms, Per-Monitor V2 integration |
 | [Color and texture contract](docs/color-and-texture-contract.md) | Alpha modes, linear/sRGB transfer, texture synchronization |
-| [D3D12 integration](docs/d3d12-integration.md) | Command-list state, shader packages, descriptors, pipeline libraries |
-| [DirectX integration](docs/directx-integration.md) | D3D12 probing, D3D11 fallback, ownership, and state contracts |
-| [Resource lifetime](docs/resource-lifetime.md) | Context/device recreation, shutdown, abandon, fence ownership |
-| [3D visibility](docs/3d-visibility.md) | Frustum/mask/size filtering and D3D12 indirect submission |
+| [Unified DirectX integration](docs/directx-integration.md) | D3D12 probing, D3D11 fallback, ownership, state behavior, compatibility tests |
+| [D3D12 command-list integration](docs/d3d12-integration.md) | Formats, descriptors, shader packages, pipeline libraries, fences |
+| [Resource lifetime](docs/resource-lifetime.md) | Context/device recreation, external resources, shutdown, abandon, fence ownership |
+| [3D visibility](docs/3d-visibility.md) | Frustum, mask, size filtering, and indirect submission |
 | [Benchmarks](docs/benchmarks.md) | Fixed scenes, metrics, baselines, and regression policy |
 
-## Support and Contributions
+## Support and contributions
 
-Use [GitHub Issues](https://github.com/Caritusy/HeniaUI/issues) for bug reports,
-feature requests, and roadmap discussion. Reproductions should identify the
-backend, build configuration, host ownership boundary, and the smallest input
-or render packet that demonstrates the problem.
+Open a [GitHub Issue](https://github.com/Caritusy/HeniaUI/issues) for a bug,
+feature request, or roadmap question. Include the backend, OS, build
+configuration, host ownership boundary, and the smallest input or packet that
+reproduces the behavior.
 
-Changes should preserve the standalone CMake package, backend-neutral public
-semantics, immutable packet contracts, host ownership, and warning-clean C++23
-builds. Behavior and performance contracts should be covered by focused tests.
+Changes should preserve standalone `add_subdirectory` and installed-package
+usage, backend-neutral semantics, immutable snapshot contracts, host ownership,
+warning-clean C++23 builds, and the zero-TLS policy. Add focused tests for
+behavior and performance contracts.
 
 ## License
 
