@@ -133,7 +133,7 @@ class TextLayoutCache final {
 public:
     explicit TextLayoutCache(
         const FontStore& fonts,
-        const TextShapingBackend* shaping = nullptr) noexcept;
+        const TextShapingBackend* shaping = nullptr);
 
     void reserve(std::size_t entries, std::size_t glyphsPerEntry);
     void setMaximumEntries(std::size_t maximumEntries);
@@ -190,7 +190,7 @@ private:
 
 class TextRenderCache final {
 public:
-    explicit TextRenderCache(const FontStore& fonts) noexcept;
+    explicit TextRenderCache(const FontStore& fonts);
 
     void reserve(std::size_t entries, std::size_t glyphsPerEntry);
     void setMaximumEntries(std::size_t maximumEntries);
@@ -228,7 +228,7 @@ class TextRunCache final {
 public:
     explicit TextRunCache(
         const FontStore& fonts,
-        const TextShapingBackend* shaping = nullptr) noexcept;
+        const TextShapingBackend* shaping = nullptr);
 
     void reserve(std::size_t entries, std::size_t glyphsPerEntry);
     void setMaximumEntries(std::size_t maximumEntries);
