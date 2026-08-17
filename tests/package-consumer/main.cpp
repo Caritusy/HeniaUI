@@ -22,8 +22,11 @@
 #include <henia/ui/widget/controls/TreeView.h>
 #if defined(_WIN32)
 #include <henia/backend/d3d12/D3D12ShaderPackage.h>
+#include <henia/backend/directx/DirectXBackend.h>
 #include <henia/gfx/backend/d3d12/D3D12RenderDevice.h>
+#include <henia/gfx/backend/directx/DirectXRenderDevice.h>
 #include <henia/ui/backend/d3d12/D3D12Renderer.h>
+#include <henia/ui/backend/directx/DirectXRenderer.h>
 #endif
 
 #include <cstdlib>
@@ -138,6 +141,12 @@ int main() {
         .sampleCount = 4,
         .sampleQuality = 0,
     };
+    henia::ui::DirectXRenderer directXUi;
+    henia::gfx::DirectXRenderDevice directXGfx;
+    const auto fallbackApi = henia::backend::directx::select({
+        .d3d12Available = false,
+        .d3d11Available = true,
+    });
 #endif
     return packet.instances().size() == 6 && packet.statistics().effectInstances == 2
         && boxes.boxes().size() == 1
@@ -170,6 +179,8 @@ int main() {
         && !uiShaders.runtimeCompilationEnabled && !gfxShaders.runtimeCompilationEnabled
         && uiMsaa.sampleCount == 4 && uiMsaa.sampleQuality == 0
         && gfxMsaa.sampleCount == 4 && gfxMsaa.sampleQuality == 0
+        && !directXUi.initialized() && !directXGfx.initialized()
+        && fallbackApi == henia::backend::directx::Api::D3D11
 #endif
         ? EXIT_SUCCESS
         : EXIT_FAILURE;

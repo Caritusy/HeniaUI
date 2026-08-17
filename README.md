@@ -30,7 +30,8 @@
 HeniaUI is a compact, standalone library for building native retained user
 interfaces and high-volume 3D overlays. A retained widget tree or low-level
 display list is compiled into immutable render packets, then submitted through
-host-integrated OpenGL 3.3 or Direct3D 12 backends.
+host-integrated OpenGL 3.3 or unified DirectX backends with D3D12-to-D3D11
+fallback.
 
 The library does not own your window, graphics context, swap chain, back buffer,
 command queue, or application loop. It does not hook a host process, require
@@ -53,8 +54,9 @@ must remain explicit.
   and glyphs preserve paint order while compatible work shares draw batches.
 - **Immutable publication.** `RenderPacket` and `InstanceBatch` are cheap,
   shareable snapshot handles with observable identities and revisions.
-- **Host-owned integration.** Renderers consume an existing OpenGL context or
-  D3D12 command list. They do not hide windows, queues, waits, or presentation.
+- **Host-owned integration.** Renderers consume an existing OpenGL context,
+  D3D11 device context, or D3D12 command list. They do not hide windows, queues,
+  waits, or presentation.
 - **Predictable frame paths.** Fixed-capacity modes, bounded diagnostics,
   fence-owned upload slots, dirty ranges, and explicit fallback counters make
   performance behavior testable.
@@ -134,6 +136,7 @@ The repository also builds:
 | Core and Gfx | Platform-neutral; continuously built on Windows and Linux |
 | Win32 adapters | Windows SDK, DirectWrite, GDI, IMM32, and User32 |
 | OpenGL backend | Windows host with an already-current compatible OpenGL 3.3 context |
+| DirectX backend | Windows host; probes D3D12 first and falls back to D3D11 feature level 11 |
 | D3D12 backend | Windows host with a D3D12 device and host-owned command submission |
 
 ### Build and test on Windows
@@ -199,7 +202,7 @@ target_link_libraries(MyApplication PRIVATE
     HeniaUI::Gfx
     HeniaUI::Win32
     HeniaUI::OpenGL
-    HeniaUI::D3D12
+    HeniaUI::DirectX
 )
 ```
 
@@ -211,6 +214,7 @@ target_link_libraries(MyApplication PRIVATE
 | `HeniaUI::Gfx` | Generic 3D instance data, visibility, shape batches | All platforms |
 | `HeniaUI::Win32` | Font loading, clipboard, input, capture, and IME adapter | Windows |
 | `HeniaUI::OpenGL` | 2D renderer and 3D render device | Windows |
+| `HeniaUI::DirectX` | Unified D3D12-first probe plus D3D11/D3D12 UI and gfx paths | Windows |
 | `HeniaUI::D3D12` | 2D renderer and 3D render device | Windows |
 
 ### CMake options
@@ -460,6 +464,7 @@ timestamps. See the benchmark methodology before comparing machines or runners.
 | [Coordinate spaces and DPI](docs/coordinate-spaces.md) | Logical input, layout units, framebuffer transforms, Per-Monitor V2 integration |
 | [Color and texture contract](docs/color-and-texture-contract.md) | Alpha modes, linear/sRGB transfer, texture synchronization |
 | [D3D12 integration](docs/d3d12-integration.md) | Command-list state, shader packages, descriptors, pipeline libraries |
+| [DirectX integration](docs/directx-integration.md) | D3D12 probing, D3D11 fallback, ownership, and state contracts |
 | [Resource lifetime](docs/resource-lifetime.md) | Context/device recreation, shutdown, abandon, fence ownership |
 | [3D visibility](docs/3d-visibility.md) | Frustum/mask/size filtering and D3D12 indirect submission |
 | [Benchmarks](docs/benchmarks.md) | Fixed scenes, metrics, baselines, and regression policy |
