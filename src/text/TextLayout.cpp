@@ -53,7 +53,7 @@ void mixHash(std::uint64_t& hash, std::uint64_t value) noexcept {
 
 TextLayoutCache::TextLayoutCache(
     const FontStore& fonts,
-    const TextShapingBackend* shaping) noexcept
+    const TextShapingBackend* shaping)
     : mFonts(&fonts), mShaping(shaping) {}
 
 void TextLayoutCache::reserve(std::size_t entries, std::size_t glyphsPerEntry) {
@@ -348,7 +348,7 @@ void TextLayoutCache::removeIndex(std::uint64_t hash, std::size_t entryIndex) {
     }
 }
 
-TextRenderCache::TextRenderCache(const FontStore& fonts) noexcept : mFonts(&fonts) {}
+TextRenderCache::TextRenderCache(const FontStore& fonts) : mFonts(&fonts) {}
 
 void TextRenderCache::reserve(std::size_t entries, std::size_t glyphsPerEntry) {
     mEntries.reserve(entries);
@@ -450,7 +450,7 @@ std::uint64_t TextRenderCache::revisionHash(
 
 TextRunCache::TextRunCache(
     const FontStore& fonts,
-    const TextShapingBackend* shaping) noexcept
+    const TextShapingBackend* shaping)
     : mLayouts(fonts, shaping), mRendering(fonts) {}
 
 void TextRunCache::reserve(std::size_t entries, std::size_t glyphsPerEntry) {

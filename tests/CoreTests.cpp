@@ -32,6 +32,10 @@ static_assert(!std::is_move_assignable_v<OpenGlRenderer>);
 static_assert(std::is_nothrow_copy_constructible_v<RenderPacket>);
 static_assert(std::is_nothrow_move_constructible_v<RenderPacket>);
 static_assert(!std::is_copy_constructible_v<RenderPacketBuilder>);
+static_assert(!std::is_nothrow_constructible_v<TextLayoutCache, const FontStore&>);
+static_assert(!std::is_nothrow_constructible_v<TextRenderCache, const FontStore&>);
+static_assert(!std::is_nothrow_constructible_v<TextRunCache, const FontStore&>);
+static_assert(std::is_nothrow_constructible_v<TextPainter, TextRunCache&>);
 
 [[noreturn]] void fail(std::string_view message) {
     std::cerr << "FAILED: " << message << '\n';
