@@ -181,6 +181,8 @@ bool TextLayoutCache::build(
         if (!shapedSuccessfully) return false;
 
         float cursor = 0.0F;
+        float visualMinimumX = 0.0F;
+        float visualMaximumX = 0.0F;
         for (const TextShapingGlyph& item : shaped) {
             if (item.byteBegin < lineBegin || item.byteEnd <= item.byteBegin
                 || item.byteEnd > lineEnd || !std::isfinite(item.advance)
@@ -206,6 +208,8 @@ bool TextLayoutCache::build(
             };
             output.caretStops.push_back({item.byteBegin, {cursor, lineY}, lineHeight, line});
             if (glyph->size.x > 0.0F && glyph->size.y > 0.0F) {
+                visualMinimumX = std::min(visualMinimumX, glyphMin.x);
+                visualMaximumX = std::max(visualMaximumX, glyphMax.x);
                 output.glyphs.push_back({
                     .font = item.font,
                     .glyphId = item.glyphId,
@@ -219,7 +223,16 @@ bool TextLayoutCache::build(
             cursor += item.advance;
             output.caretStops.push_back({item.byteEnd, {cursor, lineY}, lineHeight, line});
         }
-        maximumWidth = std::max(maximumWidth, cursor);
+        // Advance width is the logical caret extent, but it is not always the
+        // visible extent.  DirectWrite can return a bearing/bitmap that
+        // overhangs either side of that advance (CJK and italic Latin are
+        // common examples).  Include that overhang in measured layout width
+        // so right-aligned panels and clipped controls reserve the pixels that
+        // the renderer will actually submit.
+        const float visualWidth = std::max(
+            0.0F,
+            visualMaximumX - std::min(visualMinimumX, 0.0F));
+        maximumWidth = std::max(maximumWidth, std::max(cursor, visualWidth));
         output.caretStops.push_back({lineEnd, {cursor, lineY}, lineHeight, line});
 
         if (newline == std::string_view::npos) break;

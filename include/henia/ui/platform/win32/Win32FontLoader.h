@@ -21,6 +21,9 @@ struct UnicodeRange final {
 
 struct Win32FontRequest final {
     std::wstring_view family = L"Segoe UI";
+    // Optional explicit font file. When provided, DirectWrite creates the
+    // face from this file instead of relying on the process/system collection.
+    std::wstring_view fontFilePath{};
     std::uint32_t pixelHeight = 18;
     std::uint32_t atlasWidth = 1024;
     std::uint32_t atlasHeight = 1024;

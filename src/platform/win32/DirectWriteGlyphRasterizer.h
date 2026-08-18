@@ -89,6 +89,37 @@ struct DirectWriteGlyphBitmap final {
     return SUCCEEDED(font->CreateFontFace(&output));
 }
 
+[[nodiscard]] inline bool makeDirectWriteFaceFromFile(
+    IDWriteFactory& factory,
+    std::wstring_view filePath,
+    ComPtr<IDWriteFontFace>& output) {
+    if (filePath.empty()) return false;
+    const std::wstring path(filePath);
+    ComPtr<IDWriteFontFile> fontFile;
+    if (FAILED(factory.CreateFontFileReference(
+            path.c_str(), nullptr, &fontFile))) {
+        return false;
+    }
+    BOOL supported = FALSE;
+    DWRITE_FONT_FILE_TYPE fileType = DWRITE_FONT_FILE_TYPE_UNKNOWN;
+    DWRITE_FONT_FACE_TYPE faceType = DWRITE_FONT_FACE_TYPE_UNKNOWN;
+    UINT32 faceCount = 0;
+    if (FAILED(fontFile->Analyze(
+            &supported, &fileType, &faceType, &faceCount))
+        || supported == FALSE || faceCount == 0
+        || faceType == DWRITE_FONT_FACE_TYPE_UNKNOWN) {
+        return false;
+    }
+    IDWriteFontFile* files[] = {fontFile.Get()};
+    return SUCCEEDED(factory.CreateFontFace(
+        faceType,
+        1,
+        files,
+        0,
+        DWRITE_FONT_SIMULATIONS_NONE,
+        &output));
+}
+
 [[nodiscard]] inline DirectWriteGlyphBitmap rasterizeDirectWriteGlyph(
     IDWriteFactory& factory,
     IDWriteFontFace& face,

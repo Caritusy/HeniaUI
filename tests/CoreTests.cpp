@@ -1283,6 +1283,37 @@ void testFallbackShapingAndDynamicGlyphPages() {
         "dynamic atlas teardown did not restore prior glyph metrics exactly");
 }
 
+void testTextMetricsIncludeGlyphOverhang() {
+    TextureStore textures;
+    const std::array<std::byte, 16> pixels{};
+    const TextureHandle atlas = textures.create(TextureFormat::Alpha8, 4, 4, 4, pixels);
+    require(atlas.valid(), "overhang test atlas creation failed");
+
+    FontStore fonts;
+    const FontHandle font = fonts.add({
+        .atlas = atlas,
+        .pixelSize = 10.0F,
+        .ascent = 8.0F,
+        .descent = 2.0F,
+        .lineGap = 1.0F,
+        .glyphs = {
+            {
+                .codepoint = U'I',
+                .uv = {{0.0F, 0.0F}, {0.25F, 0.25F}},
+                .size = {12.0F, 8.0F},
+                .bearing = {4.0F, 7.0F},
+                .advance = 8.0F,
+            },
+        },
+    });
+    require(font.valid(), "overhang test font creation failed");
+
+    TextRunCache cache(fonts);
+    TextPainter painter(cache);
+    const TextMetrics metrics = painter.measure(font, 10.0F, "I");
+    require(metrics.width == 16.0F, "visual glyph overhang was omitted from text metrics");
+}
+
 void testTransactionalGlyphAndRegionBatches() {
     TextureStore regionTextures;
     const std::array<std::byte, 64> emptyPixels{};
@@ -1802,6 +1833,7 @@ int main() {
     testFontDefinitionValidationAndGlyphIdIndex();
     testTextRunsAreCachedAndBatched();
     testFallbackShapingAndDynamicGlyphPages();
+    testTextMetricsIncludeGlyphOverhang();
     testTransactionalGlyphAndRegionBatches();
     testUtf8EditorCompositionClipboardAndHistory();
     testResourceLifetimeAndTextureBackingPolicies();

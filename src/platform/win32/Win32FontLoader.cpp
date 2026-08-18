@@ -161,16 +161,22 @@ FontHandle Win32FontLoader::load(
             reinterpret_cast<IUnknown**>(directWriteFactory.GetAddressOf())))) {
         return {};
     }
-    detail::ComPtr<IDWriteFontCollection> directWriteCollection;
-    if (FAILED(directWriteFactory->GetSystemFontCollection(
-            &directWriteCollection, FALSE))) {
-        return {};
-    }
     detail::ComPtr<IDWriteFontFace> directWriteFace;
-    if (!detail::makeDirectWriteFace(
-            *directWriteCollection.Get(), request.family, directWriteFace)
-        && !makeDirectWriteFaceFromGdi(
-            *directWriteFactory.Get(), request.family, request.pixelHeight, directWriteFace)) {
+    if (!detail::makeDirectWriteFaceFromFile(
+            *directWriteFactory.Get(), request.fontFilePath, directWriteFace)) {
+        detail::ComPtr<IDWriteFontCollection> directWriteCollection;
+        if (FAILED(directWriteFactory->GetSystemFontCollection(
+                &directWriteCollection, FALSE))) {
+            return {};
+        }
+        if (!detail::makeDirectWriteFace(
+                *directWriteCollection.Get(), request.family, directWriteFace)
+            && !makeDirectWriteFaceFromGdi(
+                *directWriteFactory.Get(), request.family, request.pixelHeight, directWriteFace)) {
+            return {};
+        }
+    }
+    if (directWriteFace == nullptr) {
         return {};
     }
     DWRITE_FONT_METRICS directWriteMetrics{};
